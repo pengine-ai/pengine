@@ -1,6 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { WizardLayout } from "./WizardLayout";
 import { StyledQrCode } from "./StyledQrCode";
+
+const PENGINE_API = "http://127.0.0.1:21516";
 
 export const SETUP_STEPS = [
   {
@@ -16,11 +18,11 @@ export const SETUP_STEPS = [
   {
     title: "Pengine local",
     summary: "Install and start the Pengine runtime on this computer.",
-    duration: "~2 min",
+    duration: "~1 min",
   },
   {
     title: "Connect",
-    summary: "Pengine links to your bot automatically using the bot ID from your token.",
+    summary: "Hand off your bot token to the local Pengine app.",
     duration: "~30 sec",
   },
 ] as const;
@@ -51,33 +53,102 @@ type SetupWizardProps = {
 export function SetupWizard({ onStepChange, onCompleteSetup }: SetupWizardProps) {
   const [step, setStep] = useState(0);
   const [botToken, setBotToken] = useState("");
-  const [mockOllamaReady, setMockOllamaReady] = useState(false);
-  const [mockPengineLocalReady, setMockPengineLocalReady] = useState(false);
-  const [mockBotLinked, setMockBotLinked] = useState(false);
+  const [ollamaAcknowledged, setOllamaAcknowledged] = useState(false);
+  const [pengineReachable, setPengineReachable] = useState<boolean | null>(null);
+  const [pengineChecking, setPengineChecking] = useState(false);
+  const [connectStatus, setConnectStatus] = useState<
+    "idle" | "connecting" | "connected" | "error"
+  >("idle");
+  const [connectError, setConnectError] = useState("");
+  const [verifiedBot, setVerifiedBot] = useState<{
+    bot_id: string;
+    bot_username: string;
+  } | null>(null);
   const [botUsername, setBotUsername] = useState("");
+  const [copiedUri, setCopiedUri] = useState(false);
 
   const status = useMemo(() => tokenStatus(botToken), [botToken]);
   const stepTitles = SETUP_STEPS.map((item) => item.title);
   const botId = useMemo(() => parseBotIdFromToken(botToken), [botToken]);
+
   const telegramBotUrl = useMemo(() => {
-    const u = botUsername.replace(/^@+/, "").trim();
-    if (u) return `https://t.me/${u}`;
+    const name = verifiedBot?.bot_username || botUsername.replace(/^@+/, "").trim();
+    if (name) return `https://t.me/${name}`;
     return "https://t.me/botfather";
-  }, [botUsername]);
+  }, [botUsername, verifiedBot]);
 
   const canContinueStep = useMemo(() => {
     if (step === 0) return status === "valid";
-    if (step === 1) return mockOllamaReady;
-    if (step === 2) return mockPengineLocalReady;
-    if (step === 3) return mockBotLinked;
+    if (step === 1) return ollamaAcknowledged;
+    if (step === 2) return pengineReachable === true;
+    if (step === 3) return connectStatus === "connected";
     return false;
-  }, [step, status, mockOllamaReady, mockPengineLocalReady, mockBotLinked]);
+  }, [step, status, ollamaAcknowledged, pengineReachable, connectStatus]);
 
   const canGoNext = step < stepTitles.length - 1 && canContinueStep;
 
   useEffect(() => {
     onStepChange?.(step);
   }, [onStepChange, step]);
+
+  const checkPengineHealth = useCallback(async () => {
+    setPengineChecking(true);
+    try {
+      const resp = await fetch(`${PENGINE_API}/v1/health`, { signal: AbortSignal.timeout(3000) });
+      if (resp.ok) {
+        setPengineReachable(true);
+      } else {
+        setPengineReachable(false);
+      }
+    } catch {
+      setPengineReachable(false);
+    } finally {
+      setPengineChecking(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (step === 2) {
+      checkPengineHealth();
+    }
+  }, [step, checkPengineHealth]);
+
+  const handleConnect = useCallback(async () => {
+    setConnectStatus("connecting");
+    setConnectError("");
+    try {
+      const resp = await fetch(`${PENGINE_API}/v1/connect`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ bot_token: botToken.trim() }),
+        signal: AbortSignal.timeout(15000),
+      });
+      const data = await resp.json();
+      if (resp.ok) {
+        setConnectStatus("connected");
+        setVerifiedBot({ bot_id: data.bot_id, bot_username: data.bot_username });
+      } else {
+        setConnectStatus("error");
+        setConnectError(data.error || "Connection failed");
+      }
+    } catch (err) {
+      setConnectStatus("error");
+      setConnectError(
+        err instanceof Error ? err.message : "Could not reach Pengine. Is the app running?",
+      );
+    }
+  }, [botToken]);
+
+  const connectionUri = `${PENGINE_API}/v1/connect`;
+  const connectionPayload = JSON.stringify({ bot_token: botToken.trim() }, null, 2);
+
+  const handleCopyUri = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(`curl -X POST ${connectionUri} -H "Content-Type: application/json" -d '${connectionPayload}'`);
+      setCopiedUri(true);
+      setTimeout(() => setCopiedUri(false), 2000);
+    } catch { /* clipboard not available */ }
+  }, [connectionUri, connectionPayload]);
 
   return (
     <WizardLayout
@@ -89,6 +160,7 @@ export function SetupWizard({ onStepChange, onCompleteSetup }: SetupWizardProps)
       canGoBack={step > 0}
       canGoNext={canGoNext}
     >
+      {/* Step 1: Create bot */}
       {step === 0 && (
         <div className="grid gap-8 lg:grid-cols-[1.05fr_0.95fr]">
           <div className="space-y-5">
@@ -98,8 +170,7 @@ export function SetupWizard({ onStepChange, onCompleteSetup }: SetupWizardProps)
                 Create your Telegram bot
               </h2>
               <p className="mt-3 subtle-copy">
-                Open BotFather, create a new bot, then paste the token here. You
-                will need it for the final connect step.
+                Open BotFather, create a new bot, then paste the token here.
               </p>
             </div>
             <a
@@ -139,21 +210,20 @@ export function SetupWizard({ onStepChange, onCompleteSetup }: SetupWizardProps)
             <p className="mono-label">Why</p>
             <p className="mt-4 text-sm text-slate-200">
               The token encodes your <strong className="text-slate-100">bot ID</strong>.
-              Later, Pengine uses that ID to pair with your bot automatically. No
-              extra linking form in production.
+              Pengine uses that ID to pair with your bot automatically.
             </p>
           </div>
         </div>
       )}
 
+      {/* Step 2: Ollama */}
       {step === 1 && (
         <div className="grid gap-8 lg:grid-cols-[1fr_1fr]">
           <div>
             <p className="mono-label">Step 2</p>
             <h2 className="mt-2 text-3xl font-extrabold text-white">Install Ollama</h2>
             <p className="mt-3 subtle-copy">
-              Ollama runs models on this machine. Install it, then use the demo
-              button to continue (real health checks can replace this later).
+              Ollama runs AI models on your machine. Install it and pull a model before continuing.
             </p>
             <pre className="mt-5 overflow-x-auto rounded-2xl border border-white/10 bg-slate-950/70 p-4 font-mono text-sm text-emerald-200">
               <code>{`curl -fsSL https://ollama.com/install.sh | sh
@@ -161,14 +231,16 @@ ollama pull llama3.2`}</code>
             </pre>
             <button
               type="button"
+              data-testid="ollama-acknowledge"
               className="secondary-button mt-4 w-full max-w-md rounded-xl text-xs"
-              onClick={() => setMockOllamaReady(true)}
+              onClick={() => setOllamaAcknowledged(true)}
+              disabled={ollamaAcknowledged}
             >
-              Mark Ollama ready (demo)
+              {ollamaAcknowledged ? "Ollama ready" : "I've installed Ollama"}
             </button>
-            {mockOllamaReady && (
+            {ollamaAcknowledged && (
               <p className="mt-3 font-mono text-xs text-emerald-300">
-                Mock: Ollama OK at localhost:11434
+                Ready to continue.
               </p>
             )}
           </div>
@@ -179,36 +251,48 @@ ollama pull llama3.2`}</code>
             <ul className="mt-3 list-inside list-disc space-y-2 text-sm text-slate-100">
               <li>Installer finished without errors</li>
               <li>At least one model pulled (e.g. llama3.2)</li>
-              <li>Then use the demo button to continue</li>
             </ul>
           </div>
         </div>
       )}
 
+      {/* Step 3: Pengine local */}
       {step === 2 && (
         <div className="grid gap-8 lg:grid-cols-[1fr_1fr]">
           <div>
             <p className="mono-label">Step 3</p>
-            <h2 className="mt-2 text-3xl font-extrabold text-white">Install Pengine locally</h2>
+            <h2 className="mt-2 text-3xl font-extrabold text-white">Start Pengine locally</h2>
             <p className="mt-3 subtle-copy">
-              Run the Pengine agent on this computer (browser tab or Tauri app).
-              For now this is a mock step: confirm the local runtime is “started”.
+              The Pengine desktop app must be running on this machine. It hosts the
+              bot service on localhost so messages keep flowing even after you close
+              this browser tab.
             </p>
             <div className="mt-5 rounded-2xl border border-white/10 bg-white/5 p-4 font-mono text-xs text-(--mid)">
-              <p>Future: download / CLI / tray app</p>
-              <p className="mt-2 text-slate-300">This page already is the web runtime.</p>
-            </div>
-            <button
-              type="button"
-              className="secondary-button mt-4 w-full max-w-md rounded-xl text-xs"
-              onClick={() => setMockPengineLocalReady(true)}
-            >
-              Mark Pengine local ready (demo)
-            </button>
-            {mockPengineLocalReady && (
-              <p className="mt-3 font-mono text-xs text-cyan-300">
-                Mock: local Pengine process active
+              <p>
+                Checking <code className="text-slate-300">{PENGINE_API}/v1/health</code>…
               </p>
+            </div>
+            {pengineChecking && (
+              <p className="mt-3 font-mono text-xs text-yellow-300">Checking…</p>
+            )}
+            {pengineReachable === true && (
+              <p className="mt-3 font-mono text-xs text-emerald-300">
+                Pengine is running on localhost.
+              </p>
+            )}
+            {pengineReachable === false && (
+              <div className="mt-3 space-y-2">
+                <p className="font-mono text-xs text-rose-300">
+                  Could not reach Pengine. Start the desktop app and retry.
+                </p>
+                <button
+                  type="button"
+                  className="secondary-button w-full max-w-md rounded-xl text-xs"
+                  onClick={checkPengineHealth}
+                >
+                  Retry health check
+                </button>
+              </div>
             )}
           </div>
           <div className="rounded-2xl border border-cyan-300/20 bg-cyan-300/10 p-5">
@@ -216,13 +300,14 @@ ollama pull llama3.2`}</code>
               What happens next
             </p>
             <p className="mt-3 text-sm text-slate-100">
-              Next step connects your Telegram bot to this runtime using the bot ID
-              extracted from your token.
+              The next step hands off your bot token to the local Pengine process.
+              The bot will start polling Telegram automatically.
             </p>
           </div>
         </div>
       )}
 
+      {/* Step 4: Connect */}
       {step === 3 && (
         <div className="grid gap-8 lg:grid-cols-[1fr_1fr]">
           <div>
@@ -231,58 +316,81 @@ ollama pull llama3.2`}</code>
               Connect bot to Pengine
             </h2>
             <p className="mt-3 subtle-copy">
-              Pengine reads your <strong className="text-slate-200">bot ID</strong> from
-              the token and pairs automatically. Scan the QR to open the bot in
-              Telegram, or use the link. Then simulate the handshake (mock).
+              Send your bot token to the local Pengine service. It will verify the
+              token with Telegram and start listening for messages.
             </p>
             <div className="mt-5 rounded-2xl border border-white/10 bg-slate-950/60 p-4 font-mono text-sm text-slate-100">
               <p>
                 Bot ID:{" "}
                 <span className="text-(--yellow)">{botId ?? "— paste token in step 1"}</span>
               </p>
-              {botId && (
-                <p className="mt-2 text-xs text-(--mid)">
-                  Auto-link target: <code className="text-slate-300">{botId}</code>
-                </p>
-              )}
             </div>
-            <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
-              <label
-                htmlFor="bot-username-connect"
-                className="font-mono text-xs uppercase tracking-[0.14em] text-(--mid)"
+
+            {connectStatus === "idle" && (
+              <button
+                type="button"
+                data-testid="connect-to-pengine"
+                className="primary-button mt-6 w-full max-w-md rounded-xl text-xs"
+                onClick={handleConnect}
               >
-                Bot username (for QR link)
-              </label>
-              <input
-                id="bot-username-connect"
-                className="mt-3 w-full rounded-xl border border-white/10 bg-slate-950/70 px-4 py-3 text-slate-100 outline-none placeholder:text-(--dim) focus:border-cyan-300/40"
-                value={botUsername}
-                onChange={(event) => setBotUsername(event.target.value)}
-                placeholder="@YourPengineBot"
-              />
-              <p className="mt-2 subtle-copy">
-                Auto-link uses bot ID from your token; this field only sets where the QR
-                points in Telegram.
-              </p>
-            </div>
-            <div className="mt-6 flex justify-center rounded-3xl border border-white/10 bg-white p-5">
-              <StyledQrCode value={telegramBotUrl} size={208} />
-            </div>
-            <p className="mt-3 text-center font-mono text-[11px] text-(--dim)">
-              Scan to open Telegram (set username above for your bot chat)
-            </p>
-            <button
-              type="button"
-              className="secondary-button mt-6 w-full max-w-md rounded-xl text-xs"
-              onClick={() => setMockBotLinked(true)}
-            >
-              Simulate bot linked to Pengine (demo)
-            </button>
-            {mockBotLinked && (
-              <p className="mt-3 font-mono text-xs text-emerald-300">
-                Mock: Telegram {"<->"} Pengine connected for bot {botId ?? "—"}
+                Connect to Pengine
+              </button>
+            )}
+            {connectStatus === "connecting" && (
+              <p className="mt-4 font-mono text-xs text-yellow-300">
+                Verifying token with Telegram…
               </p>
             )}
+            {connectStatus === "error" && (
+              <div className="mt-4 space-y-2">
+                <p className="font-mono text-xs text-rose-300">{connectError}</p>
+                <button
+                  type="button"
+                  className="secondary-button w-full max-w-md rounded-xl text-xs"
+                  onClick={handleConnect}
+                >
+                  Retry connection
+                </button>
+              </div>
+            )}
+            {connectStatus === "connected" && verifiedBot && (
+              <div className="mt-4 space-y-3">
+                <p className="font-mono text-xs text-emerald-300">
+                  Connected as @{verifiedBot.bot_username} (ID: {verifiedBot.bot_id})
+                </p>
+                <div className="mt-4 rounded-2xl border border-white/10 bg-white/5 p-4">
+                  <label
+                    htmlFor="bot-username-connect"
+                    className="font-mono text-xs uppercase tracking-[0.14em] text-(--mid)"
+                  >
+                    Bot username (for QR link)
+                  </label>
+                  <input
+                    id="bot-username-connect"
+                    className="mt-3 w-full rounded-xl border border-white/10 bg-slate-950/70 px-4 py-3 text-slate-100 outline-none placeholder:text-(--dim) focus:border-cyan-300/40"
+                    value={botUsername || verifiedBot.bot_username}
+                    onChange={(event) => setBotUsername(event.target.value)}
+                    placeholder="@YourPengineBot"
+                  />
+                </div>
+                <div className="mt-4 flex justify-center rounded-3xl border border-white/10 bg-white p-5">
+                  <StyledQrCode value={telegramBotUrl} size={208} />
+                </div>
+                <p className="text-center font-mono text-[11px] text-(--dim)">
+                  Scan to open your bot in Telegram
+                </p>
+              </div>
+            )}
+
+            <div className="mt-6">
+              <button
+                type="button"
+                className="font-mono text-[11px] text-(--dim) underline decoration-white/20 underline-offset-4 hover:text-slate-300"
+                onClick={handleCopyUri}
+              >
+                {copiedUri ? "Copied!" : "Copy connection command (curl)"}
+              </button>
+            </div>
           </div>
           <div className="space-y-4">
             <div className="rounded-2xl border border-white/10 bg-white/5 p-5">
@@ -300,12 +408,12 @@ ollama pull llama3.2`}</code>
             </div>
             <div className="rounded-3xl border border-emerald-300/20 bg-emerald-300/10 p-5">
               <div className="space-y-3 font-mono text-sm text-slate-100">
-                <p>✓ Bot token saved</p>
-                <p>✓ Ollama (mock)</p>
-                <p>✓ Pengine local (mock)</p>
-                <p>{mockBotLinked ? "✓ Bot linked (mock)" : "○ Link pending"}</p>
+                <p>{status === "valid" ? "✓" : "○"} Bot token saved</p>
+                <p>{ollamaAcknowledged ? "✓" : "○"} Ollama ready</p>
+                <p>{pengineReachable ? "✓" : "○"} Pengine running</p>
+                <p>{connectStatus === "connected" ? "✓" : "○"} Bot connected</p>
               </div>
-              {mockBotLinked && (
+              {connectStatus === "connected" && (
                 <button
                   type="button"
                   className="primary-button mt-5 w-full rounded-xl text-xs"

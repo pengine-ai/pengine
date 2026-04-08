@@ -9,7 +9,7 @@ const requirements = [
   "Telegram account",
   "Bot token from BotFather",
   "Ollama installed on this machine",
-  "Pengine desktop or web runtime",
+  "Pengine desktop app installed",
 ];
 
 function getFlowCardClasses(index: number, activeStep: number) {
@@ -111,9 +111,8 @@ export function SetupPage() {
               <div className="panel p-5">
                 <p className="mono-label">Runtime note</p>
                 <p className="mt-3 subtle-copy">
-                  Keep this page open while testing the bot. Today it acts as the
-                  setup surface for the runtime, and later the Tauri shell can take
-                  over the always-on part.
+                  The Pengine desktop app must be running for the bot to receive
+                  messages. You can close this browser tab after setup.
                 </p>
               </div>
               <TerminalPreview />
