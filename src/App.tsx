@@ -6,14 +6,10 @@ import { LandingPage } from "./pages/LandingPage";
 import { SetupPage } from "./pages/SetupPage";
 import { useAppSessionStore } from "./stores/appSessionStore";
 
-/**
- * Once after load: if there is an active connection (persisted or reported by
- * the local app), go to the dashboard. Does not run again on navigation.
- */
+/** One-shot: sync dashboard route with persisted session or running local app. */
 function StartupDashboardRedirect() {
   const navigate = useNavigate();
   const connectDevice = useAppSessionStore((state) => state.connectDevice);
-  /** Ensures redirect logic runs only once on first paint — never on later navigations to Home. */
   const startupDone = useRef(false);
 
   useEffect(() => {

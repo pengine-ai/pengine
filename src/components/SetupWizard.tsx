@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { OLLAMA_API_BASE, PENGINE_API_BASE } from "../config";
+import { fetchOllamaModel } from "../ollamaStatus";
 import { useAppSessionStore } from "../stores/appSessionStore";
 import { StyledQrCode } from "./StyledQrCode";
 import { WizardLayout } from "./WizardLayout";
@@ -100,34 +101,9 @@ export function SetupWizard({ onStepChange, onCompleteSetup }: SetupWizardProps)
     setOllamaReachable(null);
     setOllamaModel(null);
     try {
-      // Check running models first
-      const psResp = await fetch(`${OLLAMA_API_BASE}/api/ps`, {
-        signal: AbortSignal.timeout(3000),
-      });
-      if (psResp.ok) {
-        const psData = await psResp.json();
-        const loadedModel = psData.models?.[0]?.name;
-        if (loadedModel) {
-          setOllamaReachable(true);
-          setOllamaModel(loadedModel);
-          setOllamaChecking(false);
-          return;
-        }
-      }
-      // Fallback: check pulled models
-      const tagsResp = await fetch(`${OLLAMA_API_BASE}/api/tags`, {
-        signal: AbortSignal.timeout(3000),
-      });
-      if (tagsResp.ok) {
-        setOllamaReachable(true);
-        const tagsData = await tagsResp.json();
-        const firstModel = tagsData.models?.[0]?.name ?? null;
-        setOllamaModel(firstModel);
-      } else {
-        setOllamaReachable(false);
-      }
-    } catch {
-      setOllamaReachable(false);
+      const { reachable, model } = await fetchOllamaModel(3000);
+      setOllamaReachable(reachable);
+      setOllamaModel(model);
     } finally {
       setOllamaChecking(false);
     }

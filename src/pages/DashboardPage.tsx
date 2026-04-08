@@ -2,7 +2,8 @@ import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { TerminalPreview } from "../components/TerminalPreview";
 import { TopMenu } from "../components/TopMenu";
-import { OLLAMA_API_BASE, PENGINE_API_BASE } from "../config";
+import { PENGINE_API_BASE } from "../config";
+import { fetchOllamaModel } from "../ollamaStatus";
 import { useAppSessionStore } from "../stores/appSessionStore";
 
 type ServiceInfo = {
@@ -42,32 +43,7 @@ export function DashboardPage() {
       // Pengine API not reachable (app stopped or wrong port)
     }
 
-    let ollamaUp = false;
-    let ollamaModel: string | null = null;
-    try {
-      // Check for a model currently loaded in memory
-      const psResp = await fetch(`${OLLAMA_API_BASE}/api/ps`, {
-        signal: AbortSignal.timeout(2000),
-      });
-      if (psResp.ok) {
-        ollamaUp = true;
-        const psData = await psResp.json();
-        ollamaModel = psData.models?.[0]?.name ?? null;
-      }
-      // Fallback to first pulled model if nothing is loaded yet
-      if (!ollamaModel) {
-        const tagsResp = await fetch(`${OLLAMA_API_BASE}/api/tags`, {
-          signal: AbortSignal.timeout(2000),
-        });
-        if (tagsResp.ok) {
-          ollamaUp = true;
-          const tagsData = await tagsResp.json();
-          ollamaModel = tagsData.models?.[0]?.name ?? null;
-        }
-      }
-    } catch {
-      // Ollama not reachable
-    }
+    const { reachable: ollamaUp, model: ollamaModel } = await fetchOllamaModel(2000);
 
     setServices([
       {

@@ -142,16 +142,13 @@ async fn text_handler(bot: Bot, msg: Message, state: AppState) -> ResponseResult
 async fn send_inference_unavailable(bot: &Bot, msg: &Message, state: &AppState) {
     const TEXT: &str =
         "Sorry, local inference is unavailable right now. Please try again later.";
-    match bot.send_message(msg.chat.id, TEXT).await {
-        Ok(_) => {}
-        Err(e) => {
-            state
-                .emit_log(
-                    "run",
-                    &format!("could not send inference-unavailable reply: {e}"),
-                )
-                .await;
-        }
+    if let Err(e) = bot.send_message(msg.chat.id, TEXT).await {
+        state
+            .emit_log(
+                "run",
+                &format!("could not send inference-unavailable reply: {e}"),
+            )
+            .await;
     }
 }
 
