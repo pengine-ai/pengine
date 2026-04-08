@@ -7,7 +7,9 @@ use axum::routing::{delete, get, post};
 use axum::Router;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use socket2::{Domain, Socket, Type};
 use std::convert::Infallible;
+use std::time::Duration;
 use tokio_stream::{Stream, StreamExt};
 use tower_http::cors::{Any, CorsLayer};
 
@@ -61,33 +63,51 @@ pub async fn start_server(state: AppState) {
     axum::serve(listener, app).await.expect("axum serve failed");
 }
 
-async fn retry_bind(
-    addr: std::net::SocketAddr,
-    state: &AppState,
-) -> tokio::net::TcpListener {
-    const MAX_ATTEMPTS: u32 = 10;
-    const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+/// Bind with `SO_REUSEADDR` so a quick restart can reclaim the port after the old socket
+/// enters `TIME_WAIT`. Falls back to the same error as plain bind if another process still listens.
+fn bind_loopback_reuse(addr: std::net::SocketAddr) -> std::io::Result<tokio::net::TcpListener> {
+    let socket = Socket::new(Domain::for_address(addr), Type::STREAM, None)?;
+    socket.set_nonblocking(true)?;
+    socket.set_reuse_address(true)?;
+    socket.bind(&addr.into())?;
+    socket.listen(1024)?;
+    let std_listener: std::net::TcpListener = socket.into();
+    tokio::net::TcpListener::from_std(std_listener)
+}
 
-    for attempt in 1..=MAX_ATTEMPTS {
-        match tokio::net::TcpListener::bind(addr).await {
+async fn retry_bind(addr: std::net::SocketAddr, state: &AppState) -> tokio::net::TcpListener {
+    const MAX_ATTEMPTS: u32 = 30;
+    const RETRY_DELAY: Duration = Duration::from_secs(2);
+
+    let mut attempt = 0u32;
+    loop {
+        attempt += 1;
+        match bind_loopback_reuse(addr) {
             Ok(listener) => return listener,
             Err(e) if attempt < MAX_ATTEMPTS => {
-                state
-                    .emit_log(
-                        "run",
-                        &format!(
-                            "Port {addr} in use, retrying ({attempt}/{MAX_ATTEMPTS})… {e}"
-                        ),
-                    )
-                    .await;
+                let log = attempt == 1 || attempt.is_multiple_of(5);
+                if log {
+                    state
+                        .emit_log(
+                            "run",
+                            &format!(
+                                "Port {addr} busy (another instance or stale listener?), retry {attempt}/{MAX_ATTEMPTS} — {e}"
+                            ),
+                        )
+                        .await;
+                }
                 tokio::time::sleep(RETRY_DELAY).await;
             }
             Err(e) => {
-                panic!("failed to bind {addr} after {MAX_ATTEMPTS} attempts: {e}");
+                panic!(
+                    "failed to bind HTTP API on {addr} after {MAX_ATTEMPTS} attempts (~{}s): {e}. \
+                     Quit other Pengine instances or free the port (e.g. `lsof -i :{}`).",
+                    MAX_ATTEMPTS as u64 * RETRY_DELAY.as_secs(),
+                    addr.port()
+                );
             }
         }
     }
-    unreachable!()
 }
 
 async fn handle_connect(

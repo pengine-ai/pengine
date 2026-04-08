@@ -1,9 +1,18 @@
 use crate::state::AppState;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use teloxide::prelude::*;
 use teloxide::types::Me;
 use teloxide::utils::command::BotCommands;
 use tokio::sync::Notify;
+
+static HTTP: OnceLock<reqwest::Client> = OnceLock::new();
+
+const OLLAMA_TAGS_URL: &str = "http://localhost:11434/api/tags";
+const OLLAMA_CHAT_URL: &str = "http://localhost:11434/api/chat";
+
+fn http_client() -> &'static reqwest::Client {
+    HTTP.get_or_init(reqwest::Client::new)
+}
 
 pub async fn verify_token(token: &str) -> Result<Me, String> {
     let bot = Bot::new(token);
@@ -89,7 +98,7 @@ async fn command_handler(
             state
                 .emit_log("msg", &format!("/help from {}", user_label(&msg)))
                 .await;
-            "Send me any message and I'll echo it back. Pengine POC.".to_string()
+            "Send me any text message and I'll reply using your local Ollama model.".to_string()
         }
     };
     bot.send_message(msg.chat.id, text).await?;
@@ -128,8 +137,8 @@ async fn text_handler(bot: Bot, msg: Message, state: AppState) -> ResponseResult
 }
 
 async fn active_ollama_model() -> Result<String, String> {
-    let resp = reqwest::Client::new()
-        .get("http://localhost:11434/api/tags")
+    let resp = http_client()
+        .get(OLLAMA_TAGS_URL)
         .timeout(std::time::Duration::from_secs(5))
         .send()
         .await
@@ -154,8 +163,8 @@ async fn ask_ollama(model: &str, prompt: &str) -> Result<String, String> {
         "stream": false,
     });
 
-    let resp = reqwest::Client::new()
-        .post("http://localhost:11434/api/chat")
+    let resp = http_client()
+        .post(OLLAMA_CHAT_URL)
         .json(&payload)
         .timeout(std::time::Duration::from_secs(120))
         .send()

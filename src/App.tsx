@@ -1,20 +1,36 @@
-import { useEffect, useState } from "react";
-import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import { useEffect, useRef, useState } from "react";
+import { Navigate, Route, Routes, useNavigate } from "react-router-dom";
 import { PENGINE_API_BASE } from "./config";
 import { DashboardPage } from "./pages/DashboardPage";
 import { LandingPage } from "./pages/LandingPage";
 import { SetupPage } from "./pages/SetupPage";
 import { useAppSessionStore } from "./stores/appSessionStore";
 
-function AutoForward() {
+/**
+ * Once after load: if there is an active connection (persisted or reported by
+ * the local app), go to the dashboard. Does not run again on navigation.
+ */
+function StartupDashboardRedirect() {
   const navigate = useNavigate();
-  const location = useLocation();
-  const isDeviceConnected = useAppSessionStore((state) => state.isDeviceConnected);
   const connectDevice = useAppSessionStore((state) => state.connectDevice);
+  /** Ensures redirect logic runs only once on first paint — never on later navigations to Home. */
+  const startupDone = useRef(false);
 
   useEffect(() => {
-    if (isDeviceConnected) return;
-    if (location.pathname === "/dashboard" || location.pathname === "/setup") return;
+    if (startupDone.current) return;
+    startupDone.current = true;
+
+    const path = window.location.pathname;
+    if (path === "/dashboard") return;
+
+    if (useAppSessionStore.getState().isDeviceConnected) {
+      navigate("/dashboard", { replace: true });
+      return;
+    }
+
+    // Recover session from a running local app only when opening the home page
+    // (skip on /setup so the wizard can load; health mocks in e2e use /setup)
+    if (path !== "/") return;
 
     let cancelled = false;
     (async () => {
@@ -29,13 +45,14 @@ function AutoForward() {
           navigate("/dashboard", { replace: true });
         }
       } catch {
-        // local app not running — stay where we are
+        // local app not running
       }
     })();
+
     return () => {
       cancelled = true;
     };
-  }, [isDeviceConnected, connectDevice, navigate, location.pathname]);
+  }, [navigate, connectDevice]);
 
   return null;
 }
@@ -66,7 +83,7 @@ function App() {
 
   return (
     <div data-testid="app-ready">
-      <AutoForward />
+      <StartupDashboardRedirect />
       <Routes>
         <Route path="/" element={<LandingPage />} />
         <Route path="/setup" element={<SetupPage />} />

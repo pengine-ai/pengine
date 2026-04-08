@@ -4,6 +4,7 @@ mod telegram_service;
 
 use state::AppState;
 use std::path::PathBuf;
+use tauri::Manager;
 
 fn store_path(app: &tauri::App) -> PathBuf {
     let base = app
@@ -38,8 +39,6 @@ async fn disconnect_bot(state: tauri::State<'_, AppState>) -> Result<String, Str
     state.emit_log("ok", "Disconnected via Tauri command").await;
     Ok("disconnected".into())
 }
-
-use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {

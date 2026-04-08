@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { TerminalPreview } from "../components/TerminalPreview";
 import { TopMenu } from "../components/TopMenu";
-import { PENGINE_API_BASE } from "../config";
+import { OLLAMA_API_BASE, PENGINE_API_BASE } from "../config";
 import { useAppSessionStore } from "../stores/appSessionStore";
 
 type ServiceInfo = {
@@ -38,17 +38,17 @@ export function DashboardPage() {
         if (data.bot_username) botUser = data.bot_username;
       }
     } catch {
-      // not reachable
+      // Pengine API not reachable (app stopped or wrong port)
     }
 
     let ollamaUp = false;
     try {
-      const resp = await fetch("http://localhost:11434/api/tags", {
+      const resp = await fetch(`${OLLAMA_API_BASE}/api/tags`, {
         signal: AbortSignal.timeout(2000),
       });
       ollamaUp = resp.ok;
     } catch {
-      // not reachable
+      // Ollama not reachable
     }
 
     setServices([
@@ -65,7 +65,9 @@ export function DashboardPage() {
       {
         name: "Ollama",
         status: ollamaUp ? "running" : "stopped",
-        detail: ollamaUp ? "localhost:11434 reachable" : "Not reachable",
+        detail: ollamaUp
+          ? `${OLLAMA_API_BASE.replace(/^https?:\/\//, "")} reachable`
+          : "Not reachable",
       },
     ]);
   }, [botUsername]);

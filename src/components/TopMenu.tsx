@@ -49,7 +49,7 @@ export function TopMenu() {
 
         <Link
           to="/setup"
-          className={`primary-button rounded-xl px-4 py-2 text-xs ${showOpenSetup ? "" : "invisible"}`}
+          className={`primary-button rounded-xl px-4 py-2 text-xs ${showOpenSetup ? "" : "pointer-events-none invisible"}`}
           tabIndex={showOpenSetup ? undefined : -1}
           aria-hidden={!showOpenSetup}
         >
