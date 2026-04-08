@@ -32,7 +32,7 @@ e2e/                 Playwright specs
 **Logo source of truth:** `src/assets/pengine-logo.png`. Regenerate everything from it after you change the artwork:
 
 ```bash
-npm run generate:logos
+bun run generate:logos
 ```
 
 This writes `public/favicon-32.png`, `public/pengine-logo-64.png`, `public/pengine-logo-128.png`, and runs `tauri icon`, which fills `src-tauri/icons/` (desktop bundle assets plus `icons/ios/` and `icons/android/`). Web resizing uses macOS `sips` or ImageMagick `magick` if `sips` is unavailable.
@@ -74,8 +74,6 @@ End-to-end tests cover this path under `e2e/`.
 bun install
 bun run dev
 ```
-
-`npm install` / `npm run dev` work as well if you prefer npm.
 
 ### Tauri (optional)
 
