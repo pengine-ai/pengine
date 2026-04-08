@@ -1,3 +1,4 @@
+mod bot_lifecycle;
 mod connection_server;
 mod state;
 mod telegram_service;
@@ -28,8 +29,7 @@ async fn get_connection_status(
 
 #[tauri::command]
 async fn disconnect_bot(state: tauri::State<'_, AppState>) -> Result<String, String> {
-    state.shutdown_notify.notify_waiters();
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    bot_lifecycle::stop_and_wait_for_bot(&state).await;
 
     {
         let mut lock = state.connection.lock().await;
@@ -65,18 +65,19 @@ pub fn run() {
             // Resume persisted connection if present
             let resume_state = shared_state.clone();
             tauri::async_runtime::spawn(async move {
-                if let Some(conn) = resume_state.load_persisted() {
-                    resume_state
-                        .emit_log("ok", &format!("Resuming bot @{}…", conn.bot_username))
-                        .await;
-                    {
-                        let mut lock = resume_state.connection.lock().await;
-                        *lock = Some(conn.clone());
-                    }
-                    let shutdown = resume_state.shutdown_notify.clone();
-                    let token = conn.bot_token.clone();
-                    telegram_service::start_bot(resume_state, token, shutdown).await;
+                let Some(conn) = resume_state.load_persisted() else {
+                    return;
+                };
+                resume_state
+                    .emit_log("ok", &format!("Resuming bot @{}…", conn.bot_username))
+                    .await;
+                let token = conn.bot_token.clone();
+                {
+                    let mut lock = resume_state.connection.lock().await;
+                    *lock = Some(conn);
                 }
+                let shutdown = resume_state.shutdown_notify.clone();
+                telegram_service::start_bot(resume_state, token, shutdown).await;
             });
 
             // Start localhost HTTP API

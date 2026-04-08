@@ -7,6 +7,8 @@ const fallbackLines: LogLine[] = [
   { timestamp: "00:00:00", kind: "ok", message: "Waiting for Pengine service…" },
 ];
 
+const SCROLL_NEAR_BOTTOM_PX = 64;
+
 function kindClass(kind: string) {
   if (kind === "ok") return "bg-emerald-400/10 text-emerald-300";
   if (kind === "run") return "bg-sky-400/10 text-sky-300";
@@ -26,49 +28,87 @@ export function TerminalPreview() {
 
   useEffect(() => {
     let cancelled = false;
-    let cleanup: (() => void) | null = null;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let reconnectAttempt = 0;
+    let es: EventSource | null = null;
+    let unlistenTauri: (() => void) | null = null;
+
+    const clearRetry = () => {
+      if (retryTimer) {
+        clearTimeout(retryTimer);
+        retryTimer = null;
+      }
+    };
+
+    const scheduleSseReconnect = () => {
+      clearRetry();
+      if (cancelled) return;
+      const delay = Math.min(30_000, 1000 * 2 ** Math.min(reconnectAttempt, 10));
+      reconnectAttempt += 1;
+      retryTimer = setTimeout(() => {
+        openEventSource();
+      }, delay);
+    };
+
+    const openEventSource = () => {
+      if (cancelled) return;
+      es?.close();
+      const next = new EventSource(`${PENGINE_API_BASE}/v1/logs`);
+      es = next;
+
+      next.onopen = () => {
+        reconnectAttempt = 0;
+      };
+
+      next.onmessage = (event) => {
+        if (cancelled) return;
+        try {
+          const entry: LogLine = JSON.parse(event.data);
+          addLine(entry);
+        } catch {
+          // ignore malformed events
+        }
+      };
+
+      next.onerror = () => {
+        next.close();
+        if (!cancelled) scheduleSseReconnect();
+      };
+    };
 
     async function connect() {
-      // Try Tauri event listener first (works inside the desktop app)
       try {
         const { listen } = await import("@tauri-apps/api/event");
         const unlisten = await listen<LogLine>("pengine-log", (event) => {
           if (!cancelled) addLine(event.payload);
         });
-        cleanup = unlisten;
+        unlistenTauri = unlisten;
         return;
       } catch {
         // Not running inside Tauri — fall through to SSE
       }
 
-      // Browser fallback: SSE stream from the loopback API
-      try {
-        const es = new EventSource(`${PENGINE_API_BASE}/v1/logs`);
-        es.onmessage = (event) => {
-          if (cancelled) return;
-          try {
-            const entry: LogLine = JSON.parse(event.data);
-            addLine(entry);
-          } catch {
-            // ignore malformed events
-          }
-        };
-        cleanup = () => es.close();
-      } catch {
-        // SSE not available
-      }
+      openEventSource();
     }
 
-    connect();
+    void connect();
 
     return () => {
       cancelled = true;
-      cleanup?.();
+      clearRetry();
+      es?.close();
+      unlistenTauri?.();
     };
   }, [addLine]);
 
   useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
+    const el = scrollRef.current;
+    if (!el) return;
+    const { scrollTop, clientHeight, scrollHeight } = el;
+    const distanceFromBottom = scrollHeight - (scrollTop + clientHeight);
+    if (distanceFromBottom <= SCROLL_NEAR_BOTTOM_PX) {
+      el.scrollTo({ top: scrollHeight, behavior: "smooth" });
+    }
   }, [lines]);
 
   return (

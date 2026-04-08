@@ -41,7 +41,10 @@ function StartupDashboardRedirect() {
         if (!resp.ok || cancelled) return;
         const data = await resp.json();
         if (data.bot_connected && data.bot_username && !cancelled) {
-          connectDevice({ bot_username: data.bot_username, bot_id: "" });
+          connectDevice({
+            bot_username: data.bot_username,
+            bot_id: data.bot_id ?? null,
+          });
           navigate("/dashboard", { replace: true });
         }
       } catch {

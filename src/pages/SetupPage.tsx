@@ -3,8 +3,6 @@ import { useNavigate } from "react-router-dom";
 import { SETUP_STEPS, SetupWizard } from "../components/SetupWizard";
 import { TerminalPreview } from "../components/TerminalPreview";
 import { TopMenu } from "../components/TopMenu";
-import { useAppSessionStore } from "../stores/appSessionStore";
-
 const requirements = [
   "Telegram account",
   "Bot token from BotFather",
@@ -28,10 +26,8 @@ export function SetupPage() {
   const [activeStep, setActiveStep] = useState(0);
   const currentStep = SETUP_STEPS[activeStep];
   const navigate = useNavigate();
-  const connectDevice = useAppSessionStore((state) => state.connectDevice);
 
   const handleCompleteSetup = () => {
-    connectDevice();
     navigate("/dashboard", { replace: true });
   };
 

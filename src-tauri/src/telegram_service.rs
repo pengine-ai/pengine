@@ -124,6 +124,7 @@ async fn text_handler(bot: Bot, msg: Message, state: AppState) -> ResponseResult
                 }
                 Err(e) => {
                     state.emit_log("run", &format!("ollama error: {e}")).await;
+                    send_inference_unavailable(&bot, &msg, &state).await;
                 }
             }
         }
@@ -131,10 +132,27 @@ async fn text_handler(bot: Bot, msg: Message, state: AppState) -> ResponseResult
             state
                 .emit_log("run", &format!("no ollama model available: {e}"))
                 .await;
+            send_inference_unavailable(&bot, &msg, &state).await;
         }
     }
 
     Ok(())
+}
+
+async fn send_inference_unavailable(bot: &Bot, msg: &Message, state: &AppState) {
+    const TEXT: &str =
+        "Sorry, local inference is unavailable right now. Please try again later.";
+    match bot.send_message(msg.chat.id, TEXT).await {
+        Ok(_) => {}
+        Err(e) => {
+            state
+                .emit_log(
+                    "run",
+                    &format!("could not send inference-unavailable reply: {e}"),
+                )
+                .await;
+        }
+    }
 }
 
 /// Returns the currently loaded model (from `/api/ps`), falling back to the

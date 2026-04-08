@@ -6,7 +6,7 @@ type AppSessionState = {
   isDeviceConnected: boolean;
   botUsername: string | null;
   botId: string | null;
-  connectDevice: (bot?: { bot_username: string; bot_id: string }) => void;
+  connectDevice: (bot?: { bot_username: string; bot_id?: string | null }) => void;
   disconnectDevice: () => Promise<void>;
 };
 
@@ -21,17 +21,17 @@ export const useAppSessionStore = create<AppSessionState>()(
         set({
           isDeviceConnected: true,
           botUsername: bot?.bot_username ?? null,
-          botId: bot?.bot_id ?? null,
+          botId: bot?.bot_id != null && bot.bot_id !== "" ? bot.bot_id : null,
         }),
 
       disconnectDevice: async () => {
-        try {
-          await fetch(`${PENGINE_API_BASE}/v1/connect`, {
-            method: "DELETE",
-            signal: AbortSignal.timeout(5000),
-          });
-        } catch {
-          // local app may be unreachable; clear session anyway
+        const resp = await fetch(`${PENGINE_API_BASE}/v1/connect`, {
+          method: "DELETE",
+          signal: AbortSignal.timeout(5000),
+        });
+        if (!resp.ok) {
+          const detail = await resp.text().catch(() => "");
+          throw new Error(detail || `Disconnect failed (HTTP ${resp.status})`);
         }
         set({ isDeviceConnected: false, botUsername: null, botId: null });
       },

@@ -21,6 +21,7 @@ export function DashboardPage() {
     { name: "Pengine runtime", status: "checking", detail: "Checking…" },
     { name: "Ollama", status: "checking", detail: "Checking…" },
   ]);
+  const [disconnectError, setDisconnectError] = useState<string | null>(null);
 
   const refreshStatus = useCallback(async () => {
     let botConnected = false;
@@ -100,8 +101,13 @@ export function DashboardPage() {
   }, [refreshStatus]);
 
   const handleDisconnect = async () => {
-    await disconnectDevice();
-    navigate("/setup", { replace: true });
+    setDisconnectError(null);
+    try {
+      await disconnectDevice();
+      navigate("/setup", { replace: true });
+    } catch (e) {
+      setDisconnectError(e instanceof Error ? e.message : "Could not disconnect");
+    }
   };
 
   return (
@@ -188,6 +194,9 @@ export function DashboardPage() {
                 <p className="mt-3 subtle-copy">
                   Disconnect the current device session and return to setup.
                 </p>
+                {disconnectError && (
+                  <p className="mt-3 font-mono text-xs text-rose-300">{disconnectError}</p>
+                )}
                 <button
                   type="button"
                   className="secondary-button mt-5 w-full rounded-xl border-rose-300/30 bg-rose-300/10 text-rose-100 hover:bg-rose-300/15"

@@ -1,3 +1,4 @@
+use crate::bot_lifecycle::stop_and_wait_for_bot;
 use crate::state::{AppState, ConnectionData};
 use crate::telegram_service;
 use axum::extract::State;
@@ -32,6 +33,7 @@ pub struct HealthResponse {
     pub status: String,
     pub bot_connected: bool,
     pub bot_username: Option<String>,
+    pub bot_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -135,8 +137,7 @@ async fn handle_connect(
     let bot_id = me.id.to_string();
     let bot_username = me.username().to_string();
 
-    // Stop existing bot if running
-    stop_existing_bot(&state).await;
+    stop_and_wait_for_bot(&state).await;
 
     let conn = ConnectionData {
         bot_token: token.clone(),
@@ -181,7 +182,7 @@ async fn handle_connect(
 async fn handle_disconnect(
     State(state): State<AppState>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ErrorResponse>)> {
-    stop_existing_bot(&state).await;
+    stop_and_wait_for_bot(&state).await;
 
     {
         let mut lock = state.connection.lock().await;
@@ -209,6 +210,7 @@ async fn handle_health(State(state): State<AppState>) -> Json<HealthResponse> {
         status: "ok".into(),
         bot_connected: conn.is_some(),
         bot_username: conn.as_ref().map(|c| c.bot_username.clone()),
+        bot_id: conn.as_ref().map(|c| c.bot_id.clone()),
     })
 }
 
@@ -236,14 +238,4 @@ async fn handle_logs_sse(
             .interval(std::time::Duration::from_secs(15))
             .text("ping"),
     )
-}
-
-async fn stop_existing_bot(state: &AppState) {
-    let was_running = *state.bot_running.lock().await;
-    if was_running {
-        state.shutdown_notify.notify_waiters();
-        state.emit_log("run", "Stopping existing bot…").await;
-        // Give dispatcher a moment to shut down
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    }
 }

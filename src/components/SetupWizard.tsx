@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { OLLAMA_API_BASE, PENGINE_API_BASE } from "../config";
+import { useAppSessionStore } from "../stores/appSessionStore";
 import { StyledQrCode } from "./StyledQrCode";
 import { WizardLayout } from "./WizardLayout";
 
@@ -52,7 +53,6 @@ type SetupWizardProps = {
 export function SetupWizard({ onStepChange, onCompleteSetup }: SetupWizardProps) {
   const [step, setStep] = useState(0);
   const [botToken, setBotToken] = useState("");
-  const [ollamaAcknowledged, setOllamaAcknowledged] = useState(false);
   const [ollamaChecking, setOllamaChecking] = useState(false);
   const [ollamaModel, setOllamaModel] = useState<string | null>(null);
   const [ollamaReachable, setOllamaReachable] = useState<boolean | null>(null);
@@ -69,6 +69,8 @@ export function SetupWizard({ onStepChange, onCompleteSetup }: SetupWizardProps)
   const [botUsername, setBotUsername] = useState("");
   const [copiedUri, setCopiedUri] = useState(false);
 
+  const connectDevice = useAppSessionStore((s) => s.connectDevice);
+
   const status = useMemo(() => tokenStatus(botToken), [botToken]);
   const stepTitles = SETUP_STEPS.map((item) => item.title);
   const botId = useMemo(() => parseBotIdFromToken(botToken), [botToken]);
@@ -81,11 +83,11 @@ export function SetupWizard({ onStepChange, onCompleteSetup }: SetupWizardProps)
 
   const canContinueStep = useMemo(() => {
     if (step === 0) return status === "valid";
-    if (step === 1) return ollamaAcknowledged;
+    if (step === 1) return !!ollamaModel;
     if (step === 2) return pengineReachable === true;
     if (step === 3) return connectStatus === "connected";
     return false;
-  }, [step, status, ollamaAcknowledged, pengineReachable, connectStatus]);
+  }, [step, status, ollamaModel, pengineReachable, connectStatus]);
 
   const canGoNext = step < stepTitles.length - 1 && canContinueStep;
 
@@ -108,7 +110,6 @@ export function SetupWizard({ onStepChange, onCompleteSetup }: SetupWizardProps)
         if (loadedModel) {
           setOllamaReachable(true);
           setOllamaModel(loadedModel);
-          setOllamaAcknowledged(true);
           setOllamaChecking(false);
           return;
         }
@@ -122,7 +123,6 @@ export function SetupWizard({ onStepChange, onCompleteSetup }: SetupWizardProps)
         const tagsData = await tagsResp.json();
         const firstModel = tagsData.models?.[0]?.name ?? null;
         setOllamaModel(firstModel);
-        if (firstModel) setOllamaAcknowledged(true);
       } else {
         setOllamaReachable(false);
       }
@@ -175,6 +175,7 @@ export function SetupWizard({ onStepChange, onCompleteSetup }: SetupWizardProps)
       if (resp.ok) {
         setConnectStatus("connected");
         setVerifiedBot({ bot_id: data.bot_id, bot_username: data.bot_username });
+        connectDevice({ bot_username: data.bot_username, bot_id: data.bot_id });
       } else {
         setConnectStatus("error");
         setConnectError(data.error || "Connection failed");
@@ -185,17 +186,21 @@ export function SetupWizard({ onStepChange, onCompleteSetup }: SetupWizardProps)
         err instanceof Error ? err.message : "Could not reach Pengine. Is the app running?",
       );
     }
-  }, [botToken]);
+  }, [botToken, connectDevice]);
 
   const connectionUri = `${PENGINE_API_BASE}/v1/connect`;
   const connectionPayload = JSON.stringify({ bot_token: botToken.trim() }, null, 2);
 
   const handleCopyUri = useCallback(async () => {
     try {
-      await navigator.clipboard.writeText(`curl -X POST ${connectionUri} -H "Content-Type: application/json" -d '${connectionPayload}'`);
+      await navigator.clipboard.writeText(
+        `curl -X POST ${connectionUri} -H "Content-Type: application/json" -d '${connectionPayload}'`,
+      );
       setCopiedUri(true);
       setTimeout(() => setCopiedUri(false), 2000);
-    } catch { /* clipboard not available */ }
+    } catch {
+      /* clipboard not available */
+    }
   }, [connectionUri, connectionPayload]);
 
   return (
@@ -313,18 +318,7 @@ ollama pull llama3.2`}</code>
               </div>
             )}
 
-            {!ollamaAcknowledged && ollamaReachable !== null && !ollamaChecking && (
-              <button
-                type="button"
-                data-testid="ollama-acknowledge"
-                className="secondary-button mt-4 w-full max-w-md rounded-xl text-xs"
-                onClick={() => setOllamaAcknowledged(true)}
-              >
-                I've installed Ollama
-              </button>
-            )}
-
-            {ollamaAcknowledged && (
+            {ollamaModel && (
               <p className="mt-3 font-mono text-xs text-emerald-300">
                 Ready to continue.
               </p>
@@ -505,7 +499,7 @@ ollama pull llama3.2`}</code>
             <div className="rounded-3xl border border-emerald-300/20 bg-emerald-300/10 p-5">
               <div className="space-y-3 font-mono text-sm text-slate-100">
                 <p>{status === "valid" ? "✓" : "○"} Bot token saved</p>
-                <p>{ollamaAcknowledged ? "✓" : "○"} Ollama ready</p>
+                <p>{ollamaModel ? "✓" : "○"} Ollama ready</p>
                 <p>{pengineReachable ? "✓" : "○"} Pengine running</p>
                 <p>{connectStatus === "connected" ? "✓" : "○"} Bot connected</p>
               </div>
@@ -513,7 +507,7 @@ ollama pull llama3.2`}</code>
                 <button
                   type="button"
                   className="primary-button mt-5 w-full rounded-xl text-xs"
-                  onClick={onCompleteSetup}
+                  onClick={() => onCompleteSetup?.()}
                 >
                   Open dashboard
                 </button>

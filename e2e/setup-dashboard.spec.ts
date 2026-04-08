@@ -44,9 +44,22 @@ async function mockApis(page: import("@playwright/test").Page) {
         status: "ok",
         bot_connected: true,
         bot_username: "TestPengineBot",
+        bot_id: "12345678",
       }),
     });
   });
+
+  await page.route(
+    (url) => url.href.startsWith(`${PENGINE_API_BASE}/v1/logs`),
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "text/event-stream",
+        body:
+          'data: {"timestamp":"12:00:00","kind":"ok","message":"mock log"}\n\n',
+      });
+    },
+  );
 
   await page.route(`${PENGINE_API_BASE}/v1/connect`, async (route) => {
     if (route.request().method() === "POST") {
