@@ -14,7 +14,7 @@ export function TopMenu() {
 
   return (
     <header className="section-shell sticky top-0 z-40 pt-2 sm:pt-3">
-      <div className="flex min-h-[3.25rem] items-center justify-between rounded-2xl border border-white/10 bg-slate-950/70 px-3 py-2 sm:px-4 sm:py-2.5 backdrop-blur">
+      <div className="flex min-h-13 items-center justify-between rounded-2xl border border-white/10 bg-slate-950/70 px-3 py-2 sm:px-4 sm:py-2.5 backdrop-blur">
         <Link to="/" className="flex items-center gap-3">
           <img
             src="/pengine-logo-64.png"
