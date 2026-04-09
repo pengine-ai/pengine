@@ -41,6 +41,13 @@ pub struct ErrorResponse {
     pub error: String,
 }
 
+#[derive(Serialize)]
+pub struct McpToolDto {
+    pub server: String,
+    pub name: String,
+    pub description: Option<String>,
+}
+
 pub async fn start_server(state: AppState) {
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -52,6 +59,7 @@ pub async fn start_server(state: AppState) {
         .route("/v1/connect", delete(handle_disconnect))
         .route("/v1/health", get(handle_health))
         .route("/v1/logs", get(handle_logs_sse))
+        .route("/v1/mcp/tools", get(handle_mcp_tools))
         .layer(cors)
         .with_state(state.clone());
 
@@ -208,6 +216,23 @@ async fn handle_health(State(state): State<AppState>) -> Json<HealthResponse> {
         bot_username: conn.as_ref().map(|c| c.bot_username.clone()),
         bot_id: conn.as_ref().map(|c| c.bot_id.clone()),
     })
+}
+
+async fn handle_mcp_tools(State(state): State<AppState>) -> Json<Vec<McpToolDto>> {
+    Json(
+        state
+            .mcp
+            .read()
+            .await
+            .all_tools()
+            .into_iter()
+            .map(|t| McpToolDto {
+                server: t.server_name,
+                name: t.name,
+                description: t.description,
+            })
+            .collect(),
+    )
 }
 
 async fn handle_logs_sse(

@@ -3,6 +3,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { getPengineHealth } from "../modules/bot/api";
 import { TerminalPreview } from "../modules/bot/components/TerminalPreview";
 import { useAppSessionStore } from "../modules/bot/store/appSessionStore";
+import { McpToolsPanel } from "../modules/mcp/components/McpToolsPanel";
 import { fetchOllamaModel } from "../modules/ollama/api";
 import { PENGINE_API_BASE } from "../shared/api/config";
 import { TopMenu } from "../shared/ui/TopMenu";
@@ -170,6 +171,8 @@ export function DashboardPage() {
                 </button>
               </div>
             )}
+
+            <McpToolsPanel />
           </div>
         </section>
       </main>

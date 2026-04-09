@@ -1,9 +1,10 @@
+use crate::modules::mcp::registry::ToolRegistry;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::Emitter;
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{Mutex, Notify, RwLock};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectionData {
@@ -28,6 +29,7 @@ pub struct AppState {
     pub log_tx: Arc<Mutex<Option<tokio::sync::broadcast::Sender<LogEntry>>>>,
     pub store_path: PathBuf,
     pub app_handle: Arc<Mutex<Option<tauri::AppHandle>>>,
+    pub mcp: Arc<RwLock<ToolRegistry>>,
 }
 
 impl AppState {
@@ -40,6 +42,7 @@ impl AppState {
             log_tx: Arc::new(Mutex::new(Some(log_tx))),
             store_path,
             app_handle: Arc::new(Mutex::new(None)),
+            mcp: Arc::new(RwLock::new(ToolRegistry::default())),
         }
     }
 

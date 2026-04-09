@@ -1,8 +1,8 @@
-use crate::modules::ollama::service as ollama;
+use crate::modules::bot::agent;
 use crate::shared::state::AppState;
 use std::sync::Arc;
 use teloxide::prelude::*;
-use teloxide::types::Me;
+use teloxide::types::{ChatAction, Me};
 use teloxide::utils::command::BotCommands;
 use tokio::sync::Notify;
 
@@ -98,31 +98,44 @@ async fn command_handler(
 }
 
 async fn text_handler(bot: Bot, msg: Message, state: AppState) -> ResponseResult<()> {
-    let incoming = msg.text().unwrap_or("<non-text>");
+    let incoming = msg.text().unwrap_or("<non-text>").to_string();
     state
         .emit_log("msg", &format!("from {}: {}", user_label(&msg), incoming))
         .await;
 
-    match ollama::active_model().await {
-        Ok(model) => {
-            state
-                .emit_log("tool", &format!("routing to ollama → {model}"))
-                .await;
-            match ollama::chat(&model, incoming).await {
-                Ok(reply) => {
-                    state.emit_log("reply", &format!("→ {reply}")).await;
-                    bot.send_message(msg.chat.id, &reply).await?;
-                }
-                Err(e) => {
-                    state.emit_log("run", &format!("ollama error: {e}")).await;
-                    send_inference_unavailable(&bot, &msg, &state).await;
-                }
+    // Telegram's `typing` action lasts ~5 seconds. Refresh it every 4s in a
+    // background task while the agent runs so the user sees a continuous
+    // "writing…" indicator no matter how long the tool calls take.
+    let typing_task = {
+        let bot = bot.clone();
+        let chat_id = msg.chat.id;
+        tokio::spawn(async move {
+            loop {
+                let _ = bot.send_chat_action(chat_id, ChatAction::Typing).await;
+                tokio::time::sleep(std::time::Duration::from_secs(4)).await;
             }
+        })
+    };
+
+    let result = agent::run_turn(&state, &incoming).await;
+    typing_task.abort();
+
+    match result {
+        Ok(turn) => {
+            let reply = if turn.text.trim().is_empty() {
+                "(no reply)".to_string()
+            } else {
+                turn.text
+            };
+            let tag = match turn.source {
+                agent::ReplySource::Tool => "tool",
+                agent::ReplySource::Model => "model",
+            };
+            state.emit_log("reply", &format!("[{tag}] {reply}")).await;
+            bot.send_message(msg.chat.id, &reply).await?;
         }
         Err(e) => {
-            state
-                .emit_log("run", &format!("no ollama model available: {e}"))
-                .await;
+            state.emit_log("run", &format!("agent error: {e}")).await;
             send_inference_unavailable(&bot, &msg, &state).await;
         }
     }

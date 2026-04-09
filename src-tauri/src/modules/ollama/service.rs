@@ -41,10 +41,19 @@ pub async fn active_model() -> Result<String, String> {
         .ok_or_else(|| "no models pulled in ollama".to_string())
 }
 
-pub async fn chat(model: &str, prompt: &str) -> Result<String, String> {
+/// Tool-aware chat for the agent loop. Sends a full message history plus a
+/// list of tool definitions and returns the raw assistant message (which may
+/// contain `tool_calls`). Caller is responsible for executing tools and
+/// looping. Returns the `message` object verbatim.
+pub async fn chat_with_tools(
+    model: &str,
+    messages: &serde_json::Value,
+    tools: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
     let payload = serde_json::json!({
         "model": model,
-        "messages": [{"role": "user", "content": format!("Think fast and answer extremely short. If you don't know the answer, say you don't know. Question: {prompt}")}],
+        "messages": messages,
+        "tools": tools,
         "stream": false,
     });
 
@@ -57,8 +66,8 @@ pub async fn chat(model: &str, prompt: &str) -> Result<String, String> {
         .map_err(|e| e.to_string())?;
 
     let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
-    body["message"]["content"]
-        .as_str()
-        .map(|s| s.to_string())
-        .ok_or_else(|| "unexpected ollama response shape".to_string())
+    Ok(body
+        .get("message")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null))
 }

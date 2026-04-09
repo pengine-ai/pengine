@@ -1,5 +1,6 @@
 use crate::infrastructure::http_server;
 use crate::modules::bot::{commands, repository, service as bot_service};
+use crate::modules::mcp::service as mcp_service;
 use crate::shared::state::AppState;
 use std::path::PathBuf;
 use tauri::Manager;
@@ -26,14 +27,13 @@ pub fn run() {
                 let handle = app.handle().clone();
                 let state = shared_state.clone();
                 tauri::async_runtime::spawn(async move {
-                    let mut lock = state.app_handle.lock().await;
-                    *lock = Some(handle);
+                    *state.app_handle.lock().await = Some(handle);
                 });
             }
 
             app.manage(shared_state.clone());
 
-            // Resume persisted connection if present
+            // Resume persisted Telegram connection if present.
             let resume_state = shared_state.clone();
             tauri::async_runtime::spawn(async move {
                 let Some(conn) = repository::load(&resume_state.store_path) else {
@@ -43,15 +43,26 @@ pub fn run() {
                     .emit_log("ok", &format!("Resuming bot @{}…", conn.bot_username))
                     .await;
                 let token = conn.bot_token.clone();
-                {
-                    let mut lock = resume_state.connection.lock().await;
-                    *lock = Some(conn);
-                }
+                *resume_state.connection.lock().await = Some(conn);
                 let shutdown = resume_state.shutdown_notify.clone();
                 bot_service::start_bot(resume_state, token, shutdown).await;
             });
 
-            // Start localhost HTTP API
+            // Native tools are instant — no subprocess, no async I/O.
+            let mcp_state = shared_state.clone();
+            tauri::async_runtime::spawn(async move {
+                let registry = mcp_service::build_default_registry();
+                let n = registry.tool_names().len();
+                *mcp_state.mcp.write().await = registry;
+                mcp_state
+                    .emit_log(
+                        "mcp",
+                        &format!("{n} native tool{}", if n == 1 { "" } else { "s" }),
+                    )
+                    .await;
+            });
+
+            // Start localhost HTTP API.
             let server_state = shared_state.clone();
             tauri::async_runtime::spawn(async move {
                 http_server::start_server(server_state).await;

@@ -183,6 +183,12 @@ Telegram  ──►  teloxide dispatcher  ──►  text_handler
 
 ---
 
+## Modules
+
+- [MCP — Model Context Protocol](./mcp.md) — agent tool-use via external MCP servers (POC).
+
+---
+
 ## Adding a New Module
 
 ### Frontend
