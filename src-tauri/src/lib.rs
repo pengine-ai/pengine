@@ -1,6 +1,6 @@
 mod app;
 mod infrastructure;
-mod modules;
+pub mod modules;
 mod shared;
 
 pub fn run() {

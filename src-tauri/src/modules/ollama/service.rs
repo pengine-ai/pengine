@@ -65,7 +65,12 @@ pub async fn chat_with_tools(
         .await
         .map_err(|e| e.to_string())?;
 
+    let status = resp.status();
     let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        return Err(format!("ollama chat HTTP {status}: {body}"));
+    }
+
     Ok(body
         .get("message")
         .cloned()

@@ -1,10 +1,11 @@
 use crate::infrastructure::bot_lifecycle;
 use crate::modules::bot::{repository, service as bot_service};
+use crate::modules::mcp::service as mcp_service;
 use crate::shared::state::{AppState, ConnectionData};
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{Json, Sse};
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use axum::Router;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -48,6 +49,19 @@ pub struct McpToolDto {
     pub description: Option<String>,
 }
 
+#[derive(Serialize)]
+pub struct McpConfigInfoResponse {
+    pub config_path: String,
+    /// `"project"` or `"app_data"`
+    pub source: String,
+    pub filesystem_allowed_path: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct PutMcpFilesystemBody {
+    pub path: String,
+}
+
 pub async fn start_server(state: AppState) {
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -60,6 +74,8 @@ pub async fn start_server(state: AppState) {
         .route("/v1/health", get(handle_health))
         .route("/v1/logs", get(handle_logs_sse))
         .route("/v1/mcp/tools", get(handle_mcp_tools))
+        .route("/v1/mcp/config", get(handle_mcp_config_get))
+        .route("/v1/mcp/filesystem", put(handle_mcp_filesystem_put))
         .layer(cors)
         .with_state(state.clone());
 
@@ -73,8 +89,6 @@ pub async fn start_server(state: AppState) {
     axum::serve(listener, app).await.expect("axum serve failed");
 }
 
-/// Bind with `SO_REUSEADDR` so a quick restart can reclaim the port after the old socket
-/// enters `TIME_WAIT`. Falls back to the same error as plain bind if another process still listens.
 fn bind_loopback_reuse(addr: std::net::SocketAddr) -> std::io::Result<tokio::net::TcpListener> {
     let socket = Socket::new(Domain::for_address(addr), Type::STREAM, None)?;
     socket.set_nonblocking(true)?;
@@ -216,6 +230,70 @@ async fn handle_health(State(state): State<AppState>) -> Json<HealthResponse> {
         bot_username: conn.as_ref().map(|c| c.bot_username.clone()),
         bot_id: conn.as_ref().map(|c| c.bot_id.clone()),
     })
+}
+
+async fn handle_mcp_config_get(State(state): State<AppState>) -> Json<McpConfigInfoResponse> {
+    let filesystem_allowed_path = state
+        .mcp_config_path
+        .exists()
+        .then(|| mcp_service::read_config(&state.mcp_config_path).ok())
+        .flatten()
+        .and_then(|c| mcp_service::filesystem_allowed_path(&c));
+
+    Json(McpConfigInfoResponse {
+        config_path: state.mcp_config_path.to_string_lossy().into_owned(),
+        source: state.mcp_config_source.clone(),
+        filesystem_allowed_path,
+    })
+}
+
+async fn handle_mcp_filesystem_put(
+    State(state): State<AppState>,
+    Json(body): Json<PutMcpFilesystemBody>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ErrorResponse>)> {
+    let path = body.path.trim();
+    if path.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "path is required".into(),
+            }),
+        ));
+    }
+
+    let mut cfg = if state.mcp_config_path.exists() {
+        mcp_service::read_config(&state.mcp_config_path)
+            .map_err(|e| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })))?
+    } else {
+        mcp_service::load_or_init_config(&state.mcp_config_path).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse { error: e }),
+            )
+        })?
+    };
+
+    mcp_service::set_filesystem_allowed_path(&mut cfg, path);
+    mcp_service::save_config(&state.mcp_config_path, &cfg).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse { error: e }),
+        )
+    })?;
+
+    state
+        .emit_log(
+            "mcp",
+            &format!(
+                "filesystem allow path updated → {}",
+                state.mcp_config_path.display()
+            ),
+        )
+        .await;
+
+    mcp_service::rebuild_registry_into_state(&state, &cfg).await;
+
+    Ok((StatusCode::OK, Json(serde_json::json!({ "ok": true }))))
 }
 
 async fn handle_mcp_tools(State(state): State<AppState>) -> Json<Vec<McpToolDto>> {

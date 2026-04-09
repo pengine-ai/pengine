@@ -1,0 +1,18 @@
+{
+  "servers": {
+    "dice": {
+      "type": "native",
+      "id": "dice"
+    },
+    "filesystem": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "/absolute/path/to/allowed/folder"
+      ],
+      "env": {}
+    }
+  }
+}

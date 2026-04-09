@@ -1,6 +1,8 @@
 use crate::infrastructure::bot_lifecycle;
 use crate::modules::bot::repository;
 use crate::shared::state::AppState;
+#[cfg(desktop)]
+use tauri_plugin_dialog::DialogExt;
 
 #[tauri::command]
 pub async fn get_connection_status(
@@ -25,4 +27,22 @@ pub async fn disconnect_bot(state: tauri::State<'_, AppState>) -> Result<String,
     repository::clear(&state.store_path)?;
     state.emit_log("ok", "Disconnected via Tauri command").await;
     Ok("disconnected".into())
+}
+
+/// Native folder picker for MCP filesystem allow-list (desktop).
+#[cfg(desktop)]
+#[tauri::command]
+pub async fn pick_mcp_filesystem_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    let folder = app
+        .dialog()
+        .file()
+        .set_title("Folder for MCP filesystem tools")
+        .blocking_pick_folder();
+    Ok(folder.map(|p| p.to_string()))
+}
+
+#[cfg(not(desktop))]
+#[tauri::command]
+pub async fn pick_mcp_filesystem_folder() -> Result<Option<String>, String> {
+    Err("folder picker is only available on desktop".into())
 }

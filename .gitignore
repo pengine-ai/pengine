@@ -12,6 +12,9 @@ dist
 dist-ssr
 *.local
 
+# Local MCP config (copy src-tauri/mcp.example.json → src-tauri/mcp.json)
+src-tauri/mcp.json
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

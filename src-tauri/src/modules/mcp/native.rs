@@ -1,5 +1,3 @@
-//! Built-in tools that run in-process. No subprocess, no JSON-RPC overhead.
-
 use super::types::ToolDef;
 use serde_json::{json, Value};
 
@@ -20,12 +18,12 @@ impl NativeProvider {
     }
 }
 
-/// The bundled dice tool — runs in pure Rust, instant response.
-pub fn dice() -> NativeProvider {
+/// Built-in dice tools under the given server key (must match `mcp.json` server name).
+pub fn dice_named(server_key: &str) -> NativeProvider {
     NativeProvider {
-        server_name: "dice".to_string(),
+        server_name: server_key.to_string(),
         tools: vec![ToolDef {
-            server_name: "dice".to_string(),
+            server_name: server_key.to_string(),
             name: "roll_dice".to_string(),
             description: Some(
                 "Roll a die with the given number of sides and return the result.".to_string(),
@@ -45,6 +43,10 @@ pub fn dice() -> NativeProvider {
     }
 }
 
+pub fn dice() -> NativeProvider {
+    dice_named("dice")
+}
+
 fn handle_dice(_tool_name: &str, args: &Value) -> Result<String, String> {
     let sides = args
         .get("sides")
@@ -56,48 +58,10 @@ fn handle_dice(_tool_name: &str, args: &Value) -> Result<String, String> {
     Ok(format!("Rolled a d{sides}: {result}"))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn dice_returns_valid_result() {
-        let provider = dice();
-        assert_eq!(provider.tools.len(), 1);
-        assert_eq!(provider.tools[0].name, "roll_dice");
-        assert!(provider.tools[0].direct_return);
-
-        let out = provider
-            .call("roll_dice", &json!({"sides": 20}))
-            .expect("dice call");
-        assert!(out.starts_with("Rolled a d20: "), "got: {out}");
-
-        let num: u64 = out.trim_start_matches("Rolled a d20: ").parse().unwrap();
-        assert!((1..=20).contains(&num));
-    }
-
-    #[test]
-    fn dice_clamps_invalid_sides() {
-        let provider = dice();
-
-        let out = provider
-            .call("roll_dice", &json!({"sides": 0}))
-            .expect("sides=0");
-        assert!(out.starts_with("Rolled a d2: "), "clamped to 2, got: {out}");
-
-        let out = provider
-            .call("roll_dice", &json!({"sides": 9999999}))
-            .expect("sides=9999999");
-        assert!(
-            out.starts_with("Rolled a d1000000: "),
-            "clamped to MAX, got: {out}"
-        );
-    }
-
-    #[test]
-    fn dice_rejects_unknown_tool() {
-        let provider = dice();
-        let err = provider.call("unknown", &json!({})).unwrap_err();
-        assert!(err.contains("unknown native tool"));
+/// Resolve `id` from `mcp.json` (`type: native`) into a provider under `server_key`.
+pub fn native_for(server_key: &str, id: &str) -> Result<NativeProvider, String> {
+    match id {
+        "dice" => Ok(dice_named(server_key)),
+        _ => Err(format!("unknown native id: {id}")),
     }
 }

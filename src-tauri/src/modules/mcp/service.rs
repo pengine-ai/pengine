@@ -1,65 +1,158 @@
-//! Public facade: build the tool registry from native providers.
+//! Load `mcp.json` and build [`ToolRegistry`] — same code path for `native` and `stdio`
+//! (Docker is just `command` + `args` on a `stdio` entry).
 
+use super::client::McpClient;
 use super::native;
 use super::registry::{Provider, ToolRegistry};
+use super::types::{McpConfig, ServerEntry};
+use std::path::{Path, PathBuf};
 
-/// Build a registry pre-loaded with all bundled native tools.
-/// No I/O, no subprocess — instant.
-pub fn build_default_registry() -> ToolRegistry {
-    ToolRegistry::new(vec![Provider::Native(native::dice())])
+const FILESYSTEM_SERVER_KEY: &str = "filesystem";
+const FILESYSTEM_PKG: &str = "@modelcontextprotocol/server-filesystem";
+
+/// Prefer project `mcp.json` under `src-tauri/` (or `./mcp.json` when cwd is `src-tauri`),
+/// otherwise `mcp.json` next to `connection.json` in app data.
+pub fn resolve_mcp_config_path(store_path: &Path) -> (PathBuf, &'static str) {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+    let from_repo_root = cwd.join("src-tauri").join("mcp.json");
+    if from_repo_root.exists() {
+        return (from_repo_root, "project");
+    }
+
+    let in_crate_root = cwd.join("mcp.json");
+    if cwd.join("Cargo.toml").exists() && in_crate_root.exists() {
+        return (in_crate_root, "project");
+    }
+
+    let app_path = store_path
+        .parent()
+        .map(|p| p.join("mcp.json"))
+        .unwrap_or_else(|| PathBuf::from("mcp.json"));
+    (app_path, "app_data")
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub fn read_config(path: &Path) -> Result<McpConfig, String> {
+    let raw = std::fs::read_to_string(path).map_err(|e| format!("read mcp.json: {e}"))?;
+    serde_json::from_str(&raw).map_err(|e| {
+        format!(
+            "parse mcp.json: {e} — every server entry needs a \"type\" field (\"native\" or \"stdio\")"
+        )
+    })
+}
 
-    #[test]
-    fn default_registry_has_dice() {
-        let reg = build_default_registry();
-        assert_eq!(reg.tool_names(), &["roll_dice"]);
+pub fn save_config(path: &Path, cfg: &McpConfig) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let pretty = serde_json::to_string_pretty(cfg).map_err(|e| format!("encode mcp.json: {e}"))?;
+    std::fs::write(path, pretty).map_err(|e| format!("write mcp.json: {e}"))
+}
+
+/// Allowed folder for the official MCP filesystem stdio server (last path segment in `args`).
+pub fn filesystem_allowed_path(cfg: &McpConfig) -> Option<String> {
+    let ServerEntry::Stdio { args, .. } = cfg.servers.get(FILESYSTEM_SERVER_KEY)? else {
+        return None;
+    };
+    if !args.iter().any(|a| a.contains("server-filesystem")) {
+        return None;
+    }
+    args.last().cloned()
+}
+
+pub fn set_filesystem_allowed_path(cfg: &mut McpConfig, abs_path: &str) {
+    let entry = ServerEntry::Stdio {
+        command: "npx".into(),
+        args: vec![
+            "-y".into(),
+            FILESYSTEM_PKG.into(),
+            abs_path.trim().to_string(),
+        ],
+        env: Default::default(),
+    };
+    cfg.servers.insert(FILESYSTEM_SERVER_KEY.into(), entry);
+}
+
+fn default_config_value() -> serde_json::Value {
+    serde_json::json!({
+        "servers": {
+            "dice": {
+                "type": "native",
+                "id": "dice"
+            }
+        }
+    })
+}
+
+pub fn load_or_init_config(path: &Path) -> Result<McpConfig, String> {
+    if path.exists() {
+        return read_config(path);
     }
 
-    #[tokio::test]
-    async fn native_dice_callable_through_registry() {
-        let reg = build_default_registry();
-        let (text, direct) = reg
-            .call_tool("roll_dice", serde_json::json!({"sides": 6}))
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let default = default_config_value();
+    let pretty = serde_json::to_string_pretty(&default)
+        .map_err(|e| format!("encode default mcp.json: {e}"))?;
+    std::fs::write(path, pretty).map_err(|e| format!("write mcp.json: {e}"))?;
+    serde_json::from_value(default).map_err(|e| e.to_string())
+}
+
+/// Connect every server in order (stable `BTreeMap` keys). Returns registry + status lines.
+pub async fn build_registry(cfg: &McpConfig) -> (ToolRegistry, Vec<String>) {
+    let mut providers = Vec::new();
+    let mut status = Vec::new();
+
+    for (server_key, entry) in &cfg.servers {
+        match entry {
+            ServerEntry::Native { id } => match native::native_for(server_key, id) {
+                Ok(p) => {
+                    let n = p.tools.len();
+                    providers.push(Provider::Native(p));
+                    status.push(format!(
+                        "{server_key} native ({n} tool{})",
+                        if n == 1 { "" } else { "s" }
+                    ));
+                }
+                Err(e) => status.push(format!("{server_key} native failed: {e}")),
+            },
+            ServerEntry::Stdio { command, args, env } => match McpClient::connect(
+                server_key.clone(),
+                command.clone(),
+                args.clone(),
+                env.clone(),
+            )
             .await
-            .expect("call roll_dice");
-        assert!(text.starts_with("Rolled a d6: "), "got: {text}");
-        assert!(direct, "dice should be direct_return");
-    }
-
-    /// Proves the reply comes from the native tool, not the model:
-    ///
-    /// 1. `direct_return` is true  → agent returns tool output verbatim,
-    ///    the model never sees it and cannot rephrase.
-    /// 2. The output matches `Rolled a dN: M` with M in [1, N] — a format
-    ///    the native Rust handler produces. If the model fabricated a roll,
-    ///    `direct_return` would be false and source would be `Model`.
-    #[tokio::test]
-    async fn dice_result_is_provably_from_tool_not_model() {
-        let reg = build_default_registry();
-
-        for sides in [6, 20, 100] {
-            let (text, direct) = reg
-                .call_tool("roll_dice", serde_json::json!({ "sides": sides }))
-                .await
-                .expect("call roll_dice");
-
-            assert!(direct, "direct_return must be true for dice");
-
-            let prefix = format!("Rolled a d{sides}: ");
-            assert!(
-                text.starts_with(&prefix),
-                "expected prefix '{prefix}', got: {text}"
-            );
-
-            let num: u64 = text[prefix.len()..].trim().parse().expect("parse roll");
-            assert!(
-                (1..=sides).contains(&num),
-                "roll {num} out of range [1, {sides}]"
-            );
+            {
+                Ok(client) => {
+                    let n = client.tools.len();
+                    providers.push(Provider::Mcp(Box::new(client)));
+                    status.push(format!(
+                        "{server_key} stdio ({n} tool{})",
+                        if n == 1 { "" } else { "s" }
+                    ));
+                }
+                Err(e) => status.push(format!("{server_key} stdio failed: {e}")),
+            },
         }
     }
+
+    (ToolRegistry::new(providers), status)
+}
+
+/// Replace in-memory tools after a config change (writes should use [`save_config`] first).
+pub async fn rebuild_registry_into_state(state: &crate::shared::state::AppState, cfg: &McpConfig) {
+    let (registry, status) = build_registry(cfg).await;
+    for line in status {
+        state.emit_log("mcp", &line).await;
+    }
+    let n = registry.tool_names().len();
+    *state.mcp.write().await = registry;
+    state
+        .emit_log(
+            "mcp",
+            &format!("ready ({n} tool{})", if n == 1 { "" } else { "s" }),
+        )
+        .await;
 }

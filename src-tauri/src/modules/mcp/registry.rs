@@ -1,45 +1,36 @@
-//! Tool registry: aggregates providers behind a single dispatch interface.
-//!
-//! Adding a new provider kind (e.g. Docker-backed MCP) means adding a variant
-//! to [`Provider`] and a match arm in each method — nothing else changes.
-
+use super::client::McpClient;
 use super::native::NativeProvider;
 use super::types::ToolDef;
 use serde_json::{json, Value};
 
-// ── Provider ───────────────────────────────────────────────────────
-
-/// Where a tool lives.  Extend this enum for Docker / external MCP
-/// servers — the registry, agent loop, and HTTP API stay untouched.
 pub enum Provider {
     Native(NativeProvider),
+    Mcp(Box<McpClient>),
 }
 
 impl Provider {
     pub fn server_name(&self) -> &str {
         match self {
             Provider::Native(n) => &n.server_name,
+            Provider::Mcp(c) => &c.server_name,
         }
     }
 
     pub fn tools(&self) -> &[ToolDef] {
         match self {
             Provider::Native(n) => &n.tools,
+            Provider::Mcp(c) => &c.tools,
         }
     }
 
     pub async fn call_tool(&self, name: &str, args: Value) -> Result<String, String> {
         match self {
             Provider::Native(n) => n.call(name, &args),
+            Provider::Mcp(c) => c.call_tool(name, args).await,
         }
     }
 }
 
-// ── Registry ───────────────────────────────────────────────────────
-
-/// Central tool registry.  Pre-caches the Ollama tool JSON and the
-/// human-readable name list at construction time so the hot path
-/// (each chat turn) is just a cheap `clone()`.
 pub struct ToolRegistry {
     providers: Vec<Provider>,
     cached_ollama_tools: Value,
@@ -61,7 +52,9 @@ impl ToolRegistry {
         let cached_ollama_tools = build_ollama_tools(&providers);
         let cached_tool_names = providers
             .iter()
-            .flat_map(|p| p.tools().iter().map(|t| t.name.clone()))
+            .flat_map(|p| p.tools().iter())
+            .filter(|t| should_expose_to_model(t))
+            .map(|t| t.name.clone())
             .collect();
         Self {
             providers,
@@ -89,7 +82,6 @@ impl ToolRegistry {
         self.cached_tool_names.is_empty()
     }
 
-    /// Dispatch a tool call.  Returns `(output_text, direct_return)`.
     pub async fn call_tool(&self, name: &str, args: Value) -> Result<(String, bool), String> {
         let (server, tool) = match name.split_once('.') {
             Some((s, t)) => (Some(s), t),
@@ -112,10 +104,28 @@ impl ToolRegistry {
     }
 }
 
+fn should_expose_to_model(tool: &ToolDef) -> bool {
+    let desc = tool.description.as_deref().unwrap_or("");
+    if desc.to_ascii_uppercase().contains("DEPRECATED") {
+        return false;
+    }
+    !REDUNDANT_TOOLS.contains(&tool.name.as_str())
+}
+
+/// Tools that add noise without value for a small local model.
+const REDUNDANT_TOOLS: &[&str] = &[
+    "read_media_file",
+    "read_multiple_files",
+    "list_directory_with_sizes",
+    "directory_tree",
+    "list_allowed_directories",
+];
+
 fn build_ollama_tools(providers: &[Provider]) -> Value {
     let arr: Vec<Value> = providers
         .iter()
         .flat_map(|p| p.tools().iter())
+        .filter(|t| should_expose_to_model(t))
         .map(|t| {
             json!({
                 "type": "function",
