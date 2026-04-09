@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { PENGINE } from "../loopback";
+import { PENGINE } from "../api";
 
 type LogLine = { timestamp: string; kind: string; message: string };
 

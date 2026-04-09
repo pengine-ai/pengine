@@ -1,6 +1,6 @@
 import * as Menubar from "@radix-ui/react-menubar";
 import { Link, useLocation } from "react-router-dom";
-import { useAppSessionStore } from "../stores/appSessionStore";
+import { useAppSessionStore } from "../../modules/bot/store/appSessionStore";
 
 const navLinks = [
   { label: "Home", to: "/" },

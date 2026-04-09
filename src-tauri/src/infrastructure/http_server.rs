@@ -1,6 +1,6 @@
-use crate::bot_lifecycle::stop_and_wait_for_bot;
-use crate::state::{AppState, ConnectionData};
-use crate::telegram_service;
+use crate::infrastructure::bot_lifecycle;
+use crate::modules::bot::{repository, service as bot_service};
+use crate::shared::state::{AppState, ConnectionData};
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{Json, Sse};
@@ -130,28 +130,36 @@ async fn handle_connect(
         .emit_log("run", "Verifying token with Telegram…")
         .await;
 
-    let me = telegram_service::verify_token(&token)
+    let me = bot_service::verify_token(&token)
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, Json(ErrorResponse { error: e })))?;
 
-    let bot_id = me.id.to_string();
-    let bot_username = me.username().to_string();
-
-    stop_and_wait_for_bot(&state).await;
-
     let conn = ConnectionData {
-        bot_token: token.clone(),
-        bot_id: bot_id.clone(),
-        bot_username: bot_username.clone(),
+        bot_token: token,
+        bot_id: me.id.to_string(),
+        bot_username: me.username().to_string(),
         connected_at: Utc::now(),
     };
 
-    state.persist(&conn).map_err(|e| {
+    bot_lifecycle::stop_and_wait_for_bot(&state).await;
+
+    repository::persist(&state.store_path, &conn).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse { error: e }),
         )
     })?;
+
+    let spawn_token = conn.bot_token.clone();
+    let response = ConnectResponse {
+        status: "connected".into(),
+        bot_id: conn.bot_id.clone(),
+        bot_username: conn.bot_username.clone(),
+    };
+
+    state
+        .emit_log("ok", &format!("Bot @{} connected", conn.bot_username))
+        .await;
 
     {
         let mut lock = state.connection.lock().await;
@@ -160,36 +168,24 @@ async fn handle_connect(
 
     let shutdown = state.shutdown_notify.clone();
     let spawn_state = state.clone();
-    let spawn_token = token.clone();
     tokio::spawn(async move {
-        telegram_service::start_bot(spawn_state, spawn_token, shutdown).await;
+        bot_service::start_bot(spawn_state, spawn_token, shutdown).await;
     });
 
-    state
-        .emit_log("ok", &format!("Bot @{bot_username} connected"))
-        .await;
-
-    Ok((
-        StatusCode::OK,
-        Json(ConnectResponse {
-            status: "connected".into(),
-            bot_id,
-            bot_username,
-        }),
-    ))
+    Ok((StatusCode::OK, Json(response)))
 }
 
 async fn handle_disconnect(
     State(state): State<AppState>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ErrorResponse>)> {
-    stop_and_wait_for_bot(&state).await;
+    bot_lifecycle::stop_and_wait_for_bot(&state).await;
 
     {
         let mut lock = state.connection.lock().await;
         *lock = None;
     }
 
-    state.clear_persisted().map_err(|e| {
+    repository::clear(&state.store_path).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse { error: e }),

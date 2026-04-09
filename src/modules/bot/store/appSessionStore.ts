@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
-import { deleteConnect } from "../loopback";
+import { deleteConnect } from "../api";
 
 type AppSessionState = {
   isDeviceConnected: boolean;

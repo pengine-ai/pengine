@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { OLLAMA_API_BASE, PENGINE_API_BASE } from "../src/config";
+import { OLLAMA_API_BASE, PENGINE_API_BASE } from "../src/shared/api/config";
 
 const CONNECTED_STORAGE_STATE = {
   state: {

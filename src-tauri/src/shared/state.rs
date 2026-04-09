@@ -13,6 +13,13 @@ pub struct ConnectionData {
     pub connected_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogEntry {
+    pub timestamp: String,
+    pub kind: String,
+    pub message: String,
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub connection: Arc<Mutex<Option<ConnectionData>>>,
@@ -21,13 +28,6 @@ pub struct AppState {
     pub log_tx: Arc<Mutex<Option<tokio::sync::broadcast::Sender<LogEntry>>>>,
     pub store_path: PathBuf,
     pub app_handle: Arc<Mutex<Option<tauri::AppHandle>>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LogEntry {
-    pub timestamp: String,
-    pub kind: String,
-    pub message: String,
 }
 
 impl AppState {
@@ -57,26 +57,5 @@ impl AppState {
         if let Some(handle) = self.app_handle.lock().await.as_ref() {
             let _ = handle.emit("pengine-log", &entry);
         }
-    }
-
-    pub fn persist(&self, data: &ConnectionData) -> Result<(), String> {
-        let json = serde_json::to_string_pretty(data).map_err(|e| e.to_string())?;
-        if let Some(parent) = self.store_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        std::fs::write(&self.store_path, json).map_err(|e| e.to_string())?;
-        Ok(())
-    }
-
-    pub fn load_persisted(&self) -> Option<ConnectionData> {
-        let json = std::fs::read_to_string(&self.store_path).ok()?;
-        serde_json::from_str(&json).ok()
-    }
-
-    pub fn clear_persisted(&self) -> Result<(), String> {
-        if self.store_path.exists() {
-            std::fs::remove_file(&self.store_path).map_err(|e| e.to_string())?;
-        }
-        Ok(())
     }
 }

@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { OLLAMA_API_BASE } from "../config";
-import { fetchOllamaModel, getPengineHealth, PENGINE, postConnect } from "../loopback";
-import { useAppSessionStore } from "../stores/appSessionStore";
-import { StyledQrCode } from "./StyledQrCode";
-import { WizardLayout } from "./WizardLayout";
+import { OLLAMA_API_BASE } from "../../../shared/api/config";
+import { fetchOllamaModel } from "../../ollama/api";
+import { getPengineHealth, PENGINE, postConnect } from "../api";
+import { useAppSessionStore } from "../store/appSessionStore";
+import { StyledQrCode } from "../../../shared/ui/StyledQrCode";
+import { WizardLayout } from "../../../shared/ui/WizardLayout";
 
 export const SETUP_STEPS = [
   {
@@ -176,7 +177,6 @@ export function SetupWizard({ onStepChange, onCompleteSetup }: SetupWizardProps)
       canGoBack={step > 0}
       canGoNext={canGoNext}
     >
-      {/* Step 1: Create bot */}
       {step === 0 && (
         <div className="grid gap-8 lg:grid-cols-[1.05fr_0.95fr]">
           <div className="space-y-5">
@@ -233,7 +233,6 @@ export function SetupWizard({ onStepChange, onCompleteSetup }: SetupWizardProps)
         </div>
       )}
 
-      {/* Step 2: Ollama */}
       {step === 1 && (
         <div className="grid gap-8 lg:grid-cols-[1fr_1fr]">
           <div>
@@ -320,7 +319,6 @@ ollama pull llama3.2`}</code>
         </div>
       )}
 
-      {/* Step 3: Pengine local */}
       {step === 2 && (
         <div className="grid gap-8 lg:grid-cols-[1fr_1fr]">
           <div>
@@ -368,7 +366,6 @@ ollama pull llama3.2`}</code>
         </div>
       )}
 
-      {/* Step 4: Connect */}
       {step === 3 && (
         <div className="grid gap-8 lg:grid-cols-[1fr_1fr]">
           <div>

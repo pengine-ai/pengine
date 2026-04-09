@@ -1,12 +1,8 @@
-use crate::state::AppState;
+use crate::shared::state::AppState;
 use std::time::{Duration, Instant};
 
-/// Max time to wait for `telegram_service::start_bot` to clear `bot_running`
-/// after a shutdown notification.
 pub const BOT_STOP_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Notify the running dispatcher to stop and wait until `bot_running` is false
-/// (or the timeout elapses).
 pub async fn stop_and_wait_for_bot(state: &AppState) {
     let was_running = *state.bot_running.lock().await;
     if !was_running {

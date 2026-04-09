@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { Navigate, Route, Routes, useNavigate } from "react-router-dom";
-import { getPengineHealth } from "./loopback";
+import { getPengineHealth } from "./modules/bot/api";
+import { useAppSessionStore } from "./modules/bot/store/appSessionStore";
 import { DashboardPage } from "./pages/DashboardPage";
 import { LandingPage } from "./pages/LandingPage";
 import { SetupPage } from "./pages/SetupPage";
-import { useAppSessionStore } from "./stores/appSessionStore";
 
 /** One-shot: sync dashboard route with persisted session or running local app. */
 function StartupDashboardRedirect() {

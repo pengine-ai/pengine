@@ -1,8 +1,8 @@
 import { Link } from "react-router-dom";
-import { PhoneMockup } from "../components/PhoneMockup";
-import { SpecMockup } from "../components/SpecMockup";
-import { TerminalPreview } from "../components/TerminalPreview";
-import { TopMenu } from "../components/TopMenu";
+import { TerminalPreview } from "../modules/bot/components/TerminalPreview";
+import { PhoneMockup } from "../shared/ui/PhoneMockup";
+import { SpecMockup } from "../shared/ui/SpecMockup";
+import { TopMenu } from "../shared/ui/TopMenu";
 
 const steps = [
   {

@@ -1,8 +1,9 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { SETUP_STEPS, SetupWizard } from "../components/SetupWizard";
-import { TerminalPreview } from "../components/TerminalPreview";
-import { TopMenu } from "../components/TopMenu";
+import { SETUP_STEPS, SetupWizard } from "../modules/bot/components/SetupWizard";
+import { TerminalPreview } from "../modules/bot/components/TerminalPreview";
+import { TopMenu } from "../shared/ui/TopMenu";
+
 const requirements = [
   "Telegram account",
   "Bot token from BotFather",

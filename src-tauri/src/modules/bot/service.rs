@@ -1,19 +1,10 @@
-use crate::state::AppState;
-use std::sync::{Arc, OnceLock};
+use crate::modules::ollama::service as ollama;
+use crate::shared::state::AppState;
+use std::sync::Arc;
 use teloxide::prelude::*;
 use teloxide::types::Me;
 use teloxide::utils::command::BotCommands;
 use tokio::sync::Notify;
-
-static HTTP: OnceLock<reqwest::Client> = OnceLock::new();
-
-const OLLAMA_PS_URL: &str = "http://localhost:11434/api/ps";
-const OLLAMA_TAGS_URL: &str = "http://localhost:11434/api/tags";
-const OLLAMA_CHAT_URL: &str = "http://localhost:11434/api/chat";
-
-fn http_client() -> &'static reqwest::Client {
-    HTTP.get_or_init(reqwest::Client::new)
-}
 
 pub async fn verify_token(token: &str) -> Result<Me, String> {
     let bot = Bot::new(token);
@@ -112,12 +103,12 @@ async fn text_handler(bot: Bot, msg: Message, state: AppState) -> ResponseResult
         .emit_log("msg", &format!("from {}: {}", user_label(&msg), incoming))
         .await;
 
-    match active_ollama_model().await {
+    match ollama::active_model().await {
         Ok(model) => {
             state
                 .emit_log("tool", &format!("routing to ollama → {model}"))
                 .await;
-            match ask_ollama(&model, incoming).await {
+            match ollama::chat(&model, incoming).await {
                 Ok(reply) => {
                     state.emit_log("reply", &format!("→ {reply}")).await;
                     bot.send_message(msg.chat.id, &reply).await?;
@@ -149,64 +140,6 @@ async fn send_inference_unavailable(bot: &Bot, msg: &Message, state: &AppState) 
             )
             .await;
     }
-}
-
-/// Returns the currently loaded model (from `/api/ps`), falling back to the
-/// first pulled model (from `/api/tags`) if nothing is loaded yet.
-async fn active_ollama_model() -> Result<String, String> {
-    let client = http_client();
-    let timeout = std::time::Duration::from_secs(5);
-
-    // Prefer a model that is already loaded in memory
-    if let Ok(resp) = client.get(OLLAMA_PS_URL).timeout(timeout).send().await {
-        if let Ok(body) = resp.json::<serde_json::Value>().await {
-            if let Some(name) = body["models"]
-                .as_array()
-                .and_then(|arr| arr.first())
-                .and_then(|m| m["name"].as_str())
-            {
-                return Ok(name.to_string());
-            }
-        }
-    }
-
-    // Fallback: first pulled model (Ollama will load it on demand)
-    let resp = client
-        .get(OLLAMA_TAGS_URL)
-        .timeout(timeout)
-        .send()
-        .await
-        .map_err(|e| format!("ollama unreachable: {e}"))?;
-
-    let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
-    body["models"]
-        .as_array()
-        .and_then(|arr| arr.first())
-        .and_then(|m| m["name"].as_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| "no models pulled in ollama".to_string())
-}
-
-async fn ask_ollama(model: &str, prompt: &str) -> Result<String, String> {
-    let payload = serde_json::json!({
-        "model": model,
-        "messages": [{"role": "user", "content": format!("Think fast and answer extremely short. If you don't know the answer, say you don't know. Question: {prompt}")}],
-        "stream": false,
-    });
-
-    let resp = http_client()
-        .post(OLLAMA_CHAT_URL)
-        .json(&payload)
-        .timeout(std::time::Duration::from_secs(120))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
-    body["message"]["content"]
-        .as_str()
-        .map(|s| s.to_string())
-        .ok_or_else(|| "unexpected ollama response shape".to_string())
 }
 
 fn user_label(msg: &Message) -> String {

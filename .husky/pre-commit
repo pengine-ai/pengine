@@ -1,13 +1,5 @@
 #!/usr/bin/env sh
 
-# Run lint-staged (ESLint + Prettier on staged TS/JS files)
 bunx lint-staged
-
-# TypeScript type check
-bun run tsc --noEmit
-
-# Rust: format check + clippy on src-tauri
-cd src-tauri
-cargo fmt --all -- --check
-cargo clippy --all-targets -- -D warnings
-cd ..
+bun run typecheck
+bun run rust:check

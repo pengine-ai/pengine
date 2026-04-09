@@ -1,4 +1,5 @@
-import { OLLAMA_API_BASE, PENGINE_API_BASE } from "./config";
+import { PENGINE_API_BASE } from "../../../shared/api/config";
+import type { PengineHealth } from "../types";
 
 /** Loopback HTTP API paths (Tauri `connection_server`). */
 export const PENGINE = {
@@ -6,40 +7,6 @@ export const PENGINE = {
   health: `${PENGINE_API_BASE}/v1/health`,
   logs: `${PENGINE_API_BASE}/v1/logs`,
 } as const;
-
-export type OllamaProbe = { reachable: boolean; model: string | null };
-
-/** Prefer loaded model from `/api/ps`, else first pulled model from `/api/tags`. */
-export async function fetchOllamaModel(timeoutMs = 3000): Promise<OllamaProbe> {
-  try {
-    const psResp = await fetch(`${OLLAMA_API_BASE}/api/ps`, {
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-    if (psResp.ok) {
-      const psData = await psResp.json();
-      const loaded = psData.models?.[0]?.name as string | undefined;
-      if (loaded) return { reachable: true, model: loaded };
-    }
-    const tagsResp = await fetch(`${OLLAMA_API_BASE}/api/tags`, {
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-    if (tagsResp.ok) {
-      const tagsData = await tagsResp.json();
-      const first = (tagsData.models?.[0]?.name as string | undefined) ?? null;
-      return { reachable: true, model: first ?? null };
-    }
-    return { reachable: false, model: null };
-  } catch {
-    return { reachable: false, model: null };
-  }
-}
-
-export type PengineHealth = {
-  status: string;
-  bot_connected: boolean;
-  bot_username?: string;
-  bot_id?: string | null;
-};
 
 /** GET `/v1/health`; JSON on 200, otherwise `null` (offline / error). */
 export async function getPengineHealth(timeoutMs: number): Promise<PengineHealth | null> {

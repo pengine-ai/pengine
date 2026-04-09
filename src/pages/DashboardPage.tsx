@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { TerminalPreview } from "../components/TerminalPreview";
-import { TopMenu } from "../components/TopMenu";
-import { PENGINE_API_BASE } from "../config";
-import { fetchOllamaModel, getPengineHealth } from "../loopback";
-import { useAppSessionStore } from "../stores/appSessionStore";
+import { getPengineHealth } from "../modules/bot/api";
+import { TerminalPreview } from "../modules/bot/components/TerminalPreview";
+import { useAppSessionStore } from "../modules/bot/store/appSessionStore";
+import { fetchOllamaModel } from "../modules/ollama/api";
+import { PENGINE_API_BASE } from "../shared/api/config";
+import { TopMenu } from "../shared/ui/TopMenu";
 
 type ServiceInfo = {
   name: string;
