@@ -34,6 +34,7 @@ export function McpServerCard({
   const isNative = entry.type === "native";
   const isEditing = editingName === name;
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const toolCount = tools.filter((t) => t.server === name).length;
   const commandPreview =
@@ -45,8 +46,13 @@ export function McpServerCard({
   };
 
   const handleDelete = async () => {
-    setConfirmDelete(false);
-    await onDelete(name);
+    setDeleteError(null);
+    try {
+      await onDelete(name);
+      setConfirmDelete(false);
+    } catch (e) {
+      setDeleteError(e instanceof Error ? e.message : "Could not remove server");
+    }
   };
 
   // ── Editing: form replaces the card content ────────────────────────
@@ -120,7 +126,10 @@ export function McpServerCard({
             <button
               type="button"
               disabled={busy}
-              onClick={() => setConfirmDelete(true)}
+              onClick={() => {
+                setDeleteError(null);
+                setConfirmDelete(true);
+              }}
               aria-label={`Delete server ${name}`}
               title={`Delete server ${name}`}
               className="rounded-lg border border-rose-300/20 bg-transparent px-2 py-1 font-mono text-[10px] uppercase tracking-wider text-rose-300/70 hover:bg-rose-300/10 hover:text-rose-200 disabled:opacity-40"
@@ -136,6 +145,11 @@ export function McpServerCard({
           <p className="text-xs text-rose-200">
             Remove <strong>{name}</strong>? Its tools will be disconnected.
           </p>
+          {deleteError && (
+            <p className="mt-2 font-mono text-[11px] text-rose-300" role="alert">
+              {deleteError}
+            </p>
+          )}
           <div className="mt-2 flex gap-2">
             <button
               type="button"
@@ -147,7 +161,10 @@ export function McpServerCard({
             </button>
             <button
               type="button"
-              onClick={() => setConfirmDelete(false)}
+              onClick={() => {
+                setConfirmDelete(false);
+                setDeleteError(null);
+              }}
               className="rounded-lg border border-white/15 bg-transparent px-3 py-1 text-xs text-(--mid) hover:text-white"
             >
               Cancel
@@ -252,7 +269,10 @@ function InlineEditForm({
     const env: Record<string, string> = {};
     for (const line of envText.split("\n")) {
       const eq = line.indexOf("=");
-      if (eq > 0) env[line.slice(0, eq).trim()] = line.slice(eq + 1).trim();
+      if (eq > 0) {
+        const key = line.slice(0, eq).trim();
+        if (key !== "") env[key] = line.slice(eq + 1).trim();
+      }
     }
     await onSave({
       type: "stdio",

@@ -82,9 +82,8 @@ export function McpToolsPanel() {
     setNotice(null);
     const ok = await deleteMcpServer(name);
     if (!ok) {
-      setNotice(`Could not remove "${name}"`);
       setBusy(false);
-      return;
+      throw new Error(`Could not remove "${name}"`);
     }
     await reload();
     setBusy(false);

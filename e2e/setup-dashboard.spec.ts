@@ -98,31 +98,49 @@ async function mockApis(page: import("@playwright/test").Page) {
 
   await page.route(`${PENGINE_API_BASE}/v1/ollama/model`, async (route) => {
     if (route.request().method() === "PUT") {
+      let selected_model: string | null = null;
+      const raw = route.request().postData();
+      if (raw) {
+        try {
+          const body = JSON.parse(raw) as { model?: string | null };
+          let m: string | null = null;
+          if (typeof body.model === "string") m = body.model.trim();
+          selected_model = m && m.length > 0 ? m : null;
+        } catch {
+          /* ignore malformed body */
+        }
+      }
       await route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ ok: true }),
+        body: JSON.stringify({ selected_model }),
       });
     } else {
       await route.continue();
     }
   });
 
-  await page.route(`${PENGINE_API_BASE}/v1/mcp/servers`, async (route) => {
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({ servers: {} }),
-    });
-  });
+  await page.route(
+    (url) => url.href.startsWith(`${PENGINE_API_BASE}/v1/mcp/servers`),
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ servers: {} }),
+      });
+    },
+  );
 
-  await page.route(`${PENGINE_API_BASE}/v1/mcp/tools`, async (route) => {
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify([]),
-    });
-  });
+  await page.route(
+    (url) => url.href.startsWith(`${PENGINE_API_BASE}/v1/mcp/tools`),
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify([]),
+      });
+    },
+  );
 }
 
 test.describe("setup to dashboard flow", () => {
