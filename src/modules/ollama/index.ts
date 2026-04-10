@@ -1,2 +1,2 @@
-export { fetchOllamaModel } from "./api";
-export type { OllamaProbe } from "./types";
+export { fetchOllamaModel, fetchOllamaModels, setPreferredOllamaModel } from "./api";
+export type { OllamaModelsResponse, OllamaProbe } from "./types";

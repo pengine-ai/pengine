@@ -1,6 +1,7 @@
 use crate::infrastructure::bot_lifecycle;
 use crate::modules::bot::{repository, service as bot_service};
 use crate::modules::mcp::service as mcp_service;
+use crate::modules::ollama::service as ollama_service;
 use crate::shared::state::{AppState, ConnectionData};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -62,6 +63,19 @@ pub struct PutMcpFilesystemBody {
     pub path: String,
 }
 
+#[derive(Serialize)]
+pub struct OllamaModelsResponse {
+    pub reachable: bool,
+    pub active_model: Option<String>,
+    pub selected_model: Option<String>,
+    pub models: Vec<String>,
+}
+
+#[derive(Deserialize)]
+pub struct PutOllamaModelBody {
+    pub model: Option<String>,
+}
+
 pub async fn start_server(state: AppState) {
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -73,6 +87,8 @@ pub async fn start_server(state: AppState) {
         .route("/v1/connect", delete(handle_disconnect))
         .route("/v1/health", get(handle_health))
         .route("/v1/logs", get(handle_logs_sse))
+        .route("/v1/ollama/models", get(handle_ollama_models))
+        .route("/v1/ollama/model", put(handle_ollama_model_put))
         .route("/v1/mcp/tools", get(handle_mcp_tools))
         .route("/v1/mcp/config", get(handle_mcp_config_get))
         .route("/v1/mcp/filesystem", put(handle_mcp_filesystem_put))
@@ -233,6 +249,72 @@ async fn handle_health(State(state): State<AppState>) -> Json<HealthResponse> {
         bot_username: conn.as_ref().map(|c| c.bot_username.clone()),
         bot_id: conn.as_ref().map(|c| c.bot_id.clone()),
     })
+}
+
+async fn handle_ollama_models(State(state): State<AppState>) -> Json<OllamaModelsResponse> {
+    let selected_model = state.preferred_ollama_model.read().await.clone();
+    match ollama_service::model_catalog(3000).await {
+        Ok(catalog) => Json(OllamaModelsResponse {
+            reachable: true,
+            active_model: catalog.active,
+            selected_model,
+            models: catalog.models,
+        }),
+        Err(_) => Json(OllamaModelsResponse {
+            reachable: false,
+            active_model: None,
+            selected_model,
+            models: Vec::new(),
+        }),
+    }
+}
+
+async fn handle_ollama_model_put(
+    State(state): State<AppState>,
+    Json(body): Json<PutOllamaModelBody>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ErrorResponse>)> {
+    let normalized = body
+        .model
+        .as_ref()
+        .map(|m| m.trim().to_string())
+        .filter(|m| !m.is_empty());
+
+    if let Some(ref model) = normalized {
+        let catalog = ollama_service::model_catalog(3000)
+            .await
+            .map_err(|e| (StatusCode::BAD_GATEWAY, Json(ErrorResponse { error: e })))?;
+        if !catalog.models.iter().any(|m| m == model) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!("model '{model}' is not available in Ollama"),
+                }),
+            ));
+        }
+    }
+
+    {
+        let mut lock = state.preferred_ollama_model.write().await;
+        *lock = normalized.clone();
+    }
+
+    state
+        .emit_log(
+            "run",
+            &format!(
+                "ollama model {}",
+                normalized
+                    .as_ref()
+                    .map(|m| format!("set to '{m}'"))
+                    .unwrap_or_else(|| "reset to active".to_string())
+            ),
+        )
+        .await;
+
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({ "selected_model": normalized })),
+    ))
 }
 
 async fn handle_mcp_config_get(State(state): State<AppState>) -> Json<McpConfigInfoResponse> {

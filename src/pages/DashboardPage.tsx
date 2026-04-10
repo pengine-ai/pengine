@@ -4,7 +4,7 @@ import { getPengineHealth } from "../modules/bot/api";
 import { TerminalPreview } from "../modules/bot/components/TerminalPreview";
 import { useAppSessionStore } from "../modules/bot/store/appSessionStore";
 import { McpToolsPanel } from "../modules/mcp/components/McpToolsPanel";
-import { fetchOllamaModel } from "../modules/ollama/api";
+import { fetchOllamaModels, setPreferredOllamaModel } from "../modules/ollama/api";
 import { TopMenu } from "../shared/ui/TopMenu";
 
 type ServiceInfo = {
@@ -18,6 +18,10 @@ export function DashboardPage() {
   const isDeviceConnected = useAppSessionStore((state) => state.isDeviceConnected);
   const disconnectDevice = useAppSessionStore((state) => state.disconnectDevice);
   const botUsername = useAppSessionStore((state) => state.botUsername);
+  const [availableModels, setAvailableModels] = useState<string[]>([]);
+  const [selectedModel, setSelectedModel] = useState<string | null>(null);
+  const [activeModel, setActiveModel] = useState<string | null>(null);
+  const [savingModel, setSavingModel] = useState(false);
   const [services, setServices] = useState<ServiceInfo[]>([
     { name: "Telegram gateway", status: "checking", detail: "Checking…" },
     { name: "Pengine runtime", status: "checking", detail: "Checking…" },
@@ -32,7 +36,12 @@ export function DashboardPage() {
     const botConnected = health?.bot_connected ?? false;
     if (health?.bot_username) botUser = health.bot_username;
 
-    const { reachable: ollamaUp, model: ollamaModel } = await fetchOllamaModel(2000);
+    const ollama = await fetchOllamaModels(2500);
+    const ollamaUp = ollama.reachable;
+    const effectiveModel = ollama.selected_model ?? ollama.active_model;
+    setAvailableModels(ollama.models);
+    setSelectedModel(ollama.selected_model);
+    setActiveModel(ollama.active_model);
 
     setServices([
       {
@@ -48,7 +57,7 @@ export function DashboardPage() {
       {
         name: "Ollama",
         status: ollamaUp ? "running" : "stopped",
-        detail: ollamaUp ? (ollamaModel ? ollamaModel : "No model loaded") : "Not reachable",
+        detail: ollamaUp ? (effectiveModel ? effectiveModel : "No model loaded") : "Not reachable",
       },
     ]);
   }, [botUsername]);
@@ -69,6 +78,16 @@ export function DashboardPage() {
     }
   };
 
+  const handleModelChange = async (value: string) => {
+    const next = value === "__active__" ? null : value;
+    setSavingModel(true);
+    const ok = await setPreferredOllamaModel(next);
+    setSavingModel(false);
+    if (ok) {
+      await refreshStatus();
+    }
+  };
+
   const allRunning = services.every((s) => s.status === "running");
 
   return (
@@ -77,47 +96,76 @@ export function DashboardPage() {
 
       <main className="section-shell pt-6 sm:pt-10">
         {/* ── Status bar: services + connection ──────────────────── */}
-        <div className="flex flex-wrap items-center gap-2 sm:gap-3">
-          {/* Overall status */}
-          <div className="flex items-center gap-2">
-            <span
-              className={`h-2 w-2 shrink-0 rounded-full sm:h-2.5 sm:w-2.5 ${
-                allRunning ? "bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.5)]" : "bg-rose-400"
-              }`}
-            />
-            <p className="font-mono text-xs font-semibold text-white sm:text-sm">
-              {allRunning ? "All systems running" : "Some services offline"}
-            </p>
-          </div>
-
-          <div className="mx-0.5 hidden h-4 w-px bg-white/10 sm:block" />
-
-          {/* Service pills — hide detail text on small screens */}
-          {services.map((service) => (
-            <div
-              key={service.name}
-              className="flex items-center gap-1.5 rounded-full border border-white/10 bg-white/5 px-2.5 py-1 sm:px-3"
-            >
+        <div className="flex flex-wrap items-center gap-2 sm:flex-nowrap sm:gap-3">
+          <div className="flex min-w-0 flex-wrap items-center gap-2 sm:gap-3">
+            {/* Overall status */}
+            <div className="flex items-center gap-2">
               <span
-                className={`h-1.5 w-1.5 shrink-0 rounded-full ${
-                  service.status === "running"
-                    ? "bg-emerald-400"
-                    : service.status === "stopped"
-                      ? "bg-rose-400"
-                      : "bg-yellow-400"
+                className={`h-2 w-2 shrink-0 rounded-full sm:h-2.5 sm:w-2.5 ${
+                  allRunning
+                    ? "bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.5)]"
+                    : "bg-rose-400"
                 }`}
               />
-              <span className="font-mono text-[10px] text-white/70 sm:text-[11px]">
-                {service.name}
-              </span>
-              <span className="hidden font-mono text-[11px] text-white/40 sm:inline">
-                {service.detail}
-              </span>
+              <p className="font-mono text-xs font-semibold text-white sm:text-sm">
+                {allRunning ? "All systems running" : "Some services offline"}
+              </p>
             </div>
-          ))}
+
+            <div className="mx-0.5 hidden h-4 w-px bg-white/10 sm:block" />
+
+            {/* Service pills — hide detail text on small screens */}
+            {services.map((service) => (
+              <div
+                key={service.name}
+                className="flex items-center gap-1.5 rounded-full border border-white/10 bg-white/5 px-2.5 py-1 sm:px-3"
+              >
+                <span
+                  className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                    service.status === "running"
+                      ? "bg-emerald-400"
+                      : service.status === "stopped"
+                        ? "bg-rose-400"
+                        : "bg-yellow-400"
+                  }`}
+                />
+                <span className="font-mono text-[10px] text-white/70 sm:text-[11px]">
+                  {service.name}
+                </span>
+                <span className="hidden font-mono text-[11px] text-white/40 sm:inline">
+                  {service.detail}
+                </span>
+              </div>
+            ))}
+          </div>
 
           {/* Connection controls */}
-          <div className="ml-auto flex items-center gap-2">
+          <div className="flex shrink-0 items-center gap-2 whitespace-nowrap sm:ml-auto">
+            <div className="flex items-center gap-1 rounded-lg border border-cyan-300/20 bg-cyan-300/10 px-2 py-1">
+              <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-cyan-300" />
+              <select
+                value={selectedModel ?? "__active__"}
+                onChange={(event) => void handleModelChange(event.target.value)}
+                disabled={savingModel || availableModels.length === 0}
+                className="max-w-28 bg-transparent font-mono text-[10px] text-cyan-100 outline-none sm:max-w-36"
+                title={
+                  selectedModel
+                    ? `Using selected model: ${selectedModel}`
+                    : activeModel
+                      ? `Using active model: ${activeModel}`
+                      : "No Ollama model detected"
+                }
+              >
+                <option value="__active__">
+                  {activeModel ? `Active (${activeModel})` : "Active model"}
+                </option>
+                {availableModels.map((model) => (
+                  <option key={model} value={model}>
+                    {model}
+                  </option>
+                ))}
+              </select>
+            </div>
             {!isDeviceConnected && (
               <Link
                 to="/setup"

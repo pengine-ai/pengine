@@ -38,7 +38,11 @@ pub struct TurnResult {
 }
 
 pub async fn run_turn(state: &AppState, user_message: &str) -> Result<TurnResult, String> {
-    let model = ollama::active_model().await?;
+    let model = if let Some(selected) = state.preferred_ollama_model.read().await.clone() {
+        selected
+    } else {
+        ollama::active_model().await?
+    };
 
     let (ollama_tools, has_tools) = {
         let reg = state.mcp.read().await;
