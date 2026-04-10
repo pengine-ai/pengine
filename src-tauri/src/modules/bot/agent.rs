@@ -60,8 +60,11 @@ pub async fn run_turn(state: &AppState, user_message: &str) -> Result<TurnResult
 
     let system = if has_tools {
         format!(
-            "You are a helpful assistant with tool access. \
-             Call a tool when you need external data. Answer concisely.{fs_context}"
+            "You are a helpful assistant with tool access.\n\
+             Rules:\n\
+             - Call a tool ONLY when you need external data you don't already have.\n\
+             - After receiving tool results, answer the user's question immediately in the same response.\n\
+             - Be concise and direct.{fs_context}"
         )
     } else {
         "Answer concisely.".to_string()
@@ -96,15 +99,35 @@ pub async fn run_turn(state: &AppState, user_message: &str) -> Result<TurnResult
             .unwrap_or_default();
 
         if tool_calls.is_empty() {
-            if tool_results.is_empty() {
-                let text = msg
-                    .get("content")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                state.emit_log("tool", "model replied in text").await;
+            let text = msg
+                .get("content")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+
+            if !text.is_empty() {
+                // Model already produced a usable answer (with or without prior tool data).
+                state
+                    .emit_log(
+                        "tool",
+                        if tool_results.is_empty() {
+                            "model replied in text"
+                        } else {
+                            "answered from tool data"
+                        },
+                    )
+                    .await;
                 return Ok(TurnResult {
                     text,
+                    source: ReplySource::Model,
+                });
+            }
+
+            // Model returned no text after tools ran — fall through to summarize.
+            if tool_results.is_empty() {
+                return Ok(TurnResult {
+                    text: String::new(),
                     source: ReplySource::Model,
                 });
             }

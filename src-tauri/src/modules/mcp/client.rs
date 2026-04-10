@@ -15,6 +15,7 @@ impl McpClient {
         command: String,
         args: Vec<String>,
         env: HashMap<String, String>,
+        direct_return: bool,
     ) -> Result<Self, String> {
         let transport = StdioTransport::spawn(&command, &args, &env).await?;
 
@@ -27,7 +28,13 @@ impl McpClient {
         let _ = transport.notify("notifications/initialized", None).await;
 
         let result = transport.call("tools/list", None).await?;
-        let tools = parse_tools(&server_name, &result);
+        let mut tools = parse_tools(&server_name, &result);
+
+        if direct_return {
+            for tool in &mut tools {
+                tool.direct_return = true;
+            }
+        }
 
         Ok(Self {
             server_name,

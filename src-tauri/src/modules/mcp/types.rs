@@ -21,6 +21,10 @@ pub enum ServerEntry {
         args: Vec<String>,
         #[serde(default)]
         env: HashMap<String, String>,
+        /// When true, tool results are returned directly to the user without
+        /// sending them back to the model for summarisation.
+        #[serde(default)]
+        direct_return: bool,
     },
 }
 

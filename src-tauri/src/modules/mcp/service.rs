@@ -69,6 +69,7 @@ pub fn set_filesystem_allowed_path(cfg: &mut McpConfig, abs_path: &str) {
             abs_path.trim().to_string(),
         ],
         env: Default::default(),
+        direct_return: true,
     };
     cfg.servers.insert(FILESYSTEM_SERVER_KEY.into(), entry);
 }
@@ -117,19 +118,26 @@ pub async fn build_registry(cfg: &McpConfig) -> (ToolRegistry, Vec<String>) {
                 }
                 Err(e) => status.push(format!("{server_key} native failed: {e}")),
             },
-            ServerEntry::Stdio { command, args, env } => match McpClient::connect(
+            ServerEntry::Stdio {
+                command,
+                args,
+                env,
+                direct_return,
+            } => match McpClient::connect(
                 server_key.clone(),
                 command.clone(),
                 args.clone(),
                 env.clone(),
+                *direct_return,
             )
             .await
             {
                 Ok(client) => {
                     let n = client.tools.len();
+                    let dr = if *direct_return { " direct_return" } else { "" };
                     providers.push(Provider::Mcp(Box::new(client)));
                     status.push(format!(
-                        "{server_key} stdio ({n} tool{})",
+                        "{server_key} stdio ({n} tool{}{dr})",
                         if n == 1 { "" } else { "s" }
                     ));
                 }
