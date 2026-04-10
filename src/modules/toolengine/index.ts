@@ -1,0 +1,152 @@
+import { fetchErrorMessage, PENGINE_API_BASE } from "../../shared/api/config";
+
+export type RuntimeStatus = {
+  available: boolean;
+  kind?: "podman" | "docker";
+  version?: string;
+  rootless?: boolean;
+};
+
+export type CatalogToolCommand = {
+  name: string;
+  description: string;
+};
+
+export type CatalogTool = {
+  id: string;
+  name: string;
+  version: string;
+  description: string;
+  installed: boolean;
+  commands: CatalogToolCommand[];
+};
+
+function makeTimeoutSignal(timeoutMs: number): { signal: AbortSignal; cleanup: () => void } {
+  if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
+    return { signal: AbortSignal.timeout(timeoutMs), cleanup: () => {} };
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  return {
+    signal: controller.signal,
+    cleanup: () => clearTimeout(timer),
+  };
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Tauri starts the loopback API in a spawned task; the webview may load first. Brief retries avoid a false "offline" flash. */
+async function fetchOkWithRetry(
+  url: string,
+  init: RequestInit | undefined,
+  timeoutMs: number,
+  attempts = 6,
+  delayMs = 250,
+): Promise<Response | null> {
+  for (let i = 0; i < attempts; i++) {
+    const { signal, cleanup } = makeTimeoutSignal(timeoutMs);
+    try {
+      const resp = await fetch(url, { ...init, signal });
+      cleanup();
+      if (resp.ok) return resp;
+    } catch {
+      cleanup();
+    }
+    if (i + 1 < attempts) await sleep(delayMs);
+  }
+  return null;
+}
+
+/** GET `/v1/toolengine/runtime` — container runtime detection status. */
+export async function fetchRuntimeStatus(timeoutMs = 3000): Promise<RuntimeStatus | null> {
+  const resp = await fetchOkWithRetry(
+    `${PENGINE_API_BASE}/v1/toolengine/runtime`,
+    undefined,
+    timeoutMs,
+  );
+  if (!resp) return null;
+  try {
+    return (await resp.json()) as RuntimeStatus;
+  } catch {
+    return null;
+  }
+}
+
+/** GET `/v1/toolengine/catalog` — full tool catalog with installed flags. */
+export async function fetchToolCatalog(timeoutMs = 5000): Promise<CatalogTool[] | null> {
+  const resp = await fetchOkWithRetry(
+    `${PENGINE_API_BASE}/v1/toolengine/catalog`,
+    undefined,
+    timeoutMs,
+  );
+  if (!resp) return null;
+  try {
+    const body = (await resp.json()) as { tools: CatalogTool[] };
+    return body.tools;
+  } catch {
+    return null;
+  }
+}
+
+/** POST `/v1/toolengine/install` — pull + verify a whitelisted container image. */
+export async function installTool(
+  toolId: string,
+  /** Large image pulls on slow links can exceed a few minutes. */
+  timeoutMs = 900_000,
+): Promise<{ ok: boolean; error?: string }> {
+  const { signal, cleanup } = makeTimeoutSignal(timeoutMs);
+  try {
+    const resp = await fetch(`${PENGINE_API_BASE}/v1/toolengine/install`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tool_id: toolId }),
+      signal,
+    });
+    if (resp.ok) return { ok: true };
+    const raw = await resp.text();
+    let message = `Request failed (HTTP ${resp.status})`;
+    try {
+      const body = JSON.parse(raw) as { error?: string };
+      message = body.error ?? raw.trim();
+    } catch {
+      message = raw.trim() || message;
+    }
+    return { ok: false, error: message };
+  } catch (e) {
+    return { ok: false, error: fetchErrorMessage(e) };
+  } finally {
+    cleanup();
+  }
+}
+
+/** POST `/v1/toolengine/uninstall` — remove a container image. */
+export async function uninstallTool(
+  toolId: string,
+  timeoutMs = 120_000,
+): Promise<{ ok: boolean; error?: string }> {
+  const { signal, cleanup } = makeTimeoutSignal(timeoutMs);
+  try {
+    const resp = await fetch(`${PENGINE_API_BASE}/v1/toolengine/uninstall`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tool_id: toolId }),
+      signal,
+    });
+    if (resp.ok) return { ok: true };
+    const raw = await resp.text();
+    let message = `Request failed (HTTP ${resp.status})`;
+    try {
+      const body = JSON.parse(raw) as { error?: string };
+      message = body.error ?? raw.trim();
+    } catch {
+      message = raw.trim() || message;
+    }
+    return { ok: false, error: message };
+  } catch (e) {
+    return { ok: false, error: fetchErrorMessage(e) };
+  } finally {
+    cleanup();
+  }
+}

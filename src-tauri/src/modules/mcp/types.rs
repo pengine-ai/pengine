@@ -4,6 +4,10 @@ use std::collections::{BTreeMap, HashMap};
 /// Root config: `src-tauri/mcp.json` in dev or `mcp.json` next to app data (`connection.json`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpConfig {
+    /// Host folders shared with the File Manager container (`/app/<basename>`). Replaces legacy
+    /// `npx @modelcontextprotocol/server-filesystem` entries under `servers.filesystem`.
+    #[serde(default)]
+    pub workspace_roots: Vec<String>,
     #[serde(default)]
     pub servers: BTreeMap<String, ServerEntry>,
 }

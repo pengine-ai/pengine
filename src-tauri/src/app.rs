@@ -35,23 +35,19 @@ pub fn run() {
 
             app.manage(shared_state.clone());
 
-            // Load MCP before any bot work so the first Telegram message never sees an empty registry.
+            // Connect MCP stdio servers in the background so window + HTTP API are not blocked by
+            // slow starters (Podman containers, `npx`, etc.). The registry stays empty until connect
+            // finishes; early Telegram turns simply omit tools until then.
             let mcp_path = shared_state.mcp_config_path.clone();
             let mcp_state = shared_state.clone();
-            tauri::async_runtime::block_on(async move {
+            tauri::async_runtime::spawn(async move {
                 mcp_state
-                    .emit_log("mcp", &format!("loading {}", mcp_path.display()))
+                    .emit_log(
+                        "mcp",
+                        &format!("connecting servers in background ({})", mcp_path.display()),
+                    )
                     .await;
-                match mcp_service::load_or_init_config(&mcp_path) {
-                    Ok(cfg) => {
-                        mcp_service::rebuild_registry_into_state(&mcp_state, &cfg).await;
-                    }
-                    Err(e) => {
-                        mcp_state
-                            .emit_log("mcp", &format!("mcp.json error: {e}"))
-                            .await;
-                    }
-                }
+                mcp_service::rebuild_registry_into_state(&mcp_state).await;
             });
 
             // Resume persisted Telegram connection if present.

@@ -1,4 +1,5 @@
 use crate::modules::ollama::service as ollama;
+use crate::modules::tool_engine::service::workspace_app_bind_pairs;
 use crate::shared::state::AppState;
 use serde_json::json;
 use std::time::{Duration, Instant};
@@ -51,15 +52,24 @@ pub async fn run_turn(state: &AppState, user_message: &str) -> Result<TurnResult
 
     let fs_context = {
         let paths = state.cached_filesystem_paths.read().await.clone();
-        if paths.is_empty() {
-            String::new()
+        let host_lines: String = workspace_app_bind_pairs(&paths)
+            .iter()
+            .map(|(host, cpath)| format!("  - {cpath}  ← {host}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let roots_note = if paths.is_empty() {
+            "No shared folders are configured yet — the container only allows **`/tmp`** for MCP file tools. \
+             To read a project like `pengine`, add its folder in Dashboard → MCP Tools (File Manager) first; \
+             then use **`/app/<folder-name>/README.md`** (folder-name = last path segment)."
         } else {
-            let listing = paths.join(", ");
-            format!(
-                "\nFile tools operate on these directories: {listing}\n\
-                 Always use absolute paths rooted in one of those directories."
-            )
-        }
+            "Use the **`/app/...`** paths below only — not host paths like /Users/…, and not **`/mcp/...`** (that is the server working directory, not a file root)."
+        };
+        format!(
+            "\nFile Manager runs in a container. Allowed file roots are **`/tmp`** plus **`/app/<folder-name>`** for each folder you add in MCP Tools.\n\
+             {roots_note}\n\
+             Relative paths in tools are resolved under **`/app/`** (e.g. **`pengine/README.md`** → **`/app/pengine/README.md`**).\n\
+{host_lines}\n"
+        )
     };
 
     let system = if has_tools {

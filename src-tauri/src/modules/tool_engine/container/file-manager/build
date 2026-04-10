@@ -1,0 +1,7 @@
+#!/usr/bin/env sh
+set -e
+cd "$(dirname "$0")"
+if command -v podman >/dev/null 2>&1; then
+  exec podman build -t file-manager:0.1.0 .
+fi
+exec docker build -t file-manager:0.1.0 .

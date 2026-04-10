@@ -4,6 +4,76 @@ use super::types::ToolDef;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
+/// Normalize File Manager paths: absolute container paths pass through; relative `pengine/README.md` → `/app/pengine/README.md`.
+fn rewrite_file_manager_path(s: &str) -> String {
+    let t = s.trim();
+    if t.is_empty() {
+        return t.to_string();
+    }
+    // Models often confuse the image WORKDIR (`/mcp`) with an allowed root — it is not.
+    if let Some(rest) = t.strip_prefix("/mcp/") {
+        return format!("/app/{rest}");
+    }
+    if t == "/mcp" {
+        return "/tmp".to_string();
+    }
+    if t.starts_with("/opt/mcp-filesystem") {
+        return t.to_string();
+    }
+    if t.starts_with('/') {
+        return t.to_string();
+    }
+    if t.contains(':') || t.starts_with("\\\\") {
+        return t.to_string();
+    }
+    if t.contains("..") {
+        return t.to_string();
+    }
+    let u = t.replace('\\', "/");
+    format!("/app/{u}")
+}
+
+fn normalize_file_manager_tool_args(v: Value) -> Value {
+    match v {
+        Value::Object(mut map) => {
+            let keys: Vec<String> = map.keys().cloned().collect();
+            for k in keys {
+                let Some(val) = map.remove(&k) else {
+                    continue;
+                };
+                let val = match k.as_str() {
+                    "path" => match val {
+                        Value::String(s) => Value::String(rewrite_file_manager_path(&s)),
+                        other => normalize_file_manager_tool_args(other),
+                    },
+                    "paths" => match val {
+                        Value::Array(arr) => Value::Array(
+                            arr.into_iter()
+                                .map(|item| match item {
+                                    Value::String(s) => {
+                                        Value::String(rewrite_file_manager_path(&s))
+                                    }
+                                    other => normalize_file_manager_tool_args(other),
+                                })
+                                .collect(),
+                        ),
+                        other => normalize_file_manager_tool_args(other),
+                    },
+                    _ => normalize_file_manager_tool_args(val),
+                };
+                map.insert(k, val);
+            }
+            Value::Object(map)
+        }
+        Value::Array(arr) => Value::Array(
+            arr.into_iter()
+                .map(normalize_file_manager_tool_args)
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
 #[derive(Clone)]
 pub enum Provider {
     Native(Arc<NativeProvider>),
@@ -88,6 +158,12 @@ impl ToolRegistry {
 
     pub async fn call_tool(&self, name: &str, args: Value) -> Result<(String, bool), String> {
         let (provider, tool, direct) = self.resolve_tool(name)?;
+        let args = match &provider {
+            Provider::Mcp(c) if c.server_name == "te_pengine-file-manager" => {
+                normalize_file_manager_tool_args(args)
+            }
+            _ => args,
+        };
         let text = provider.call_tool(&tool, args).await?;
         Ok((text, direct))
     }
@@ -153,6 +229,10 @@ const REDUNDANT_TOOLS: &[&str] = &[
     "list_allowed_directories",
 ];
 
+fn ollama_tool_description(t: &ToolDef) -> String {
+    t.description.clone().unwrap_or_default()
+}
+
 fn build_ollama_tools(providers: &[Provider]) -> Value {
     let arr: Vec<Value> = providers
         .iter()
@@ -163,11 +243,41 @@ fn build_ollama_tools(providers: &[Provider]) -> Value {
                 "type": "function",
                 "function": {
                     "name": t.name,
-                    "description": t.description.clone().unwrap_or_default(),
+                    "description": ollama_tool_description(t),
                     "parameters": t.input_schema,
                 }
             })
         })
         .collect();
     Value::Array(arr)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rewrite_container_and_relative() {
+        assert_eq!(
+            rewrite_file_manager_path("/app/pengine/README.md"),
+            "/app/pengine/README.md"
+        );
+        assert_eq!(
+            rewrite_file_manager_path("/mcp/pengine/readme.md"),
+            "/app/pengine/readme.md"
+        );
+        assert_eq!(rewrite_file_manager_path("/mcp"), "/tmp");
+        assert_eq!(
+            rewrite_file_manager_path("pengine/README.md"),
+            "/app/pengine/README.md"
+        );
+        assert_eq!(rewrite_file_manager_path("README.md"), "/app/README.md");
+    }
+
+    #[test]
+    fn normalize_paths_in_arguments() {
+        let raw = json!({ "path": "pengine/readme.md" });
+        let out = normalize_file_manager_tool_args(raw);
+        assert_eq!(out["path"], "/app/pengine/readme.md");
+    }
 }

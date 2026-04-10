@@ -1,5 +1,6 @@
 //! Integration tests for MCP tooling.
 
+use pengine_lib::modules::mcp::registry::ToolRegistry;
 use pengine_lib::modules::mcp::{native, service};
 use serde_json::json;
 use std::path::PathBuf;
@@ -61,7 +62,8 @@ async fn mcp_json_loads_native_dice() {
     let cfg = service::load_or_init_config(&path).expect("load_or_init");
     assert!(cfg.servers.contains_key("dice"));
 
-    let (reg, status) = service::build_registry(&cfg).await;
+    let (providers, status) = service::build_mcp_providers(&cfg).await;
+    let reg = ToolRegistry::new(providers);
     assert!(status
         .iter()
         .any(|s| s.contains("dice") && s.contains("native")));
@@ -73,7 +75,8 @@ async fn mcp_json_loads_native_dice() {
 async fn native_dice_callable_through_registry_from_config() {
     let path = temp_mcp_path("registry");
     let cfg = service::load_or_init_config(&path).expect("load_or_init");
-    let (reg, _) = service::build_registry(&cfg).await;
+    let (providers, _) = service::build_mcp_providers(&cfg).await;
+    let reg = ToolRegistry::new(providers);
     let (text, direct) = reg
         .call_tool("roll_dice", json!({"sides": 6}))
         .await
@@ -96,7 +99,8 @@ fn native_server_key_rename_in_config() {
         .enable_all()
         .build()
         .unwrap();
-    let (reg, _) = rt.block_on(service::build_registry(&cfg));
+    let (providers, _) = rt.block_on(service::build_mcp_providers(&cfg));
+    let reg = ToolRegistry::new(providers);
     assert_eq!(reg.all_tools()[0].server_name, "mydice");
     let _ = std::fs::remove_file(path);
 }

@@ -1,5 +1,3 @@
-//! Minimal JSON-RPC 2.0 for MCP over stdio.
-
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 

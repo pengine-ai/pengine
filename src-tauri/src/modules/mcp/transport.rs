@@ -1,11 +1,10 @@
-//! Line-delimited JSON over stdin/stdout of a child process.
-
 use super::protocol::{JsonRpcRequest, JsonRpcResponse};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{oneshot, Mutex};
@@ -93,7 +92,22 @@ impl StdioTransport {
         })
     }
 
+    /// Default for ongoing `tools/call` traffic (container cold start is already paid at connect).
+    pub fn default_call_timeout() -> Duration {
+        Duration::from_secs(120)
+    }
+
     pub async fn call(&self, method: &str, params: Option<Value>) -> Result<Value, String> {
+        self.call_with_timeout(method, params, Self::default_call_timeout())
+            .await
+    }
+
+    pub async fn call_with_timeout(
+        &self,
+        method: &str,
+        params: Option<Value>,
+        timeout: Duration,
+    ) -> Result<Value, String> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let req = JsonRpcRequest::new(id, method, params);
         let mut payload = serde_json::to_vec(&req).map_err(|e| format!("encode request: {e}"))?;
@@ -111,10 +125,11 @@ impl StdioTransport {
             stdin.flush().await.map_err(|e| format!("flush: {e}"))?;
         }
 
-        let resp = match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
+        let secs = timeout.as_secs().max(1);
+        let resp = match tokio::time::timeout(timeout, rx).await {
             Err(_) => {
                 self.pending.lock().await.remove(&id);
-                return Err("mcp call timed out".to_string());
+                return Err(format!("mcp call `{method}` timed out after {secs}s",));
             }
             Ok(rx_result) => match rx_result {
                 Err(_) => {

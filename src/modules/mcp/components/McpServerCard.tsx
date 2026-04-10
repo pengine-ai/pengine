@@ -1,5 +1,11 @@
-import { useState } from "react";
-import type { McpTool, ServerEntry, ServerEntryStdio } from "..";
+import { useEffect, useState } from "react";
+import {
+  fetchMcpConfig,
+  putMcpFilesystemPaths,
+  type McpTool,
+  type ServerEntry,
+  type ServerEntryStdio,
+} from "..";
 
 type Props = {
   name: string;
@@ -10,6 +16,8 @@ type Props = {
   onSave: (name: string, entry: ServerEntry) => Promise<void>;
   onDelete: (name: string) => Promise<void>;
   onEditStart: (name: string | null) => void;
+  /** After filesystem paths apply (te_ File Manager), refresh server list from API. */
+  onReloadServers?: () => Promise<void>;
 };
 
 /** Detect filesystem MCP package in live args textarea (one token per line). */
@@ -21,6 +29,27 @@ function argsTextLooksLikeFilesystem(argsText: string): boolean {
     .some((a) => a.includes("server-filesystem"));
 }
 
+/** Mirrors server-side mounts: each folder → `/app/<basename>` (duplicates get `_1`, `_2`, …). */
+function appMountPathsForFolders(paths: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const p of paths) {
+    const parts = p.replace(/\\/g, "/").split("/").filter(Boolean);
+    const raw = parts.length > 0 ? parts[parts.length - 1]! : "folder";
+    const safe = raw.replace(/[^a-zA-Z0-9_-]/g, "_");
+    const label = /^_+$/.test(safe) || safe === "" ? "folder" : safe;
+    let key = label;
+    let n = 0;
+    while (seen.has(key)) {
+      n += 1;
+      key = `${label}_${n}`;
+    }
+    seen.add(key);
+    out.push(`/app/${key}`);
+  }
+  return out;
+}
+
 export function McpServerCard({
   name,
   entry,
@@ -30,6 +59,7 @@ export function McpServerCard({
   onSave,
   onDelete,
   onEditStart,
+  onReloadServers,
 }: Props) {
   const isNative = entry.type === "native";
   const isEditing = editingName === name;
@@ -65,6 +95,7 @@ export function McpServerCard({
           busy={busy}
           onSave={(updated) => onSave(name, updated)}
           onCancel={() => onEditStart(null)}
+          onReloadServers={onReloadServers}
         />
       </div>
     );
@@ -187,12 +218,14 @@ function InlineEditForm({
   busy,
   onSave,
   onCancel,
+  onReloadServers,
 }: {
   name: string;
   entry: ServerEntryStdio;
   busy: boolean;
   onSave: (entry: ServerEntry) => Promise<void>;
   onCancel: () => void;
+  onReloadServers?: () => Promise<void>;
 }) {
   const [command, setCommand] = useState(entry.command);
   const [argsText, setArgsText] = useState(entry.args.join("\n"));
@@ -203,6 +236,21 @@ function InlineEditForm({
   );
   const [directReturn, setDirectReturn] = useState(entry.direct_return);
   const [pickFolderError, setPickFolderError] = useState<string | null>(null);
+
+  const isTeFileManager = name === "te_pengine-file-manager";
+  const [tePaths, setTePaths] = useState<string[]>([]);
+  const teAppMounts = isTeFileManager ? appMountPathsForFolders(tePaths) : [];
+  const [tePickError, setTePickError] = useState<string | null>(null);
+  const [teApplyError, setTeApplyError] = useState<string | null>(null);
+  const [teApplyBusy, setTeApplyBusy] = useState(false);
+
+  useEffect(() => {
+    if (!isTeFileManager) return;
+    void (async () => {
+      const cfg = await fetchMcpConfig(5000);
+      if (cfg) setTePaths([...cfg.filesystem_allowed_paths]);
+    })();
+  }, [isTeFileManager, name]);
 
   const isFs = argsTextLooksLikeFilesystem(argsText);
 
@@ -259,6 +307,50 @@ function InlineEditForm({
     }
   };
 
+  const addTePath = (p: string) => {
+    const t = p.trim();
+    if (!t || tePaths.includes(t)) return;
+    setTePaths((prev) => [...prev, t]);
+  };
+
+  const removeTePath = (p: string) => {
+    setTePaths((prev) => prev.filter((x) => x !== p));
+  };
+
+  const pickTeFolder = async () => {
+    setTePickError(null);
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      try {
+        const picked = await invoke<string | null>("pick_mcp_filesystem_folder");
+        if (picked) addTePath(picked);
+      } catch (invokeErr) {
+        setTePickError(
+          invokeErr instanceof Error ? invokeErr.message : "Could not open folder picker",
+        );
+      }
+    } catch {
+      // Web / non-Tauri
+    }
+  };
+
+  const applyTeFolders = async () => {
+    setTeApplyError(null);
+    if (tePaths.length === 0) {
+      setTeApplyError("Add at least one folder.");
+      return;
+    }
+    setTeApplyBusy(true);
+    const ok = await putMcpFilesystemPaths(tePaths, 60_000);
+    setTeApplyBusy(false);
+    if (!ok) {
+      setTeApplyError("Could not save — is the Pengine API running?");
+      return;
+    }
+    await onReloadServers?.();
+    onCancel();
+  };
+
   // ── Submit ────────────────────────────────────────────────────────
 
   const handleSubmit = async () => {
@@ -300,7 +392,53 @@ function InlineEditForm({
       </div>
 
       <div className="grid gap-3">
-        {/* Filesystem folder helper */}
+        {isTeFileManager && (
+          <div className="rounded-lg border border-emerald-300/15 bg-emerald-300/5 p-3">
+            <p className="mb-2 font-mono text-[10px] uppercase tracking-wider text-emerald-200/80">
+              Shared folders (File Manager container mounts)
+            </p>
+            <p className="mb-2 text-[11px] leading-snug text-(--mid)">
+              After File Manager is installed, add paths here (or install it first from Tool Engine
+              with an empty list). Each folder mounts as{" "}
+              <code className="text-white/70">/app/&lt;name&gt;</code>. Apply updates{" "}
+              <code className="text-white/70">workspace_roots</code> in{" "}
+              <code className="text-white/70">mcp.json</code> and closes the editor.
+            </p>
+            {tePaths.length > 0 && (
+              <ul className="mb-2 list-inside list-disc font-mono text-[10px] leading-relaxed text-emerald-100/80">
+                {tePaths.map((p, i) => (
+                  <li key={`${p}-${i}`}>
+                    <span className="text-white/90">{teAppMounts[i] ?? ""}</span>
+                    <span className="text-(--mid)"> ← </span>
+                    <span className="break-all text-white/70">{p}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+            <FolderHelper
+              paths={tePaths}
+              pickError={tePickError}
+              onAdd={addTePath}
+              onRemove={removeTePath}
+              onPickFolder={() => void pickTeFolder()}
+            />
+            {teApplyError && (
+              <p className="mt-2 font-mono text-[11px] text-rose-300" role="alert">
+                {teApplyError}
+              </p>
+            )}
+            <button
+              type="button"
+              disabled={teApplyBusy || tePaths.length === 0}
+              onClick={() => void applyTeFolders()}
+              className="mt-3 rounded-lg border border-emerald-300/30 bg-emerald-300/15 px-3 py-1.5 font-mono text-[11px] text-emerald-100 hover:bg-emerald-300/25 disabled:opacity-40"
+            >
+              {teApplyBusy ? "Applying…" : "Apply folders"}
+            </button>
+          </div>
+        )}
+
+        {/* Filesystem folder helper (npx server-filesystem) */}
         {isFs && (
           <FolderHelper
             paths={fsPaths}
@@ -380,7 +518,7 @@ function InlineEditForm({
 
 // ── Folder path helper (visual add/remove for filesystem paths) ─────
 
-function FolderHelper({
+export function FolderHelper({
   paths,
   pickError,
   onAdd,
