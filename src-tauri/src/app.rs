@@ -47,7 +47,14 @@ pub fn run() {
                         &format!("connecting servers in background ({})", mcp_path.display()),
                     )
                     .await;
-                mcp_service::rebuild_registry_into_state(&mcp_state).await;
+                if let Err(e) = mcp_service::rebuild_registry_into_state(&mcp_state).await {
+                    mcp_state
+                        .emit_log(
+                            "mcp",
+                            &format!("ERROR: MCP registry rebuild failed on startup: {e}"),
+                        )
+                        .await;
+                }
             });
 
             // Resume persisted Telegram connection if present.

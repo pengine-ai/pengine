@@ -15,6 +15,7 @@ export function ToolEnginePanel() {
   const [catalog, setCatalog] = useState<CatalogTool[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [catalogError, setCatalogError] = useState<string | null>(null);
+  const [runtimeError, setRuntimeError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [busyTool, setBusyTool] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -27,7 +28,13 @@ export function ToolEnginePanel() {
     const [rt, cat] = await Promise.all([fetchRuntimeStatus(), fetchToolCatalog()]);
     if (cancelledRef.current || id !== seqRef.current) return;
     setLoading(false);
-    if (rt !== null) setRuntime(rt);
+    if (rt !== null) {
+      setRuntime(rt);
+      setRuntimeError(null);
+    } else {
+      setRuntime(null);
+      setRuntimeError("Could not load runtime status");
+    }
     if (cat !== null) {
       setCatalog(cat);
       setCatalogError(null);
@@ -119,6 +126,12 @@ export function ToolEnginePanel() {
       {actionError && (
         <p className="mt-3 font-mono text-[11px] text-rose-300" role="alert">
           {actionError}
+        </p>
+      )}
+
+      {runtimeError && (
+        <p className="mt-3 font-mono text-[11px] text-amber-200/90" role="status">
+          {runtimeError}
         </p>
       )}
 

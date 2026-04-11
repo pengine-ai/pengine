@@ -24,8 +24,8 @@ export const SETUP_STEPS = [
     duration: "~2 min",
   },
   {
-    title: "Install Podman",
-    summary: "Install a container runtime so Pengine can run tools in isolated sandboxes.",
+    title: "Install a container runtime",
+    summary: "Install Podman (preferred) or Docker so Pengine can run tools in isolated sandboxes.",
     duration: "~2 min",
   },
   {
@@ -89,12 +89,6 @@ export function SetupWizard({ onStepChange, onCompleteSetup }: SetupWizardProps)
   const status = useMemo(() => tokenStatus(botToken), [botToken]);
   const stepTitles = SETUP_STEPS.map((item) => item.title);
   const botId = useMemo(() => parseBotIdFromToken(botToken), [botToken]);
-
-  const telegramBotUrl = useMemo(() => {
-    const name = verifiedBot?.bot_username || botUsername.replace(/^@+/, "").trim();
-    if (name) return `https://t.me/${name}`;
-    return "https://t.me/botfather";
-  }, [botUsername, verifiedBot]);
 
   const canContinueStep = useMemo(() => {
     const gates: Record<number, boolean> = {
@@ -252,7 +246,6 @@ export function SetupWizard({ onStepChange, onCompleteSetup }: SetupWizardProps)
           verifiedBot={verifiedBot}
           botUsername={botUsername}
           onBotUsernameChange={setBotUsername}
-          telegramBotUrl={telegramBotUrl}
           onConnect={handleConnect}
           onCopyUri={handleCopyUri}
           copiedUri={copiedUri}

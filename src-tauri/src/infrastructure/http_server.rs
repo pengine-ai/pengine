@@ -352,16 +352,6 @@ async fn handle_mcp_filesystem_put(
         .map(|p| p.trim().to_string())
         .filter(|p| !p.is_empty())
         .collect();
-    if paths.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "at least one path is required".into(),
-            }),
-        ));
-    }
-
-    let rt = te_runtime::detect_runtime().await;
 
     let sync_note = {
         let _guard = state.mcp_config_mutex.lock().await;
@@ -381,12 +371,8 @@ async fn handle_mcp_filesystem_put(
         mcp_service::set_filesystem_allowed_paths(&mut cfg, &paths);
 
         let mut note = None::<String>;
-        if let Some(ref r) = rt {
-            if let Err(e) =
-                te_service::sync_workspace_mounted_tools_if_installed(&mut cfg, &paths, r)
-            {
-                note = Some(e);
-            }
+        if let Err(e) = te_service::sync_workspace_mounted_tools_if_installed(&mut cfg, &paths) {
+            note = Some(e);
         }
 
         mcp_service::save_config(&state.mcp_config_path, &cfg).map_err(|e| {
@@ -421,7 +407,13 @@ async fn handle_mcp_filesystem_put(
 
     let bg = state.clone();
     tokio::spawn(async move {
-        mcp_service::rebuild_registry_into_state(&bg).await;
+        if let Err(e) = mcp_service::rebuild_registry_into_state(&bg).await {
+            bg.emit_log(
+                "mcp",
+                &format!("ERROR: MCP registry rebuild failed after workspace_roots update: {e}"),
+            )
+            .await;
+        }
     });
 
     Ok((StatusCode::OK, Json(serde_json::json!({ "ok": true }))))
@@ -527,7 +519,13 @@ async fn handle_mcp_server_upsert(
 
     let bg = state.clone();
     tokio::spawn(async move {
-        mcp_service::rebuild_registry_into_state(&bg).await;
+        if let Err(e) = mcp_service::rebuild_registry_into_state(&bg).await {
+            bg.emit_log(
+                "mcp",
+                &format!("ERROR: MCP registry rebuild failed after server save: {e}"),
+            )
+            .await;
+        }
     });
 
     Ok((StatusCode::OK, Json(serde_json::json!({ "ok": true }))))
@@ -570,7 +568,13 @@ async fn handle_mcp_server_delete(
 
     let bg = state.clone();
     tokio::spawn(async move {
-        mcp_service::rebuild_registry_into_state(&bg).await;
+        if let Err(e) = mcp_service::rebuild_registry_into_state(&bg).await {
+            bg.emit_log(
+                "mcp",
+                &format!("ERROR: MCP registry rebuild failed after server delete: {e}"),
+            )
+            .await;
+        }
     });
 
     Ok((StatusCode::OK, Json(serde_json::json!({ "ok": true }))))
@@ -664,16 +668,13 @@ async fn handle_toolengine_install(
             .emit_log("toolengine", &format!("installing {tool_id}…"))
             .await;
 
-        let host_paths = {
-            let _cfg_guard = state.mcp_config_mutex.lock().await;
-            match mcp_service::read_config(&state.mcp_config_path) {
-                Ok(cfg) => mcp_service::filesystem_allowed_paths(&cfg),
-                Err(_) => Vec::new(),
-            }
-        };
-
-        if let Err(e) =
-            te_service::install_tool(&tool_id, &runtime, &state.mcp_config_path, &host_paths).await
+        if let Err(e) = te_service::install_tool(
+            &tool_id,
+            &runtime,
+            &state.mcp_config_path,
+            &state.mcp_config_mutex,
+        )
+        .await
         {
             state
                 .emit_log("toolengine", &format!("install failed: {e}"))
@@ -689,7 +690,13 @@ async fn handle_toolengine_install(
     // Respond immediately; MCP reconnect can take minutes (Podman / npx) and must not block the UI.
     let bg = state.clone();
     tokio::spawn(async move {
-        mcp_service::rebuild_registry_into_state(&bg).await;
+        if let Err(e) = mcp_service::rebuild_registry_into_state(&bg).await {
+            bg.emit_log(
+                "mcp",
+                &format!("ERROR: MCP registry rebuild failed after tool install: {e}"),
+            )
+            .await;
+        }
     });
 
     Ok((StatusCode::OK, Json(serde_json::json!({ "ok": true }))))
@@ -719,7 +726,13 @@ async fn handle_toolengine_uninstall(
             .emit_log("toolengine", &format!("uninstalling {tool_id}…"))
             .await;
 
-        if let Err(e) = te_service::uninstall_tool(&tool_id, &runtime, &state.mcp_config_path).await
+        if let Err(e) = te_service::uninstall_tool(
+            &tool_id,
+            &runtime,
+            &state.mcp_config_path,
+            &state.mcp_config_mutex,
+        )
+        .await
         {
             state
                 .emit_log("toolengine", &format!("uninstall failed: {e}"))
@@ -737,7 +750,13 @@ async fn handle_toolengine_uninstall(
 
     let bg = state.clone();
     tokio::spawn(async move {
-        mcp_service::rebuild_registry_into_state(&bg).await;
+        if let Err(e) = mcp_service::rebuild_registry_into_state(&bg).await {
+            bg.emit_log(
+                "mcp",
+                &format!("ERROR: MCP registry rebuild failed after tool uninstall: {e}"),
+            )
+            .await;
+        }
     });
 
     Ok((StatusCode::OK, Json(serde_json::json!({ "ok": true }))))

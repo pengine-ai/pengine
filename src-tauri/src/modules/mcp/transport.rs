@@ -118,11 +118,14 @@ impl StdioTransport {
 
         {
             let mut stdin = self.stdin.lock().await;
-            stdin
-                .write_all(&payload)
-                .await
-                .map_err(|e| format!("write stdin: {e}"))?;
-            stdin.flush().await.map_err(|e| format!("flush: {e}"))?;
+            if let Err(e) = stdin.write_all(&payload).await {
+                self.pending.lock().await.remove(&id);
+                return Err(format!("write stdin: {e}"));
+            }
+            if let Err(e) = stdin.flush().await {
+                self.pending.lock().await.remove(&id);
+                return Err(format!("flush: {e}"));
+            }
         }
 
         let secs = timeout.as_secs().max(1);

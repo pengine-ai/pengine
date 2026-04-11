@@ -61,31 +61,23 @@ pub fn save_config(path: &Path, cfg: &McpConfig) -> Result<(), String> {
     std::fs::write(path, pretty).map_err(|e| format!("write mcp.json: {e}"))
 }
 
-/// Host paths shared with the File Manager container (and previously the legacy npx filesystem MCP).
+/// Host folders shared with the File Manager container. After [`migrate_legacy_npx_filesystem`]
+/// runs (in [`read_config`]), this is exactly `cfg.workspace_roots`.
 pub fn filesystem_allowed_paths(cfg: &McpConfig) -> Vec<String> {
-    if !cfg.workspace_roots.is_empty() {
-        return cfg.workspace_roots.clone();
-    }
-    let Some(ServerEntry::Stdio { args, .. }) = cfg.servers.get(FILESYSTEM_SERVER_KEY) else {
-        return Vec::new();
-    };
-    let Some(pkg_idx) = args.iter().position(|a| a.contains("server-filesystem")) else {
-        return Vec::new();
-    };
-    args[pkg_idx + 1..]
+    cfg.workspace_roots.clone()
+}
+
+pub fn set_filesystem_allowed_paths(cfg: &mut McpConfig, paths: &[String]) {
+    cfg.workspace_roots = sanitize_path_list(paths);
+}
+
+/// Trim each path and drop empties — used by both the public setter and the legacy migration.
+fn sanitize_path_list(paths: &[String]) -> Vec<String> {
+    paths
         .iter()
         .map(|p| p.trim().to_string())
         .filter(|p| !p.is_empty())
         .collect()
-}
-
-pub fn set_filesystem_allowed_paths(cfg: &mut McpConfig, paths: &[String]) {
-    cfg.workspace_roots = paths
-        .iter()
-        .map(|p| p.trim().to_string())
-        .filter(|p| !p.is_empty())
-        .collect();
-    cfg.servers.remove(FILESYSTEM_SERVER_KEY);
 }
 
 /// Drop legacy `npx @modelcontextprotocol/server-filesystem` server; keep paths in `workspace_roots`.
@@ -97,16 +89,11 @@ fn migrate_legacy_npx_filesystem(cfg: &mut McpConfig) -> bool {
     if command != "npx" {
         return false;
     }
-    let Some(pkg_idx) = args.iter().position(|a| a.contains("server-filesystem")) else {
-        return false;
-    };
-    let legacy: Vec<String> = args[pkg_idx + 1..]
-        .iter()
-        .map(|p| p.trim().to_string())
-        .filter(|p| !p.is_empty())
-        .collect();
-    if cfg.workspace_roots.is_empty() && !legacy.is_empty() {
-        cfg.workspace_roots = legacy;
+    if let Some(pkg_idx) = args.iter().position(|a| a.contains("server-filesystem")) {
+        let legacy = sanitize_path_list(&args[pkg_idx + 1..]);
+        if cfg.workspace_roots.is_empty() && !legacy.is_empty() {
+            cfg.workspace_roots = legacy;
+        }
     }
     cfg.servers.remove(FILESYSTEM_SERVER_KEY);
     true
@@ -185,7 +172,9 @@ pub async fn connect_one_server(
     }
 }
 
-/// Build MCP providers only (native + stdio). Used by tests and by [`build_registry`].
+/// Connect every server in `cfg` and return the providers + per-server status lines.
+/// Used by tests and as a one-shot rebuild path; the live runtime uses
+/// [`rebuild_registry_into_state`] which publishes incrementally.
 pub async fn build_mcp_providers(cfg: &McpConfig) -> (Vec<Provider>, Vec<String>) {
     let mut providers = Vec::new();
     let mut status = Vec::new();
@@ -201,12 +190,6 @@ pub async fn build_mcp_providers(cfg: &McpConfig) -> (Vec<Provider>, Vec<String>
     (providers, status)
 }
 
-/// Build full registry from MCP config (native + stdio providers).
-pub async fn build_registry(cfg: &McpConfig) -> (ToolRegistry, Vec<String>) {
-    let (providers, status) = build_mcp_providers(cfg).await;
-    (ToolRegistry::new(providers), status)
-}
-
 /// Reload `mcp.json` from disk and replace the in-memory tool registry.
 ///
 /// Call only after the file on disk is up to date. Holds `mcp_rebuild_mutex` for the full connect
@@ -216,7 +199,9 @@ pub async fn build_registry(cfg: &McpConfig) -> (ToolRegistry, Vec<String>) {
 /// Before connecting, refreshes every installed Tool Engine entry with `mount_workspace` so `podman run`
 /// argv matches `workspace_roots` (empty → placeholder root `/tmp` in the image). Saves `mcp.json` when
 /// sync succeeds.
-pub async fn rebuild_registry_into_state(state: &crate::shared::state::AppState) {
+pub async fn rebuild_registry_into_state(
+    state: &crate::shared::state::AppState,
+) -> Result<(), String> {
     let _rebuild = state.mcp_rebuild_mutex.lock().await;
     let cfg = {
         let _cfg_guard = state.mcp_config_mutex.lock().await;
@@ -224,33 +209,32 @@ pub async fn rebuild_registry_into_state(state: &crate::shared::state::AppState)
             Ok(c) => c,
             Err(e) => {
                 drop(_cfg_guard);
-                state.emit_log("mcp", &format!("mcp.json error: {e}")).await;
-                return;
+                let msg = format!("mcp.json error: {e}");
+                state.emit_log("mcp", &msg).await;
+                return Err(msg);
             }
         };
 
         let paths = filesystem_allowed_paths(&cfg);
-        if let Some(rt) = crate::modules::tool_engine::runtime::detect_runtime().await {
-            match crate::modules::tool_engine::service::sync_workspace_mounted_tools_if_installed(
-                &mut cfg, &paths, &rt,
-            ) {
-                Ok(changed) => {
-                    if changed {
-                        if let Err(e) = save_config(&state.mcp_config_path, &cfg) {
-                            state
-                                .emit_log(
-                                    "mcp",
-                                    &format!("mcp.json not saved after workspace sync: {e}"),
-                                )
-                                .await;
-                        }
+        match crate::modules::tool_engine::service::sync_workspace_mounted_tools_if_installed(
+            &mut cfg, &paths,
+        ) {
+            Ok(changed) => {
+                if changed {
+                    if let Err(e) = save_config(&state.mcp_config_path, &cfg) {
+                        state
+                            .emit_log(
+                                "mcp",
+                                &format!("mcp.json not saved after workspace sync: {e}"),
+                            )
+                            .await;
                     }
                 }
-                Err(e) => {
-                    state
-                        .emit_log("toolengine", &format!("workspace mount sync skipped: {e}"))
-                        .await;
-                }
+            }
+            Err(e) => {
+                state
+                    .emit_log("toolengine", &format!("workspace mount sync skipped: {e}"))
+                    .await;
             }
         }
 
@@ -259,17 +243,16 @@ pub async fn rebuild_registry_into_state(state: &crate::shared::state::AppState)
 
     *state.cached_filesystem_paths.write().await = filesystem_allowed_paths(&cfg);
 
-    // Publish the registry after each server so native tools (e.g. dice) are usable while slow
-    // stdio servers (e.g. Podman-backed Tool Engine) are still connecting.
+    // Publish the registry after each *successful* connect so native tools (e.g. dice) are usable
+    // while slow stdio servers (Podman-backed Tool Engine, npx, …) are still connecting. Failed
+    // connects only emit a log line — no need to rebuild the registry.
     let mut providers = Vec::new();
     for (server_key, entry) in &cfg.servers {
         let (prov, line) = connect_one_server(server_key, entry).await;
         state.emit_log("mcp", &line).await;
-        if let Some(p) = prov {
-            providers.push(p);
-        }
-        let registry = ToolRegistry::new(providers.clone());
-        *state.mcp.write().await = registry;
+        let Some(p) = prov else { continue };
+        providers.push(p);
+        *state.mcp.write().await = ToolRegistry::new(providers.clone());
     }
 
     let n = state.mcp.read().await.tool_names().len();
@@ -279,6 +262,7 @@ pub async fn rebuild_registry_into_state(state: &crate::shared::state::AppState)
             &format!("ready ({n} tool{})", if n == 1 { "" } else { "s" }),
         )
         .await;
+    Ok(())
 }
 
 #[cfg(test)]

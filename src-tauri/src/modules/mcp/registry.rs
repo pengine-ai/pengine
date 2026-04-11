@@ -15,7 +15,10 @@ fn rewrite_file_manager_path(s: &str) -> String {
         return format!("/app/{rest}");
     }
     if t == "/mcp" {
-        return "/tmp".to_string();
+        log::warn!(
+            "rewrite_file_manager_path: `/mcp` is the server working directory, not an MCP file root; leaving path unchanged"
+        );
+        return "/mcp".to_string();
     }
     if t.starts_with("/opt/mcp-filesystem") {
         return t.to_string();
@@ -26,11 +29,31 @@ fn rewrite_file_manager_path(s: &str) -> String {
     if t.contains(':') || t.starts_with("\\\\") {
         return t.to_string();
     }
-    if t.contains("..") {
-        return t.to_string();
+    resolve_relative_under_app(t)
+}
+
+/// Resolve a relative path under `/app` with `..` handling; escaping above the root → `/app`.
+fn resolve_relative_under_app(raw: &str) -> String {
+    let u = raw.replace('\\', "/");
+    let mut stack: Vec<&str> = Vec::new();
+    let mut escaped = false;
+    for seg in u.split('/').filter(|s| !s.is_empty() && *s != ".") {
+        if seg == ".." {
+            if stack.pop().is_none() {
+                escaped = true;
+            }
+        } else {
+            stack.push(seg);
+        }
     }
-    let u = t.replace('\\', "/");
-    format!("/app/{u}")
+    if escaped {
+        return "/app".to_string();
+    }
+    if stack.is_empty() {
+        "/app".to_string()
+    } else {
+        format!("/app/{}", stack.join("/"))
+    }
 }
 
 fn normalize_file_manager_tool_args(v: Value) -> Value {
@@ -229,10 +252,6 @@ const REDUNDANT_TOOLS: &[&str] = &[
     "list_allowed_directories",
 ];
 
-fn ollama_tool_description(t: &ToolDef) -> String {
-    t.description.clone().unwrap_or_default()
-}
-
 fn build_ollama_tools(providers: &[Provider]) -> Value {
     let arr: Vec<Value> = providers
         .iter()
@@ -243,7 +262,7 @@ fn build_ollama_tools(providers: &[Provider]) -> Value {
                 "type": "function",
                 "function": {
                     "name": t.name,
-                    "description": ollama_tool_description(t),
+                    "description": t.description.clone().unwrap_or_default(),
                     "parameters": t.input_schema,
                 }
             })
@@ -266,12 +285,20 @@ mod tests {
             rewrite_file_manager_path("/mcp/pengine/readme.md"),
             "/app/pengine/readme.md"
         );
-        assert_eq!(rewrite_file_manager_path("/mcp"), "/tmp");
+        assert_eq!(rewrite_file_manager_path("/mcp"), "/mcp");
         assert_eq!(
             rewrite_file_manager_path("pengine/README.md"),
             "/app/pengine/README.md"
         );
         assert_eq!(rewrite_file_manager_path("README.md"), "/app/README.md");
+    }
+
+    #[test]
+    fn relative_path_traversal_collapses_to_app_root() {
+        assert_eq!(
+            rewrite_file_manager_path("pengine/../../etc/passwd"),
+            "/app"
+        );
     }
 
     #[test]

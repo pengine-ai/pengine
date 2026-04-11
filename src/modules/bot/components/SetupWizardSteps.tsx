@@ -1,3 +1,4 @@
+import { useMemo, useState } from "react";
 import { OLLAMA_API_BASE } from "../../../shared/api/config";
 import { PENGINE } from "../api";
 import { StyledQrCode } from "../../../shared/ui/StyledQrCode";
@@ -12,6 +13,7 @@ export function WizardStepCreateBot(props: {
   tokenStatusMessage: (status: TokenStatus) => string;
 }) {
   const { botToken, onBotTokenChange, status, tokenStatusMessage } = props;
+  const [showToken, setShowToken] = useState(false);
   return (
     <div className="grid gap-8 lg:grid-cols-[1.05fr_0.95fr]">
       <div className="space-y-5">
@@ -39,11 +41,21 @@ export function WizardStepCreateBot(props: {
           </label>
           <input
             id="token"
+            type={showToken ? "text" : "password"}
+            autoComplete="off"
+            spellCheck={false}
             className="mt-3 w-full rounded-xl border border-white/10 bg-slate-950/70 px-4 py-3 text-slate-100 outline-none placeholder:text-(--dim) focus:border-cyan-300/40"
             value={botToken}
             onChange={(event) => onBotTokenChange(event.target.value)}
             placeholder="1234567890:ABCdefGHIjklMNOpqrSTUvwxYZ-abc123..."
           />
+          <button
+            type="button"
+            onClick={() => setShowToken((v) => !v)}
+            className="mt-2 font-mono text-[10px] uppercase tracking-wider text-(--mid) underline decoration-white/20 underline-offset-4 hover:text-slate-300"
+          >
+            {showToken ? "Hide token" : "Show token"}
+          </button>
           <div className="mt-3 flex items-center gap-3 text-sm">
             <span
               className={`h-2.5 w-2.5 rounded-full ${
@@ -225,7 +237,7 @@ curl -fsSL https://get.docker.com | sh`}</code>
           <div className="mt-4 rounded-2xl border border-emerald-300/20 bg-emerald-300/10 px-4 py-3">
             <p className="font-mono text-xs text-emerald-300">Container runtime detected:</p>
             <p className="mt-1 text-lg font-semibold text-white">
-              {runtimeStatus.kind} {runtimeStatus.version}
+              {runtimeStatus.kind ?? "unknown"} {runtimeStatus.version ?? ""}
               {runtimeStatus.rootless ? " (rootless)" : ""}
             </p>
           </div>
@@ -260,7 +272,7 @@ curl -fsSL https://get.docker.com | sh`}</code>
             Engine:{" "}
             <span className={runtimeStatus?.available ? "text-emerald-300" : "text-slate-400"}>
               {runtimeStatus?.available
-                ? runtimeStatus.kind
+                ? (runtimeStatus.kind ?? "unknown")
                 : runtimeChecking
                   ? "checking…"
                   : "not detected"}
@@ -269,7 +281,7 @@ curl -fsSL https://get.docker.com | sh`}</code>
           <li>
             Version:{" "}
             <span className={runtimeStatus?.version ? "text-emerald-300" : "text-slate-400"}>
-              {runtimeStatus?.version ?? "—"}
+              {runtimeStatus?.version?.trim() || "—"}
             </span>
           </li>
           <li>
@@ -360,7 +372,6 @@ export function WizardStepConnect(props: {
   verifiedBot: { bot_id: string; bot_username: string } | null;
   botUsername: string;
   onBotUsernameChange: (value: string) => void;
-  telegramBotUrl: string;
   onConnect: () => void;
   onCopyUri: () => void;
   copiedUri: boolean;
@@ -377,12 +388,18 @@ export function WizardStepConnect(props: {
     verifiedBot,
     botUsername,
     onBotUsernameChange,
-    telegramBotUrl,
     onConnect,
     onCopyUri,
     copiedUri,
     onCompleteSetup,
   } = props;
+
+  const telegramBotUrl = useMemo(() => {
+    const fromInput = botUsername.replace(/^@+/, "").trim();
+    const fromVerified = verifiedBot?.bot_username.replace(/^@+/, "").trim() ?? "";
+    const name = fromInput || fromVerified;
+    return name ? `https://t.me/${name}` : "https://t.me/botfather";
+  }, [botUsername, verifiedBot]);
 
   return (
     <div className="grid gap-8 lg:grid-cols-[1fr_1fr]">

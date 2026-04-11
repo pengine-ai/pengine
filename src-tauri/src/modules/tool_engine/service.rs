@@ -65,23 +65,6 @@ pub fn workspace_app_bind_pairs(host_paths: &[String]) -> Vec<(String, String)> 
     out
 }
 
-/// `-v=host:container:ro|rw` fragments only (no `run`, `--rm`, etc.).
-pub fn workspace_volume_bind_args(host_paths: &[String], mount_read_only: bool) -> Vec<String> {
-    let suffix = if mount_read_only { "ro" } else { "rw" };
-    workspace_app_bind_pairs(host_paths)
-        .into_iter()
-        .map(|(host, cpath)| format!("-v={host}:{cpath}:{suffix}"))
-        .collect()
-}
-
-/// Container roots passed to `server-filesystem` (same order as the allow-list).
-pub fn workspace_container_roots(host_paths: &[String]) -> Vec<String> {
-    workspace_app_bind_pairs(host_paths)
-        .into_iter()
-        .map(|(_, cpath)| cpath)
-        .collect()
-}
-
 /// Full `podman|docker run …` argv (excluding the runtime binary) for a catalog tool entry.
 pub fn podman_run_argv_for_tool(
     entry: &ToolEntry,
@@ -104,48 +87,36 @@ pub fn podman_run_argv_for_tool(
         args.push("--read-only".into());
     }
 
-    if entry.mount_workspace && !host_paths.is_empty() {
-        args.extend(workspace_volume_bind_args(
-            host_paths,
-            entry.mount_read_only,
-        ));
+    // Compute the host→container layout once and reuse it for both bind mounts and root args.
+    let bind_pairs = if entry.mount_workspace {
+        workspace_app_bind_pairs(host_paths)
+    } else {
+        Vec::new()
+    };
+
+    if entry.mount_workspace && !bind_pairs.is_empty() {
+        let suffix = if entry.mount_read_only { "ro" } else { "rw" };
+        args.extend(
+            bind_pairs
+                .iter()
+                .map(|(host, cpath)| format!("-v={host}:{cpath}:{suffix}")),
+        );
     }
 
     args.push(entry.image.clone());
     args.extend(entry.mcp_server_cmd.iter().cloned());
 
     if entry.append_workspace_roots {
-        if host_paths.is_empty() {
+        if bind_pairs.is_empty() {
             args.push(EMPTY_WORKSPACE_CONTAINER_ROOT.to_string());
         } else {
-            args.extend(workspace_container_roots(host_paths));
+            args.extend(bind_pairs.into_iter().map(|(_, cpath)| cpath));
         }
     }
 
     Ok(args)
 }
 
-/// Backwards-compatible name for the file-manager layout (uses catalog flags on the entry).
-#[inline]
-pub fn podman_args_for_file_manager(
-    entry: &ToolEntry,
-    host_paths: &[String],
-) -> Result<Vec<String>, String> {
-    podman_run_argv_for_tool(entry, host_paths)
-}
-
-/// Check whether a tool is installed by looking for its server key in `mcp.json`.
-pub fn is_installed(tool_id: &str, mcp_config_path: &Path) -> bool {
-    let key = server_key(tool_id);
-    mcp_config_path
-        .exists()
-        .then(|| mcp_service::read_config(mcp_config_path).ok())
-        .flatten()
-        .map(|cfg| cfg.servers.contains_key(&key))
-        .unwrap_or(false)
-}
-
-/// Return all tool IDs that are currently installed (have a `te_` entry in `mcp.json`).
 async fn image_present(runtime: &RuntimeInfo, image: &str) -> bool {
     tokio::process::Command::new(&runtime.binary)
         .args(["image", "inspect", image])
@@ -276,7 +247,7 @@ pub async fn install_tool(
     tool_id: &str,
     runtime: &RuntimeInfo,
     mcp_config_path: &Path,
-    host_paths: &[String],
+    mcp_cfg_lock: &tokio::sync::Mutex<()>,
 ) -> Result<(), String> {
     let catalog = load_catalog()?;
     let entry = catalog
@@ -312,7 +283,10 @@ pub async fn install_tool(
         }
     }
 
-    let args = podman_run_argv_for_tool(entry, host_paths)?;
+    let _cfg_guard = mcp_cfg_lock.lock().await;
+    let mut cfg = mcp_service::load_or_init_config(mcp_config_path)?;
+    let host_paths = mcp_service::filesystem_allowed_paths(&cfg);
+    let args = podman_run_argv_for_tool(entry, &host_paths)?;
 
     let server_entry = ServerEntry::Stdio {
         command: runtime.binary.clone(),
@@ -321,8 +295,6 @@ pub async fn install_tool(
         direct_return: entry.direct_return,
     };
 
-    // Write to mcp.json.
-    let mut cfg = mcp_service::load_or_init_config(mcp_config_path)?;
     cfg.servers.insert(server_key(tool_id), server_entry);
     mcp_service::save_config(mcp_config_path, &cfg)?;
 
@@ -334,45 +306,33 @@ pub async fn install_tool(
 pub fn sync_workspace_mounted_tools_if_installed(
     cfg: &mut McpConfig,
     host_paths: &[String],
-    runtime: &RuntimeInfo,
 ) -> Result<bool, String> {
     let catalog = load_catalog()?;
     let mut changed = false;
     for entry in catalog.tools.iter().filter(|t| t.mount_workspace) {
         let key = server_key(&entry.id);
-        if !cfg.servers.contains_key(&key) {
+        let Some(ServerEntry::Stdio {
+            command,
+            args,
+            env,
+            direct_return,
+        }) = cfg.servers.get(&key)
+        else {
             continue;
-        }
-
-        let args = podman_run_argv_for_tool(entry, host_paths)?;
-        let same = matches!(
-            cfg.servers.get(&key),
-            Some(ServerEntry::Stdio {
-                args: cur,
-                command: cmd,
-                ..
-            }) if cur == &args && cmd == &runtime.binary
-        );
-        if same {
-            continue;
-        }
-
-        let (direct_return, env) = match cfg.servers.get(&key) {
-            Some(ServerEntry::Stdio {
-                direct_return, env, ..
-            }) => (*direct_return, env.clone()),
-            _ => (entry.direct_return, HashMap::new()),
         };
 
-        cfg.servers.insert(
-            key,
-            ServerEntry::Stdio {
-                command: runtime.binary.clone(),
-                args,
-                env,
-                direct_return,
-            },
-        );
+        let new_args = podman_run_argv_for_tool(entry, host_paths)?;
+        if args == &new_args {
+            continue;
+        }
+
+        let new_entry = ServerEntry::Stdio {
+            command: command.clone(),
+            args: new_args,
+            env: env.clone(),
+            direct_return: *direct_return,
+        };
+        cfg.servers.insert(key, new_entry);
         changed = true;
     }
     Ok(changed)
@@ -383,10 +343,12 @@ pub async fn uninstall_tool(
     tool_id: &str,
     runtime: &RuntimeInfo,
     mcp_config_path: &Path,
+    mcp_cfg_lock: &tokio::sync::Mutex<()>,
 ) -> Result<(), String> {
     // Remove from mcp.json.
     let key = server_key(tool_id);
     if mcp_config_path.exists() {
+        let _cfg_guard = mcp_cfg_lock.lock().await;
         let mut cfg = mcp_service::read_config(mcp_config_path)?;
         cfg.servers.remove(&key);
         mcp_service::save_config(mcp_config_path, &cfg)?;
@@ -418,12 +380,29 @@ mod tests {
                 ("/opt/other".into(), "/app/other".into()),
             ]
         );
-        let binds = workspace_volume_bind_args(&hosts, true);
-        assert_eq!(binds[0], "-v=/Users/x/pengine:/app/pengine:ro");
-        assert_eq!(binds[1], "-v=/opt/other:/app/other:ro");
+    }
+
+    #[test]
+    fn podman_argv_with_paths_emits_ro_binds_and_roots() {
+        let catalog = load_catalog().unwrap();
+        let entry = catalog
+            .tools
+            .iter()
+            .find(|t| t.id == "pengine/file-manager")
+            .unwrap();
+        let hosts = vec!["/Users/x/pengine".into(), "/opt/other".into()];
+        let argv = podman_run_argv_for_tool(entry, &hosts).unwrap();
+        let suffix = if entry.mount_read_only { "ro" } else { "rw" };
+        assert!(argv
+            .iter()
+            .any(|a| a == &format!("-v=/Users/x/pengine:/app/pengine:{suffix}")));
+        assert!(argv
+            .iter()
+            .any(|a| a == &format!("-v=/opt/other:/app/other:{suffix}")));
+        // Roots are appended after the image + mcp_server_cmd.
         assert_eq!(
-            workspace_container_roots(&hosts),
-            vec!["/app/pengine".to_string(), "/app/other".to_string()]
+            &argv[argv.len() - 2..],
+            &["/app/pengine".to_string(), "/app/other".to_string()]
         );
     }
 

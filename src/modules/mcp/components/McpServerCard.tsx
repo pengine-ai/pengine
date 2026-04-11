@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { workspaceAppContainerMountPaths } from "../../../shared/workspaceMounts";
 import {
   fetchMcpConfig,
   putMcpFilesystemPaths,
@@ -27,27 +28,6 @@ function argsTextLooksLikeFilesystem(argsText: string): boolean {
     .map((l) => l.trim())
     .filter(Boolean)
     .some((a) => a.includes("server-filesystem"));
-}
-
-/** Mirrors server-side mounts: each folder → `/app/<basename>` (duplicates get `_1`, `_2`, …). */
-function appMountPathsForFolders(paths: string[]): string[] {
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const p of paths) {
-    const parts = p.replace(/\\/g, "/").split("/").filter(Boolean);
-    const raw = parts.length > 0 ? parts[parts.length - 1]! : "folder";
-    const safe = raw.replace(/[^a-zA-Z0-9_-]/g, "_");
-    const label = /^_+$/.test(safe) || safe === "" ? "folder" : safe;
-    let key = label;
-    let n = 0;
-    while (seen.has(key)) {
-      n += 1;
-      key = `${label}_${n}`;
-    }
-    seen.add(key);
-    out.push(`/app/${key}`);
-  }
-  return out;
 }
 
 export function McpServerCard({
@@ -239,7 +219,7 @@ function InlineEditForm({
 
   const isTeFileManager = name === "te_pengine-file-manager";
   const [tePaths, setTePaths] = useState<string[]>([]);
-  const teAppMounts = isTeFileManager ? appMountPathsForFolders(tePaths) : [];
+  const teAppMounts = isTeFileManager ? workspaceAppContainerMountPaths(tePaths) : [];
   const [tePickError, setTePickError] = useState<string | null>(null);
   const [teApplyError, setTeApplyError] = useState<string | null>(null);
   const [teApplyBusy, setTeApplyBusy] = useState(false);
@@ -336,10 +316,6 @@ function InlineEditForm({
 
   const applyTeFolders = async () => {
     setTeApplyError(null);
-    if (tePaths.length === 0) {
-      setTeApplyError("Add at least one folder.");
-      return;
-    }
     setTeApplyBusy(true);
     const ok = await putMcpFilesystemPaths(tePaths, 60_000);
     setTeApplyBusy(false);
@@ -429,7 +405,7 @@ function InlineEditForm({
             )}
             <button
               type="button"
-              disabled={teApplyBusy || tePaths.length === 0}
+              disabled={teApplyBusy}
               onClick={() => void applyTeFolders()}
               className="mt-3 rounded-lg border border-emerald-300/30 bg-emerald-300/15 px-3 py-1.5 font-mono text-[11px] text-emerald-100 hover:bg-emerald-300/25 disabled:opacity-40"
             >

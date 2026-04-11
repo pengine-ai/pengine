@@ -63,7 +63,10 @@ export function WizardLayout({
         </div>
       </div>
 
-      <ol className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5" aria-label="Setup steps">
+      <ol
+        className="grid gap-3 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-5"
+        aria-label="Setup steps"
+      >
         {stepTitles.map((title, index) => (
           <li key={title}>
             <button
