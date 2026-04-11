@@ -10,32 +10,54 @@ use std::sync::Arc;
 
 const FILESYSTEM_SERVER_KEY: &str = "filesystem";
 
-/// Prefer project `mcp.json` under `src-tauri/` (or crate-root `mcp.json`) by walking up from
-/// [`std::env::current_exe`], so resolution does not depend on process CWD. Falls back to
-/// `mcp.json` next to `connection.json` in app data.
+fn app_data_mcp_path(store_path: &Path) -> PathBuf {
+    store_path
+        .parent()
+        .map(|p| p.join("mcp.json"))
+        .unwrap_or_else(|| PathBuf::from("mcp.json"))
+}
+
+/// If set, absolute or relative path to `mcp.json` (overrides all other resolution).
+const MCP_CONFIG_ENV: &str = "PENGINE_MCP_CONFIG";
+
+/// Resolve the active `mcp.json` path.
+///
+/// - Optional override: [`MCP_CONFIG_ENV`] → use that file.
+/// - **Release builds** (packaged native app): always `$APP_DATA/mcp.json` next to
+///   `connection.json`, so Tool Engine installs and workspace folders persist regardless of where
+///   the `.app` bundle lives (e.g. `/Applications` vs still under a source tree).
+/// - **Debug builds**: walk up from [`std::env::current_exe`] to find crate-root or
+///   `…/src-tauri/mcp.json` for local development, then fall back to app data.
 pub fn resolve_mcp_config_path(store_path: &Path) -> (PathBuf, &'static str) {
-    if let Ok(exe) = std::env::current_exe() {
-        let mut dir = exe.parent().map(Path::to_path_buf);
-        for _ in 0..16 {
-            let Some(ref d) = dir else {
-                break;
-            };
-            let from_repo_root = d.join("src-tauri").join("mcp.json");
-            if from_repo_root.exists() {
-                return (from_repo_root, "project");
-            }
-            let in_crate_root = d.join("mcp.json");
-            if d.join("Cargo.toml").exists() && in_crate_root.exists() {
-                return (in_crate_root, "project");
-            }
-            dir = d.parent().map(Path::to_path_buf);
+    if let Ok(raw) = std::env::var(MCP_CONFIG_ENV) {
+        let t = raw.trim();
+        if !t.is_empty() {
+            return (PathBuf::from(t), "env");
         }
     }
 
-    let app_path = store_path
-        .parent()
-        .map(|p| p.join("mcp.json"))
-        .unwrap_or_else(|| PathBuf::from("mcp.json"));
+    #[cfg(debug_assertions)]
+    {
+        if let Ok(exe) = std::env::current_exe() {
+            let mut dir = exe.parent().map(Path::to_path_buf);
+            for _ in 0..16 {
+                let Some(ref d) = dir else {
+                    break;
+                };
+                let from_repo_root = d.join("src-tauri").join("mcp.json");
+                if from_repo_root.exists() {
+                    return (from_repo_root, "project");
+                }
+                let in_crate_root = d.join("mcp.json");
+                if d.join("Cargo.toml").exists() && in_crate_root.exists() {
+                    return (in_crate_root, "project");
+                }
+                dir = d.parent().map(Path::to_path_buf);
+            }
+        }
+    }
+
+    let app_path = app_data_mcp_path(store_path);
     (app_path, "app_data")
 }
 
@@ -135,10 +157,8 @@ pub async fn connect_one_server(
         ServerEntry::Native { id } => match native::native_for(server_key, id) {
             Ok(p) => {
                 let n = p.tools.len();
-                let msg = format!(
-                    "{server_key} native ({n} tool{})",
-                    if n == 1 { "" } else { "s" }
-                );
+                let cmd_word = if n == 1 { "command" } else { "commands" };
+                let msg = format!("{server_key} native ({n} {cmd_word})");
                 (Some(Provider::Native(Arc::new(p))), msg)
             }
             Err(e) => (None, format!("{server_key} native failed: {e}")),
@@ -159,12 +179,9 @@ pub async fn connect_one_server(
         {
             Ok(client) => {
                 let n = client.tools.len();
+                let cmd_word = if n == 1 { "command" } else { "commands" };
                 let dr = if *direct_return { " direct_return" } else { "" };
-                let msg = format!(
-                    "{server_key} stdio ({n} tool{}{})",
-                    if n == 1 { "" } else { "s" },
-                    dr
-                );
+                let msg = format!("{server_key} stdio ({n} {cmd_word}{dr})");
                 (Some(Provider::Mcp(Arc::new(client))), msg)
             }
             Err(e) => (None, format!("{server_key} stdio failed: {e}")),
@@ -255,7 +272,7 @@ pub async fn rebuild_registry_into_state(
         *state.mcp.write().await = ToolRegistry::new(providers.clone());
     }
 
-    let n = state.mcp.read().await.tool_names().len();
+    let n = state.mcp.read().await.mcp_tool_count();
     state
         .emit_log(
             "mcp",
@@ -305,5 +322,15 @@ mod tests {
         set_filesystem_allowed_paths(&mut cfg, &["/a".into(), "/b".into()]);
         assert_eq!(cfg.workspace_roots, vec!["/a", "/b"]);
         assert!(!cfg.servers.contains_key("filesystem"));
+    }
+
+    /// Release binaries always use `mcp.json` next to `connection.json` (no exe walk).
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn resolve_mcp_config_release_uses_app_data_adjacent_to_store() {
+        let store = PathBuf::from("/tmp/pengine-fake-app/connection.json");
+        let (path, src) = resolve_mcp_config_path(&store);
+        assert_eq!(src, "app_data");
+        assert_eq!(path, PathBuf::from("/tmp/pengine-fake-app/mcp.json"));
     }
 }

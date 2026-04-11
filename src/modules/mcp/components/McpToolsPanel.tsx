@@ -13,7 +13,7 @@ import { AddServerForm } from "./AddServerForm";
 import { McpServerCard } from "./McpServerCard";
 
 /**
- * Dashboard panel: filesystem shortcut, server list with CRUD, and tool groups.
+ * Dashboard panel: MCP tools (config entries), CRUD, and commands grouped per tool.
  */
 export function McpToolsPanel() {
   const [tools, setTools] = useState<McpTool[] | null>(null);
@@ -48,7 +48,7 @@ export function McpToolsPanel() {
         setServers(s);
         setServersError(null);
       } else {
-        setServersError("Could not load MCP servers");
+        setServersError("Could not load MCP tools");
       }
     }
 
@@ -58,7 +58,7 @@ export function McpToolsPanel() {
         setTools(t);
         setToolsError(null);
       } else {
-        setToolsError("Could not load MCP tools");
+        setToolsError("Could not load MCP commands");
       }
       const next = t !== null && t.length > 0 ? 10_000 : 30_000;
       scheduleToolsPollRef.current(next);
@@ -87,7 +87,7 @@ export function McpToolsPanel() {
         setTools(data);
         setToolsError(null);
       } else {
-        setToolsError("Could not load MCP tools");
+        setToolsError("Could not load MCP commands");
       }
       const next = data !== null && data.length > 0 ? 10_000 : 30_000;
       schedulePoll(next);
@@ -104,7 +104,7 @@ export function McpToolsPanel() {
         setServers(s);
         setServersError(null);
       } else {
-        setServersError("Could not load MCP servers");
+        setServersError("Could not load MCP tools");
       }
     };
 
@@ -141,7 +141,7 @@ export function McpToolsPanel() {
     setEditingName(null);
     await reload();
     setBusy(false);
-    setNotice(`Server "${name}" saved — tools reloaded`);
+    setNotice(`Tool "${name}" saved — commands reloaded`);
     return true;
   };
 
@@ -162,7 +162,7 @@ export function McpToolsPanel() {
     }
     await reload();
     setBusy(false);
-    setNotice(`Server "${name}" removed`);
+    setNotice(`Tool "${name}" removed`);
   };
 
   // ── Derived data ───────────────────────────────────────────────────
@@ -199,9 +199,9 @@ export function McpToolsPanel() {
       )}
 
       <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-        {/* ── Servers ─────────────────────────────────────────────── */}
+        {/* ── MCP tools (mcp.json server entries) ─────────────────── */}
         <div className="min-w-0">
-          <p className="mono-label">Servers</p>
+          <p className="mono-label">Tools</p>
 
           {serversError && servers !== null && (
             <p className="mt-2 font-mono text-[11px] text-amber-200/90" role="alert">
@@ -245,9 +245,9 @@ export function McpToolsPanel() {
           <AddServerForm busy={busy} onAdd={handleAddServer} />
         </div>
 
-        {/* ── Available tools ─────────────────────────────────────── */}
+        {/* ── Commands exposed by each tool ───────────────────────── */}
         <div className="min-w-0">
-          <p className="mono-label">Available tools</p>
+          <p className="mono-label">Commands</p>
 
           {toolsError && tools !== null && (
             <p className="mt-2 font-mono text-[11px] text-amber-200/90" role="alert">
@@ -268,7 +268,7 @@ export function McpToolsPanel() {
           )}
 
           {groups !== null && groups.length === 0 && (
-            <p className="mt-3 subtle-copy">No MCP tools connected.</p>
+            <p className="mt-3 subtle-copy">No MCP commands available.</p>
           )}
 
           {groups !== null && groups.length > 0 && (

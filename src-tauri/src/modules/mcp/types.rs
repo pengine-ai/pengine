@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 
-/// Root config: `src-tauri/mcp.json` in dev or `mcp.json` next to app data (`connection.json`).
+/// Root config: `$APP_DATA/mcp.json` next to `connection.json` for release/native builds; debug
+/// builds may use crate `mcp.json` (see `service::resolve_mcp_config_path`). Override with
+/// `PENGINE_MCP_CONFIG`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpConfig {
     /// Host folders shared with the File Manager container (`/app/<basename>`). Replaces legacy

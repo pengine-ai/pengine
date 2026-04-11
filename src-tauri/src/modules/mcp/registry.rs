@@ -143,12 +143,17 @@ impl Default for ToolRegistry {
 }
 
 impl ToolRegistry {
+    /// Number of MCP tools connected (one per `servers` entry in `mcp.json`: `dice`, `te_*`, …).
+    pub fn mcp_tool_count(&self) -> usize {
+        self.providers.len()
+    }
+
     pub fn new(providers: Vec<Provider>) -> Self {
         let cached_ollama_tools = build_ollama_tools(&providers);
         let cached_tool_names = providers
             .iter()
             .flat_map(|p| p.tools().iter())
-            .filter(|t| should_expose_to_model(t))
+            .filter(|t| !is_deprecated_mcp_tool(t))
             .map(|t| t.name.clone())
             .collect();
         Self {
@@ -162,7 +167,7 @@ impl ToolRegistry {
         self.providers
             .iter()
             .flat_map(|p| p.tools().iter())
-            .filter(|t| should_expose_to_model(t))
+            .filter(|t| !is_deprecated_mcp_tool(t))
             .cloned()
             .collect()
     }
@@ -171,10 +176,12 @@ impl ToolRegistry {
         self.cached_ollama_tools.clone()
     }
 
+    /// Names of commands offered to the model (flattened across all MCP tools).
     pub fn tool_names(&self) -> &[String] {
         &self.cached_tool_names
     }
 
+    /// `true` when there is no command to expose (e.g. nothing connected yet).
     pub fn is_empty(&self) -> bool {
         self.cached_tool_names.is_empty()
     }
@@ -235,28 +242,20 @@ impl ToolRegistry {
     }
 }
 
-fn should_expose_to_model(tool: &ToolDef) -> bool {
-    let desc = tool.description.as_deref().unwrap_or("");
-    if desc.to_ascii_uppercase().contains("DEPRECATED") {
-        return false;
-    }
-    !REDUNDANT_TOOLS.contains(&tool.name.as_str())
+/// Hide tools the server marks as deprecated (e.g. filesystem `read_file` → use `read_text_file`).
+fn is_deprecated_mcp_tool(tool: &ToolDef) -> bool {
+    tool.description
+        .as_deref()
+        .unwrap_or("")
+        .to_ascii_uppercase()
+        .contains("DEPRECATED")
 }
-
-/// Tools that add noise without value for a small local model.
-const REDUNDANT_TOOLS: &[&str] = &[
-    "read_media_file",
-    "read_multiple_files",
-    "list_directory_with_sizes",
-    "directory_tree",
-    "list_allowed_directories",
-];
 
 fn build_ollama_tools(providers: &[Provider]) -> Value {
     let arr: Vec<Value> = providers
         .iter()
         .flat_map(|p| p.tools().iter())
-        .filter(|t| should_expose_to_model(t))
+        .filter(|t| !is_deprecated_mcp_tool(t))
         .map(|t| {
             json!({
                 "type": "function",

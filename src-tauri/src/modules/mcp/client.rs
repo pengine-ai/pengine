@@ -94,6 +94,7 @@ fn parse_tools(server_name: &str, result: &Value) -> Vec<ToolDef> {
                     .map(|s| s.to_string()),
                 input_schema: t
                     .get("inputSchema")
+                    .or_else(|| t.get("input_schema"))
                     .cloned()
                     .unwrap_or_else(|| json!({"type": "object"})),
                 direct_return: false,
