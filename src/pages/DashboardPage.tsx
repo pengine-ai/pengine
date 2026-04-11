@@ -208,7 +208,7 @@ export function DashboardPage() {
           <TerminalPreview />
         </section>
 
-        {/* ── Servers & tools ─────────────────────────────────────── */}
+        {/* ── MCP tools & commands ────────────────────────────────── */}
         <section className="mt-4 sm:mt-6">
           <McpToolsPanel />
         </section>

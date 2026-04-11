@@ -1,4 +1,5 @@
 use super::protocol::{JsonRpcRequest, JsonRpcResponse};
+use crate::infrastructure::executable_resolve;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::process::Stdio;
@@ -25,7 +26,8 @@ impl StdioTransport {
         args: &[String],
         env: &HashMap<String, String>,
     ) -> Result<Self, String> {
-        let mut cmd = Command::new(command);
+        let resolved = executable_resolve::resolve_command_for_spawn(command);
+        let mut cmd = Command::new(&resolved);
         cmd.args(args)
             .envs(env)
             .stdin(Stdio::piped())
@@ -33,9 +35,13 @@ impl StdioTransport {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
 
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| format!("spawn `{command}` failed: {e}"))?;
+        let mut child = cmd.spawn().map_err(|e| {
+            format!(
+                "spawn `{}` (resolved as `{}`) failed: {e}",
+                command,
+                resolved.display()
+            )
+        })?;
 
         let stdin = child.stdin.take().ok_or("no stdin")?;
         let stdout = child.stdout.take().ok_or("no stdout")?;

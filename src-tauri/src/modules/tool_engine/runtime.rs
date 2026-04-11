@@ -1,6 +1,7 @@
 use super::types::RuntimeKind;
+use crate::infrastructure::executable_resolve;
 use serde::Serialize;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RuntimeInfo {
@@ -21,52 +22,8 @@ pub async fn detect_runtime() -> Option<RuntimeInfo> {
     try_runtime("docker", RuntimeKind::Docker).await
 }
 
-fn push_candidate(out: &mut Vec<PathBuf>, p: PathBuf) {
-    if p.as_os_str().is_empty() {
-        return;
-    }
-    if !out.iter().any(|x| x == &p) {
-        out.push(p);
-    }
-}
-
-/// Ordered list of paths to try for `podman` / `docker`.
-fn runtime_binary_candidates(name: &str) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    push_candidate(&mut out, PathBuf::from(name));
-
-    if let Ok(path_var) = std::env::var("PATH") {
-        let sep = if cfg!(windows) { ';' } else { ':' };
-        for dir in path_var.split(sep) {
-            if dir.is_empty() {
-                continue;
-            }
-            push_candidate(&mut out, Path::new(dir).join(name));
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        push_candidate(&mut out, PathBuf::from(format!("/opt/homebrew/bin/{name}")));
-        push_candidate(&mut out, PathBuf::from(format!("/usr/local/bin/{name}")));
-        push_candidate(&mut out, PathBuf::from(format!("/opt/podman/bin/{name}")));
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        push_candidate(&mut out, PathBuf::from(format!("/usr/bin/{name}")));
-        push_candidate(&mut out, PathBuf::from(format!("/bin/{name}")));
-    }
-
-    if let Ok(home) = std::env::var("HOME") {
-        push_candidate(&mut out, Path::new(&home).join(".local/bin").join(name));
-    }
-
-    out
-}
-
 async fn try_runtime(binary_name: &str, kind: RuntimeKind) -> Option<RuntimeInfo> {
-    for path in runtime_binary_candidates(binary_name) {
+    for path in executable_resolve::runtime_binary_candidates(binary_name) {
         if let Some(info) = try_runtime_at(&path, kind).await {
             return Some(info);
         }

@@ -59,7 +59,7 @@ export function AddServerForm({ busy, onAdd }: Props) {
     if ("type" in obj && (obj.type === "stdio" || obj.type === "native")) {
       // Direct entry — need a name from the input
       if (!pasteName.trim()) {
-        setError("Enter a server name (the JSON has no key wrapper)");
+        setError("Enter a tool name (the JSON has no key wrapper)");
         return;
       }
       name = pasteName.trim();
@@ -68,13 +68,13 @@ export function AddServerForm({ busy, onAdd }: Props) {
       // Wrapped: { "server-name": { ... } }
       const keys = Object.keys(obj);
       if (keys.length !== 1) {
-        setError('Expected either a server entry or { "name": { ...entry } }');
+        setError('Expected either a tool entry or { "name": { ...entry } }');
         return;
       }
       name = keys[0];
       const inner = obj[name];
       if (typeof inner !== "object" || inner === null || Array.isArray(inner)) {
-        setError(`Value for "${name}" is not a valid server entry`);
+        setError(`Value for "${name}" is not a valid tool entry`);
         return;
       }
       entry = normalizeEntry(inner as Record<string, unknown>);
@@ -85,7 +85,7 @@ export function AddServerForm({ busy, onAdd }: Props) {
       reset();
       setOpen(false);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not add server");
+      setError(e instanceof Error ? e.message : "Could not add tool");
     }
   };
 
@@ -93,7 +93,7 @@ export function AddServerForm({ busy, onAdd }: Props) {
     setError(null);
     const name = formName.trim();
     if (!name) {
-      setError("Server name is required");
+      setError("Tool name is required");
       return;
     }
     if (!command.trim()) {
@@ -122,7 +122,7 @@ export function AddServerForm({ busy, onAdd }: Props) {
       reset();
       setOpen(false);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not add server");
+      setError(e instanceof Error ? e.message : "Could not add tool");
     }
   };
 
@@ -136,7 +136,7 @@ export function AddServerForm({ busy, onAdd }: Props) {
         onClick={() => setOpen(true)}
         className="mt-3 w-full rounded-xl border border-dashed border-white/15 px-3 py-3 text-center font-mono text-xs text-(--mid) transition hover:border-white/30 hover:text-white"
       >
-        + Add server
+        + Add tool
       </button>
     );
   }
@@ -144,7 +144,7 @@ export function AddServerForm({ busy, onAdd }: Props) {
   return (
     <div className="mt-3 rounded-2xl border border-white/10 bg-black/20 p-3 sm:p-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className="font-mono text-[11px] uppercase tracking-[0.12em] text-(--mid)">Add server</p>
+        <p className="font-mono text-[11px] uppercase tracking-[0.12em] text-(--mid)">Add tool</p>
         <button
           type="button"
           onClick={() => {
@@ -180,13 +180,13 @@ export function AddServerForm({ busy, onAdd }: Props) {
         <div className="mt-3 grid gap-3">
           <div>
             <label className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-(--mid)">
-              Server name (optional if JSON is wrapped)
+              Tool name (optional if JSON is wrapped)
             </label>
             <input
               type="text"
               value={pasteName}
               onChange={(e) => setPasteName(e.target.value)}
-              placeholder="my-server"
+              placeholder="my-tool"
               className={inputClass}
             />
           </div>
@@ -208,7 +208,7 @@ export function AddServerForm({ busy, onAdd }: Props) {
             onClick={handlePasteSubmit}
             className="rounded-lg border border-white/20 bg-white/10 px-3 py-1.5 text-xs font-medium text-white hover:bg-white/15 disabled:opacity-40"
           >
-            Add server
+            Add tool
           </button>
         </div>
       )}
@@ -217,13 +217,13 @@ export function AddServerForm({ busy, onAdd }: Props) {
         <div className="mt-3 grid gap-3 md:grid-cols-2">
           <div>
             <label className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-(--mid)">
-              Server name
+              Tool name
             </label>
             <input
               type="text"
               value={formName}
               onChange={(e) => setFormName(e.target.value)}
-              placeholder="my-server"
+              placeholder="my-tool"
               className={inputClass}
             />
           </div>
@@ -278,7 +278,7 @@ export function AddServerForm({ busy, onAdd }: Props) {
             onClick={handleFormSubmit}
             className="rounded-lg border border-white/20 bg-white/10 px-3 py-2 text-xs font-medium text-white hover:bg-white/15 disabled:opacity-40 md:justify-self-start md:px-4"
           >
-            Add server
+            Add tool
           </button>
         </div>
       )}

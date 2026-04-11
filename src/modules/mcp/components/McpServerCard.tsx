@@ -61,7 +61,7 @@ export function McpServerCard({
       await onDelete(name);
       setConfirmDelete(false);
     } catch (e) {
-      setDeleteError(e instanceof Error ? e.message : "Could not remove server");
+      setDeleteError(e instanceof Error ? e.message : "Could not remove tool");
     }
   };
 
@@ -105,7 +105,7 @@ export function McpServerCard({
             {commandPreview}
           </p>
           <p className="mt-1 font-mono text-[11px] uppercase tracking-[0.14em] text-(--mid)">
-            {toolCount} tool{toolCount === 1 ? "" : "s"}
+            {toolCount} command{toolCount === 1 ? "" : "s"}
           </p>
         </div>
 
@@ -141,8 +141,8 @@ export function McpServerCard({
                 setDeleteError(null);
                 setConfirmDelete(true);
               }}
-              aria-label={`Delete server ${name}`}
-              title={`Delete server ${name}`}
+              aria-label={`Delete tool ${name}`}
+              title={`Delete tool ${name}`}
               className="rounded-lg border border-rose-300/20 bg-transparent px-2 py-1 font-mono text-[10px] uppercase tracking-wider text-rose-300/70 hover:bg-rose-300/10 hover:text-rose-200 disabled:opacity-40"
             >
               del
