@@ -2,6 +2,7 @@ use crate::infrastructure::bot_lifecycle;
 use crate::modules::bot::{repository, service as bot_service};
 use crate::modules::mcp::service as mcp_service;
 use crate::modules::ollama::service as ollama_service;
+use crate::modules::tool_engine::{runtime as te_runtime, service as te_service};
 use crate::shared::state::{AppState, ConnectionData};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -95,6 +96,14 @@ pub async fn start_server(state: AppState) {
         .route("/v1/mcp/servers", get(handle_mcp_servers_list))
         .route("/v1/mcp/servers/{name}", put(handle_mcp_server_upsert))
         .route("/v1/mcp/servers/{name}", delete(handle_mcp_server_delete))
+        .route("/v1/toolengine/runtime", get(handle_toolengine_runtime))
+        .route("/v1/toolengine/catalog", get(handle_toolengine_catalog))
+        .route("/v1/toolengine/installed", get(handle_toolengine_installed))
+        .route("/v1/toolengine/install", post(handle_toolengine_install))
+        .route(
+            "/v1/toolengine/uninstall",
+            post(handle_toolengine_uninstall),
+        )
         .layer(cors)
         .with_state(state.clone());
 
@@ -343,49 +352,69 @@ async fn handle_mcp_filesystem_put(
         .map(|p| p.trim().to_string())
         .filter(|p| !p.is_empty())
         .collect();
-    if paths.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "at least one path is required".into(),
-            }),
-        ));
-    }
 
-    let _guard = state.mcp_config_mutex.lock().await;
+    let sync_note = {
+        let _guard = state.mcp_config_mutex.lock().await;
 
-    let mut cfg = if state.mcp_config_path.exists() {
-        mcp_service::read_config(&state.mcp_config_path)
-            .map_err(|e| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })))?
-    } else {
-        mcp_service::load_or_init_config(&state.mcp_config_path).map_err(|e| {
+        let mut cfg = if state.mcp_config_path.exists() {
+            mcp_service::read_config(&state.mcp_config_path)
+                .map_err(|e| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })))?
+        } else {
+            mcp_service::load_or_init_config(&state.mcp_config_path).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse { error: e }),
+                )
+            })?
+        };
+
+        mcp_service::set_filesystem_allowed_paths(&mut cfg, &paths);
+
+        let mut note = None::<String>;
+        if let Err(e) = te_service::sync_workspace_mounted_tools_if_installed(&mut cfg, &paths) {
+            note = Some(e);
+        }
+
+        mcp_service::save_config(&state.mcp_config_path, &cfg).map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse { error: e }),
             )
-        })?
+        })?;
+
+        note
     };
 
-    mcp_service::set_filesystem_allowed_paths(&mut cfg, &paths);
-    mcp_service::save_config(&state.mcp_config_path, &cfg).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse { error: e }),
-        )
-    })?;
+    if let Some(msg) = sync_note {
+        state
+            .emit_log(
+                "toolengine",
+                &format!("file-manager entry not updated: {msg}"),
+            )
+            .await;
+    }
 
     state
         .emit_log(
             "mcp",
             &format!(
-                "filesystem allowed paths ({}) updated → {}",
+                "workspace_roots ({}) updated → {}",
                 paths.len(),
                 state.mcp_config_path.display()
             ),
         )
         .await;
 
-    mcp_service::rebuild_registry_into_state(&state, &cfg).await;
+    let bg = state.clone();
+    tokio::spawn(async move {
+        if let Err(e) = mcp_service::rebuild_registry_into_state(&bg).await {
+            bg.emit_log(
+                "mcp",
+                &format!("ERROR: MCP registry rebuild failed after workspace_roots update: {e}"),
+            )
+            .await;
+        }
+    });
 
     Ok((StatusCode::OK, Json(serde_json::json!({ "ok": true }))))
 }
@@ -465,27 +494,39 @@ async fn handle_mcp_server_upsert(
         }
     }
 
-    let _guard = state.mcp_config_mutex.lock().await;
-    let mut cfg = mcp_service::load_or_init_config(&state.mcp_config_path).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse { error: e }),
-        )
-    })?;
+    {
+        let _guard = state.mcp_config_mutex.lock().await;
+        let mut cfg = mcp_service::load_or_init_config(&state.mcp_config_path).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse { error: e }),
+            )
+        })?;
 
-    cfg.servers.insert(name.clone(), entry);
+        cfg.servers.insert(name.clone(), entry);
 
-    mcp_service::save_config(&state.mcp_config_path, &cfg).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse { error: e }),
-        )
-    })?;
+        mcp_service::save_config(&state.mcp_config_path, &cfg).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse { error: e }),
+            )
+        })?;
+    }
 
     state
         .emit_log("mcp", &format!("server '{name}' saved"))
         .await;
-    mcp_service::rebuild_registry_into_state(&state, &cfg).await;
+
+    let bg = state.clone();
+    tokio::spawn(async move {
+        if let Err(e) = mcp_service::rebuild_registry_into_state(&bg).await {
+            bg.emit_log(
+                "mcp",
+                &format!("ERROR: MCP registry rebuild failed after server save: {e}"),
+            )
+            .await;
+        }
+    });
 
     Ok((StatusCode::OK, Json(serde_json::json!({ "ok": true }))))
 }
@@ -494,35 +535,229 @@ async fn handle_mcp_server_delete(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ErrorResponse>)> {
-    let _guard = state.mcp_config_mutex.lock().await;
+    {
+        let _guard = state.mcp_config_mutex.lock().await;
 
-    let mut cfg = mcp_service::load_or_init_config(&state.mcp_config_path).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse { error: e }),
-        )
-    })?;
+        let mut cfg = mcp_service::load_or_init_config(&state.mcp_config_path).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse { error: e }),
+            )
+        })?;
 
-    if cfg.servers.remove(&name).is_none() {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: format!("server '{name}' not found"),
-            }),
-        ));
+        if cfg.servers.remove(&name).is_none() {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("server '{name}' not found"),
+                }),
+            ));
+        }
+
+        mcp_service::save_config(&state.mcp_config_path, &cfg).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse { error: e }),
+            )
+        })?;
     }
-
-    mcp_service::save_config(&state.mcp_config_path, &cfg).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse { error: e }),
-        )
-    })?;
 
     state
         .emit_log("mcp", &format!("server '{name}' removed"))
         .await;
-    mcp_service::rebuild_registry_into_state(&state, &cfg).await;
+
+    let bg = state.clone();
+    tokio::spawn(async move {
+        if let Err(e) = mcp_service::rebuild_registry_into_state(&bg).await {
+            bg.emit_log(
+                "mcp",
+                &format!("ERROR: MCP registry rebuild failed after server delete: {e}"),
+            )
+            .await;
+        }
+    });
+
+    Ok((StatusCode::OK, Json(serde_json::json!({ "ok": true }))))
+}
+
+// ── Tool Engine ─────────────────────────────────────────────────────
+
+async fn handle_toolengine_runtime(State(_state): State<AppState>) -> Json<serde_json::Value> {
+    match te_runtime::detect_runtime().await {
+        Some(info) => Json(serde_json::json!({
+            "available": true,
+            "kind": info.kind,
+            "version": info.version,
+            "rootless": info.rootless,
+        })),
+        None => Json(serde_json::json!({ "available": false })),
+    }
+}
+
+async fn handle_toolengine_catalog(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let catalog = te_service::load_catalog().map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse { error: e }),
+        )
+    })?;
+
+    let installed_ids = te_service::installed_tool_ids(&state.mcp_config_path);
+
+    let tools: Vec<serde_json::Value> = catalog
+        .tools
+        .iter()
+        .map(|t| {
+            let commands: Vec<serde_json::Value> = t
+                .commands
+                .iter()
+                .map(|c| {
+                    serde_json::json!({
+                        "name": c.name,
+                        "description": c.description,
+                    })
+                })
+                .collect();
+            serde_json::json!({
+                "id": t.id,
+                "name": t.name,
+                "version": t.version,
+                "description": t.description,
+                "installed": installed_ids.contains(&t.id),
+                "commands": commands,
+            })
+        })
+        .collect();
+
+    Ok(Json(serde_json::json!({ "tools": tools })))
+}
+
+async fn handle_toolengine_installed(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let installed = te_service::installed_tool_ids(&state.mcp_config_path);
+    Json(serde_json::json!({ "installed": installed }))
+}
+
+#[derive(Deserialize)]
+struct ToolEngineActionBody {
+    tool_id: String,
+}
+
+async fn handle_toolengine_install(
+    State(state): State<AppState>,
+    Json(body): Json<ToolEngineActionBody>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ErrorResponse>)> {
+    let tool_id = body.tool_id;
+    let runtime = match te_runtime::detect_runtime().await {
+        Some(rt) => rt,
+        None => {
+            let msg = "no container runtime found (install Podman or Docker)";
+            state.emit_log("toolengine", &format!("error: {msg}")).await;
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ErrorResponse { error: msg.into() }),
+            ));
+        }
+    };
+
+    {
+        let _guard = state.tool_engine_mutex.lock().await;
+
+        state
+            .emit_log("toolengine", &format!("installing {tool_id}…"))
+            .await;
+
+        if let Err(e) = te_service::install_tool(
+            &tool_id,
+            &runtime,
+            &state.mcp_config_path,
+            &state.mcp_config_mutex,
+        )
+        .await
+        {
+            state
+                .emit_log("toolengine", &format!("install failed: {e}"))
+                .await;
+            return Err((StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })));
+        }
+
+        state
+            .emit_log("toolengine", &format!("{tool_id} installed"))
+            .await;
+    }
+
+    // Respond immediately; MCP reconnect can take minutes (Podman / npx) and must not block the UI.
+    let bg = state.clone();
+    tokio::spawn(async move {
+        if let Err(e) = mcp_service::rebuild_registry_into_state(&bg).await {
+            bg.emit_log(
+                "mcp",
+                &format!("ERROR: MCP registry rebuild failed after tool install: {e}"),
+            )
+            .await;
+        }
+    });
+
+    Ok((StatusCode::OK, Json(serde_json::json!({ "ok": true }))))
+}
+
+async fn handle_toolengine_uninstall(
+    State(state): State<AppState>,
+    Json(body): Json<ToolEngineActionBody>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ErrorResponse>)> {
+    let tool_id = body.tool_id;
+    let runtime = match te_runtime::detect_runtime().await {
+        Some(rt) => rt,
+        None => {
+            let msg = "no container runtime found";
+            state.emit_log("toolengine", &format!("error: {msg}")).await;
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ErrorResponse { error: msg.into() }),
+            ));
+        }
+    };
+
+    {
+        let _guard = state.tool_engine_mutex.lock().await;
+
+        state
+            .emit_log("toolengine", &format!("uninstalling {tool_id}…"))
+            .await;
+
+        if let Err(e) = te_service::uninstall_tool(
+            &tool_id,
+            &runtime,
+            &state.mcp_config_path,
+            &state.mcp_config_mutex,
+        )
+        .await
+        {
+            state
+                .emit_log("toolengine", &format!("uninstall failed: {e}"))
+                .await;
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse { error: e }),
+            ));
+        }
+
+        state
+            .emit_log("toolengine", &format!("{tool_id} uninstalled"))
+            .await;
+    }
+
+    let bg = state.clone();
+    tokio::spawn(async move {
+        if let Err(e) = mcp_service::rebuild_registry_into_state(&bg).await {
+            bg.emit_log(
+                "mcp",
+                &format!("ERROR: MCP registry rebuild failed after tool uninstall: {e}"),
+            )
+            .await;
+        }
+    });
 
     Ok((StatusCode::OK, Json(serde_json::json!({ "ok": true }))))
 }

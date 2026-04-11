@@ -5,6 +5,7 @@ import { TerminalPreview } from "../modules/bot/components/TerminalPreview";
 import { useAppSessionStore } from "../modules/bot/store/appSessionStore";
 import { McpToolsPanel } from "../modules/mcp/components/McpToolsPanel";
 import { fetchOllamaModels, setPreferredOllamaModel } from "../modules/ollama/api";
+import { ToolEnginePanel } from "../modules/toolengine/components/ToolEnginePanel";
 import { TopMenu } from "../shared/ui/TopMenu";
 
 type ServiceInfo = {
@@ -210,6 +211,11 @@ export function DashboardPage() {
         {/* ── Servers & tools ─────────────────────────────────────── */}
         <section className="mt-4 sm:mt-6">
           <McpToolsPanel />
+        </section>
+
+        {/* ── Tool Engine (container tools) ───────────────────────── */}
+        <section className="mt-4 sm:mt-6">
+          <ToolEnginePanel />
         </section>
       </main>
     </div>

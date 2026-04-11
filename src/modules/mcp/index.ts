@@ -55,7 +55,7 @@ export async function fetchMcpConfig(timeoutMs = 3000): Promise<McpConfigInfo | 
   }
 }
 
-/** PUT `/v1/mcp/filesystem` — set allowed folders for the `filesystem` stdio server and reload tools. */
+/** PUT `/v1/mcp/filesystem` — set `workspace_roots` (File Manager bind mounts) and reload MCP. */
 export async function putMcpFilesystemPaths(paths: string[], timeoutMs = 15000): Promise<boolean> {
   const { signal, cleanup } = makeTimeoutSignal(timeoutMs);
   try {

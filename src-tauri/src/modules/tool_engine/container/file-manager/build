@@ -1,0 +1,11 @@
+#!/usr/bin/env sh
+set -e
+cd "$(dirname "$0")"
+if command -v podman >/dev/null 2>&1; then
+  exec podman build -t file-manager:0.1.0 .
+fi
+if command -v docker >/dev/null 2>&1; then
+  exec docker build -t file-manager:0.1.0 .
+fi
+echo "No container runtime found: install Podman or Docker" >&2
+exit 1

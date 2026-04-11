@@ -1,0 +1,79 @@
+{
+  "version": 1,
+  "tools": [
+    {
+      "id": "pengine/file-manager",
+      "name": "File Manager",
+      "version": "0.1.0",
+      "description": "Filesystem MCP in a container. Add folders in MCP Tools; each mounts at /app/<folder-name>. Install works before any folder is set.",
+      "image": "file-manager:0.1.0",
+      "digest": "",
+      "build_context": "src/modules/tool_engine/container/file-manager",
+      "mcp_server_cmd": [],
+      "container_read_only_rootfs": false,
+      "mount_read_only": false,
+      "mount_workspace": true,
+      "append_workspace_roots": true,
+      "commands": [
+        {
+          "name": "read_text_file",
+          "description": "Read a file as UTF-8 text; optional head/tail line limits"
+        },
+        {
+          "name": "read_media_file",
+          "description": "Read image or audio as base64 with MIME type"
+        },
+        {
+          "name": "read_multiple_files",
+          "description": "Read several files in one call"
+        },
+        {
+          "name": "write_file",
+          "description": "Create or overwrite a file"
+        },
+        {
+          "name": "edit_file",
+          "description": "Pattern-based selective edits with optional dry run"
+        },
+        {
+          "name": "create_directory",
+          "description": "Create a directory (and parents)"
+        },
+        {
+          "name": "list_directory",
+          "description": "List entries with [FILE]/[DIR] prefixes"
+        },
+        {
+          "name": "list_directory_with_sizes",
+          "description": "List directory with sizes and optional sort"
+        },
+        {
+          "name": "move_file",
+          "description": "Move or rename a file or directory"
+        },
+        {
+          "name": "search_files",
+          "description": "Recursive glob search under a path"
+        },
+        {
+          "name": "directory_tree",
+          "description": "Recursive JSON tree of directory contents"
+        },
+        {
+          "name": "get_file_info",
+          "description": "Metadata: size, times, type, permissions"
+        },
+        {
+          "name": "list_allowed_directories",
+          "description": "List MCP roots currently allowed"
+        }
+      ],
+      "limits": {
+        "cpus": "0.5",
+        "memory": "256m",
+        "timeout_secs": 30
+      },
+      "direct_return": true
+    }
+  ]
+}

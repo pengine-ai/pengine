@@ -100,3 +100,50 @@ a {
 .status-pulse {
   animation: pulse-ring 2.1s ease-in-out infinite;
 }
+
+/* Tool Engine — indeterminate pull/remove (no byte-level progress from API) */
+@keyframes install-sheen {
+  0% {
+    transform: translateX(-45%);
+  }
+  100% {
+    transform: translateX(245%);
+  }
+}
+
+.install-progress-track {
+  position: relative;
+  height: 2px;
+  overflow: hidden;
+  border-radius: 9999px;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.install-progress-sheen {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  width: 38%;
+  border-radius: 9999px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(0, 212, 170, 0.15),
+    rgba(0, 212, 170, 0.85),
+    rgba(0, 212, 170, 0.15),
+    transparent
+  );
+  animation: install-sheen 1.85s ease-in-out infinite;
+}
+
+.install-progress-sheen--remove {
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(255, 95, 109, 0.12),
+    rgba(255, 95, 109, 0.65),
+    rgba(255, 95, 109, 0.12),
+    transparent
+  );
+}

@@ -8,6 +8,7 @@ import {
   type McpTool,
   type ServerEntry,
 } from "..";
+import { PENGINE_MCP_REGISTRY_CHANGED } from "../../../shared/mcpEvents";
 import { AddServerForm } from "./AddServerForm";
 import { McpServerCard } from "./McpServerCard";
 
@@ -118,6 +119,14 @@ export function McpToolsPanel() {
     };
   }, []);
 
+  useEffect(() => {
+    const onRegistryChanged = () => {
+      void reload();
+    };
+    window.addEventListener(PENGINE_MCP_REGISTRY_CHANGED, onRegistryChanged);
+    return () => window.removeEventListener(PENGINE_MCP_REGISTRY_CHANGED, onRegistryChanged);
+  }, [reload]);
+
   // ── Server CRUD handlers ───────────────────────────────────────────
 
   const handleSaveServer = async (name: string, entry: ServerEntry): Promise<boolean> => {
@@ -227,6 +236,7 @@ export function McpToolsPanel() {
                   }}
                   onDelete={handleDeleteServer}
                   onEditStart={setEditingName}
+                  onReloadServers={reload}
                 />
               ))}
             </div>

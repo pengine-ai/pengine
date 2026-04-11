@@ -2,6 +2,10 @@ use super::transport::StdioTransport;
 use super::types::ToolDef;
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::time::Duration;
+
+/// `podman run` + `npx -y` inside the container can exceed a minute on cold cache / slow networks.
+const MCP_CONNECT_CALL_TIMEOUT: Duration = Duration::from_secs(300);
 
 pub struct McpClient {
     pub server_name: String,
@@ -24,10 +28,14 @@ impl McpClient {
             "capabilities": {},
             "clientInfo": { "name": "pengine", "version": "0.1.0" },
         });
-        transport.call("initialize", Some(init_params)).await?;
+        transport
+            .call_with_timeout("initialize", Some(init_params), MCP_CONNECT_CALL_TIMEOUT)
+            .await?;
         let _ = transport.notify("notifications/initialized", None).await;
 
-        let result = transport.call("tools/list", None).await?;
+        let result = transport
+            .call_with_timeout("tools/list", None, MCP_CONNECT_CALL_TIMEOUT)
+            .await?;
         let mut tools = parse_tools(&server_name, &result);
 
         if direct_return {

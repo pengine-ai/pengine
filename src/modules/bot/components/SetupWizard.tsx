@@ -1,10 +1,16 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { OLLAMA_API_BASE } from "../../../shared/api/config";
 import { fetchOllamaModel } from "../../ollama/api";
+import { fetchRuntimeStatus, type RuntimeStatus } from "../../toolengine";
 import { getPengineHealth, PENGINE, postConnect } from "../api";
 import { useAppSessionStore } from "../store/appSessionStore";
-import { StyledQrCode } from "../../../shared/ui/StyledQrCode";
 import { WizardLayout } from "../../../shared/ui/WizardLayout";
+import {
+  WizardStepConnect,
+  WizardStepContainerRuntime,
+  WizardStepCreateBot,
+  WizardStepOllama,
+  WizardStepPengineLocal,
+} from "./SetupWizardSteps";
 
 export const SETUP_STEPS = [
   {
@@ -15,6 +21,11 @@ export const SETUP_STEPS = [
   {
     title: "Install Ollama",
     summary: "Install Ollama on this machine so Pengine can run models locally.",
+    duration: "~2 min",
+  },
+  {
+    title: "Install a container runtime",
+    summary: "Install Podman (preferred) or Docker so Pengine can run tools in isolated sandboxes.",
     duration: "~2 min",
   },
   {
@@ -58,6 +69,8 @@ export function SetupWizard({ onStepChange, onCompleteSetup }: SetupWizardProps)
   const [ollamaChecking, setOllamaChecking] = useState(false);
   const [ollamaModel, setOllamaModel] = useState<string | null>(null);
   const [ollamaReachable, setOllamaReachable] = useState<boolean | null>(null);
+  const [runtimeChecking, setRuntimeChecking] = useState(false);
+  const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
   const [pengineReachable, setPengineReachable] = useState<boolean | null>(null);
   const [pengineChecking, setPengineChecking] = useState(false);
   const [connectStatus, setConnectStatus] = useState<"idle" | "connecting" | "connected" | "error">(
@@ -77,19 +90,16 @@ export function SetupWizard({ onStepChange, onCompleteSetup }: SetupWizardProps)
   const stepTitles = SETUP_STEPS.map((item) => item.title);
   const botId = useMemo(() => parseBotIdFromToken(botToken), [botToken]);
 
-  const telegramBotUrl = useMemo(() => {
-    const name = verifiedBot?.bot_username || botUsername.replace(/^@+/, "").trim();
-    if (name) return `https://t.me/${name}`;
-    return "https://t.me/botfather";
-  }, [botUsername, verifiedBot]);
-
   const canContinueStep = useMemo(() => {
-    if (step === 0) return status === "valid";
-    if (step === 1) return !!ollamaModel;
-    if (step === 2) return pengineReachable === true;
-    if (step === 3) return connectStatus === "connected";
-    return false;
-  }, [step, status, ollamaModel, pengineReachable, connectStatus]);
+    const gates: Record<number, boolean> = {
+      0: status === "valid",
+      1: !!ollamaModel,
+      2: runtimeStatus?.available === true,
+      3: pengineReachable === true,
+      4: connectStatus === "connected",
+    };
+    return gates[step] ?? false;
+  }, [step, status, ollamaModel, runtimeStatus, pengineReachable, connectStatus]);
 
   const canGoNext = step < stepTitles.length - 1 && canContinueStep;
 
@@ -116,6 +126,23 @@ export function SetupWizard({ onStepChange, onCompleteSetup }: SetupWizardProps)
     }
   }, [step, checkOllama]);
 
+  const checkRuntime = useCallback(async () => {
+    setRuntimeChecking(true);
+    setRuntimeStatus(null);
+    try {
+      const rt = await fetchRuntimeStatus(5000);
+      setRuntimeStatus(rt ?? { available: false });
+    } finally {
+      setRuntimeChecking(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (step === 2) {
+      checkRuntime();
+    }
+  }, [step, checkRuntime]);
+
   const checkPengineHealth = useCallback(async () => {
     setPengineChecking(true);
     try {
@@ -126,7 +153,7 @@ export function SetupWizard({ onStepChange, onCompleteSetup }: SetupWizardProps)
   }, []);
 
   useEffect(() => {
-    if (step === 2) {
+    if (step === 3) {
       checkPengineHealth();
     }
   }, [step, checkPengineHealth]);
@@ -178,313 +205,52 @@ export function SetupWizard({ onStepChange, onCompleteSetup }: SetupWizardProps)
       canGoNext={canGoNext}
     >
       {step === 0 && (
-        <div className="grid gap-8 lg:grid-cols-[1.05fr_0.95fr]">
-          <div className="space-y-5">
-            <div>
-              <p className="mono-label">Step 1</p>
-              <h2 className="mt-2 text-3xl font-extrabold text-white">Create your Telegram bot</h2>
-              <p className="mt-3 subtle-copy">
-                Open BotFather, create a new bot, then paste the token here.
-              </p>
-            </div>
-            <a
-              className="primary-button w-fit rounded-xl px-5 py-3 text-xs"
-              href="https://t.me/botfather"
-              target="_blank"
-              rel="noreferrer"
-            >
-              Open BotFather
-            </a>
-            <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
-              <label
-                htmlFor="token"
-                className="font-mono text-xs uppercase tracking-[0.14em] text-(--mid)"
-              >
-                Bot token
-              </label>
-              <input
-                id="token"
-                className="mt-3 w-full rounded-xl border border-white/10 bg-slate-950/70 px-4 py-3 text-slate-100 outline-none placeholder:text-(--dim) focus:border-cyan-300/40"
-                value={botToken}
-                onChange={(event) => setBotToken(event.target.value)}
-                placeholder="1234567890:ABCdefGHIjklMNOpqrSTUvwxYZ-abc123..."
-              />
-              <div className="mt-3 flex items-center gap-3 text-sm">
-                <span
-                  className={`h-2.5 w-2.5 rounded-full ${
-                    status === "valid"
-                      ? "status-pulse bg-emerald-300"
-                      : status === "typing"
-                        ? "bg-yellow-300"
-                        : "bg-slate-500"
-                  }`}
-                />
-                <p className="text-(--mid)">{tokenStatusMessage(status)}</p>
-              </div>
-            </div>
-          </div>
-          <div className="panel rounded-4xl p-5">
-            <p className="mono-label">Why</p>
-            <p className="mt-4 text-sm text-slate-200">
-              The token encodes your <strong className="text-slate-100">bot ID</strong>. Pengine
-              uses that ID to pair with your bot automatically.
-            </p>
-          </div>
-        </div>
+        <WizardStepCreateBot
+          botToken={botToken}
+          onBotTokenChange={setBotToken}
+          status={status}
+          tokenStatusMessage={tokenStatusMessage}
+        />
       )}
-
       {step === 1 && (
-        <div className="grid gap-8 lg:grid-cols-[1fr_1fr]">
-          <div>
-            <p className="mono-label">Step 2</p>
-            <h2 className="mt-2 text-3xl font-extrabold text-white">Install Ollama</h2>
-            <p className="mt-3 subtle-copy">
-              Ollama runs AI models on your machine. Install it and pull a model before continuing.
-            </p>
-            <pre className="mt-5 overflow-x-auto rounded-2xl border border-white/10 bg-slate-950/70 p-4 font-mono text-sm text-emerald-200">
-              <code>{`curl -fsSL https://ollama.com/install.sh | sh
-ollama pull qwen3:8b`}</code>
-            </pre>
-            <p className="mt-2 text-xs text-white/40">
-              Recommended: <span className="text-white/60">qwen3:8b</span> — good balance of speed
-              and tool-calling support.
-            </p>
-
-            {ollamaChecking && (
-              <p className="mt-4 font-mono text-xs text-yellow-300">Detecting Ollama…</p>
-            )}
-
-            {ollamaReachable === true && ollamaModel && (
-              <div className="mt-4 rounded-2xl border border-emerald-300/20 bg-emerald-300/10 px-4 py-3">
-                <p className="font-mono text-xs text-emerald-300">
-                  Ollama detected — active model:
-                </p>
-                <p className="mt-1 text-lg font-semibold text-white">{ollamaModel}</p>
-              </div>
-            )}
-
-            {ollamaReachable === true && !ollamaModel && (
-              <p className="mt-4 font-mono text-xs text-yellow-300">
-                Ollama is running but no model is pulled yet. Run{" "}
-                <code className="text-slate-200">ollama pull qwen3:8b</code> first.
-              </p>
-            )}
-
-            {ollamaReachable === false && (
-              <div className="mt-4 space-y-2">
-                <p className="font-mono text-xs text-rose-300">
-                  Could not reach Ollama at {OLLAMA_API_BASE}. Make sure it's installed and running.
-                </p>
-                <button
-                  type="button"
-                  className="secondary-button w-full max-w-md rounded-xl text-xs"
-                  onClick={checkOllama}
-                >
-                  Retry detection
-                </button>
-              </div>
-            )}
-
-            {ollamaModel && (
-              <p className="mt-3 font-mono text-xs text-emerald-300">Ready to continue.</p>
-            )}
-          </div>
-          <div className="rounded-2xl border border-emerald-300/20 bg-emerald-300/10 p-5">
-            <p className="font-mono text-xs uppercase tracking-[0.14em] text-emerald-200">
-              Ollama status
-            </p>
-            <ul className="mt-3 list-inside list-disc space-y-2 text-sm text-slate-100">
-              <li>
-                Connection:{" "}
-                <span
-                  className={
-                    ollamaReachable
-                      ? "text-emerald-300"
-                      : ollamaReachable === false
-                        ? "text-rose-300"
-                        : "text-slate-400"
-                  }
-                >
-                  {ollamaReachable
-                    ? "reachable"
-                    : ollamaReachable === false
-                      ? "not reachable"
-                      : "checking…"}
-                </span>
-              </li>
-              <li>
-                Active model:{" "}
-                <span className={ollamaModel ? "text-emerald-300" : "text-slate-400"}>
-                  {ollamaModel ?? "none detected"}
-                </span>
-              </li>
-            </ul>
-          </div>
-        </div>
+        <WizardStepOllama
+          ollamaChecking={ollamaChecking}
+          ollamaReachable={ollamaReachable}
+          ollamaModel={ollamaModel}
+          onRetry={checkOllama}
+        />
       )}
-
       {step === 2 && (
-        <div className="grid gap-8 lg:grid-cols-[1fr_1fr]">
-          <div>
-            <p className="mono-label">Step 3</p>
-            <h2 className="mt-2 text-3xl font-extrabold text-white">Start Pengine locally</h2>
-            <p className="mt-3 subtle-copy">
-              The Pengine desktop app must be running on this machine. It hosts the bot service on
-              localhost so messages keep flowing even after you close this browser tab.
-            </p>
-            <div className="mt-5 rounded-2xl border border-white/10 bg-white/5 p-4 font-mono text-xs text-(--mid)">
-              <p>
-                Checking <code className="text-slate-300">{PENGINE.health}</code>…
-              </p>
-            </div>
-            {pengineChecking && <p className="mt-3 font-mono text-xs text-yellow-300">Checking…</p>}
-            {pengineReachable === true && (
-              <p className="mt-3 font-mono text-xs text-emerald-300">
-                Pengine is running on localhost.
-              </p>
-            )}
-            {pengineReachable === false && (
-              <div className="mt-3 space-y-2">
-                <p className="font-mono text-xs text-rose-300">
-                  Could not reach Pengine. Start the desktop app and retry.
-                </p>
-                <button
-                  type="button"
-                  className="secondary-button w-full max-w-md rounded-xl text-xs"
-                  onClick={checkPengineHealth}
-                >
-                  Retry health check
-                </button>
-              </div>
-            )}
-          </div>
-          <div className="rounded-2xl border border-cyan-300/20 bg-cyan-300/10 p-5">
-            <p className="font-mono text-xs uppercase tracking-[0.14em] text-cyan-200">
-              What happens next
-            </p>
-            <p className="mt-3 text-sm text-slate-100">
-              The next step hands off your bot token to the local Pengine process. The bot will
-              start polling Telegram automatically.
-            </p>
-          </div>
-        </div>
+        <WizardStepContainerRuntime
+          runtimeChecking={runtimeChecking}
+          runtimeStatus={runtimeStatus}
+          onRetry={checkRuntime}
+        />
       )}
-
       {step === 3 && (
-        <div className="grid gap-8 lg:grid-cols-[1fr_1fr]">
-          <div>
-            <p className="mono-label">Step 4</p>
-            <h2 className="mt-2 text-3xl font-extrabold text-white">Connect bot to Pengine</h2>
-            <p className="mt-3 subtle-copy">
-              Send your bot token to the local Pengine service. It will verify the token with
-              Telegram and start listening for messages.
-            </p>
-            <div className="mt-5 rounded-2xl border border-white/10 bg-slate-950/60 p-4 font-mono text-sm text-slate-100">
-              <p>
-                Bot ID:{" "}
-                <span className="text-(--yellow)">{botId ?? "— paste token in step 1"}</span>
-              </p>
-            </div>
-
-            {connectStatus === "idle" && (
-              <button
-                type="button"
-                data-testid="connect-to-pengine"
-                className="primary-button mt-6 w-full max-w-md rounded-xl text-xs"
-                onClick={handleConnect}
-              >
-                Connect to Pengine
-              </button>
-            )}
-            {connectStatus === "connecting" && (
-              <p className="mt-4 font-mono text-xs text-yellow-300">
-                Verifying token with Telegram…
-              </p>
-            )}
-            {connectStatus === "error" && (
-              <div className="mt-4 space-y-2">
-                <p className="font-mono text-xs text-rose-300">{connectError}</p>
-                <button
-                  type="button"
-                  className="secondary-button w-full max-w-md rounded-xl text-xs"
-                  onClick={handleConnect}
-                >
-                  Retry connection
-                </button>
-              </div>
-            )}
-            {connectStatus === "connected" && verifiedBot && (
-              <div className="mt-4 space-y-3">
-                <p className="font-mono text-xs text-emerald-300">
-                  Connected as @{verifiedBot.bot_username} (ID: {verifiedBot.bot_id})
-                </p>
-                <div className="mt-4 rounded-2xl border border-white/10 bg-white/5 p-4">
-                  <label
-                    htmlFor="bot-username-connect"
-                    className="font-mono text-xs uppercase tracking-[0.14em] text-(--mid)"
-                  >
-                    Bot username (for QR link)
-                  </label>
-                  <input
-                    id="bot-username-connect"
-                    className="mt-3 w-full rounded-xl border border-white/10 bg-slate-950/70 px-4 py-3 text-slate-100 outline-none placeholder:text-(--dim) focus:border-cyan-300/40"
-                    value={botUsername || verifiedBot.bot_username}
-                    onChange={(event) => setBotUsername(event.target.value)}
-                    placeholder="@YourPengineBot"
-                  />
-                </div>
-                <div className="mt-4 flex justify-center rounded-3xl border border-white/10 bg-white p-5">
-                  <StyledQrCode value={telegramBotUrl} size={208} />
-                </div>
-                <p className="text-center font-mono text-[11px] text-(--dim)">
-                  Scan to open your bot in Telegram
-                </p>
-              </div>
-            )}
-
-            <div className="mt-6">
-              <button
-                type="button"
-                className="font-mono text-[11px] text-(--dim) underline decoration-white/20 underline-offset-4 hover:text-slate-300"
-                onClick={handleCopyUri}
-              >
-                {copiedUri ? "Copied!" : "Copy connection command (curl)"}
-              </button>
-            </div>
-          </div>
-          <div className="space-y-4">
-            <div className="rounded-2xl border border-white/10 bg-white/5 p-5">
-              <p className="font-mono text-xs uppercase tracking-[0.14em] text-(--mid)">
-                Direct link
-              </p>
-              <a
-                href={telegramBotUrl}
-                target="_blank"
-                rel="noreferrer"
-                className="mt-3 inline-flex break-all font-mono text-xs text-cyan-200"
-              >
-                {telegramBotUrl}
-              </a>
-            </div>
-            <div className="rounded-3xl border border-emerald-300/20 bg-emerald-300/10 p-5">
-              <div className="space-y-3 font-mono text-sm text-slate-100">
-                <p>{status === "valid" ? "✓" : "○"} Bot token saved</p>
-                <p>{ollamaModel ? "✓" : "○"} Ollama ready</p>
-                <p>{pengineReachable ? "✓" : "○"} Pengine running</p>
-                <p>{connectStatus === "connected" ? "✓" : "○"} Bot connected</p>
-              </div>
-              {connectStatus === "connected" && (
-                <button
-                  type="button"
-                  className="primary-button mt-5 w-full rounded-xl text-xs"
-                  onClick={() => onCompleteSetup?.()}
-                >
-                  Open dashboard
-                </button>
-              )}
-            </div>
-          </div>
-        </div>
+        <WizardStepPengineLocal
+          pengineChecking={pengineChecking}
+          pengineReachable={pengineReachable}
+          onRetry={checkPengineHealth}
+        />
+      )}
+      {step === 4 && (
+        <WizardStepConnect
+          botId={botId}
+          status={status}
+          ollamaModel={ollamaModel}
+          runtimeStatus={runtimeStatus}
+          pengineReachable={pengineReachable}
+          connectStatus={connectStatus}
+          connectError={connectError}
+          verifiedBot={verifiedBot}
+          botUsername={botUsername}
+          onBotUsernameChange={setBotUsername}
+          onConnect={handleConnect}
+          onCopyUri={handleCopyUri}
+          copiedUri={copiedUri}
+          onCompleteSetup={onCompleteSetup}
+        />
       )}
     </WizardLayout>
   );

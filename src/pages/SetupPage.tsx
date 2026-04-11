@@ -8,6 +8,7 @@ const requirements = [
   "Telegram account",
   "Bot token from BotFather",
   "Ollama installed on this machine",
+  "Podman or Docker installed",
   "Pengine desktop app installed",
 ];
 

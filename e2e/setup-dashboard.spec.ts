@@ -121,6 +121,22 @@ async function mockApis(page: import("@playwright/test").Page) {
   });
 
   await page.route(
+    (url) => url.href.startsWith(`${PENGINE_API_BASE}/v1/toolengine/runtime`),
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          available: true,
+          kind: "podman",
+          version: "5.0.0",
+          rootless: true,
+        }),
+      });
+    },
+  );
+
+  await page.route(
     (url) => url.href.startsWith(`${PENGINE_API_BASE}/v1/mcp/servers`),
     async (route) => {
       await route.fulfill({
@@ -179,14 +195,22 @@ test.describe("setup to dashboard flow", () => {
     await expect(page.getByText("Ready to continue.")).toBeVisible();
     await page.getByRole("button", { name: "Continue" }).click();
 
-    // Step 3: Pengine local (health check auto-passes via mock)
+    // Step 3: Container runtime (Podman/Docker — mocked as available)
+    await expect(
+      page.getByRole("heading", { name: "Install a container runtime", exact: true }),
+    ).toBeVisible();
+    await expect(page.getByText("Container runtime detected:")).toBeVisible();
+    await expect(page.getByText("Ready to continue.")).toBeVisible();
+    await page.getByRole("button", { name: "Continue" }).click();
+
+    // Step 4: Pengine local (health check auto-passes via mock)
     await expect(
       page.getByRole("heading", { name: "Start Pengine locally", exact: true }),
     ).toBeVisible();
     await expect(page.getByText("Pengine is running on localhost.")).toBeVisible();
     await page.getByRole("button", { name: "Continue" }).click();
 
-    // Step 4: Connect
+    // Step 5: Connect
     await expect(
       page.getByRole("heading", { name: "Connect bot to Pengine", exact: true }),
     ).toBeVisible();
