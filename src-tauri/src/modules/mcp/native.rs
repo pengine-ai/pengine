@@ -58,10 +58,40 @@ fn handle_dice(_tool_name: &str, args: &Value) -> Result<String, String> {
     Ok(format!("Rolled a d{sides}: {result}"))
 }
 
+/// Native tool that lets the agent manage Tool Engine catalog tools via messages.
+fn tool_manager_named(server_key: &str) -> NativeProvider {
+    NativeProvider {
+        server_name: server_key.to_string(),
+        tools: vec![ToolDef {
+            server_name: server_key.to_string(),
+            name: "tool_engine_help".to_string(),
+            description: Some(
+                "Show available Tool Engine catalog tools and how to install them from the dashboard.".into(),
+            ),
+            input_schema: json!({"type": "object", "properties": {}}),
+            direct_return: true,
+        }],
+        handler: handle_tool_manager,
+    }
+}
+
+fn handle_tool_manager(tool_name: &str, _args: &Value) -> Result<String, String> {
+    match tool_name {
+        "tool_engine_help" => Ok(
+            "Open the Tool Engine panel in the dashboard to browse and install catalog tools. \
+             Each tool runs as an MCP server inside a container. \
+             Use the MCP Tools panel to manage workspace folders shared with installed tools."
+                .into(),
+        ),
+        _ => Err(format!("unknown native tool: {tool_name}")),
+    }
+}
+
 /// Resolve `id` from `mcp.json` (`type: native`) into a provider under `server_key`.
 pub fn native_for(server_key: &str, id: &str) -> Result<NativeProvider, String> {
     match id {
         "dice" => Ok(dice_named(server_key)),
+        "tool_manager" => Ok(tool_manager_named(server_key)),
         _ => Err(format!("unknown native id: {id}")),
     }
 }

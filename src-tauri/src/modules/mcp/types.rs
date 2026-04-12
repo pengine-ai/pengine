@@ -20,7 +20,7 @@ pub struct McpConfig {
 pub enum ServerEntry {
     /// In-process tool pack; `id` selects a built-in (e.g. `dice`).
     Native { id: String },
-    /// Child process speaking MCP over stdio (`docker run … -i` is just command + args).
+    /// Child process speaking MCP over stdio (`command` + `args`; Tool Engine uses this for `te_*`).
     Stdio {
         command: String,
         #[serde(default)]

@@ -9,7 +9,6 @@
       "id": "pengine/file-manager",
       "name": "File Manager",
       "description": "Filesystem MCP in a container. Add folders in MCP Tools; each mounts at /app/<folder-name>. Install works before any folder is set.",
-      "image": "ghcr.io/pengine-ai/tools/pengine-file-manager",
       "current": "0.1.0",
       "versions": [
         {
@@ -21,6 +20,7 @@
           "security": false
         }
       ],
+      "image": "ghcr.io/pengine-ai/tools/pengine-file-manager",
       "container_read_only_rootfs": false,
       "mount_read_only": true,
       "mount_workspace": true,
@@ -45,11 +45,7 @@
         { "name": "get_file_info", "description": "Metadata: size, times, type, permissions" },
         { "name": "list_allowed_directories", "description": "List MCP roots currently allowed" }
       ],
-      "limits": {
-        "cpus": "0.5",
-        "memory": "256m",
-        "timeout_secs": 30
-      }
+      "limits": { "cpus": "0.5", "memory": "256m", "timeout_secs": 30 }
     }
   ]
 }

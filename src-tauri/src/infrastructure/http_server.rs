@@ -623,7 +623,7 @@ async fn handle_toolengine_catalog(
             serde_json::json!({
                 "id": t.id,
                 "name": t.name,
-                "version": t.version,
+                "version": t.current,
                 "description": t.description,
                 "installed": installed_ids.contains(&t.id),
                 "commands": commands,
@@ -668,11 +668,19 @@ async fn handle_toolengine_install(
             .emit_log("toolengine", &format!("installing {tool_id}…"))
             .await;
 
+        let log_state = state.clone();
+        let log_fn: Box<dyn Fn(&str) + Send + Sync> = Box::new(move |msg: &str| {
+            let s = log_state.clone();
+            let m = msg.to_string();
+            tokio::spawn(async move { s.emit_log("toolengine", &m).await });
+        });
+
         if let Err(e) = te_service::install_tool(
             &tool_id,
             &runtime,
             &state.mcp_config_path,
             &state.mcp_config_mutex,
+            &log_fn,
         )
         .await
         {

@@ -127,6 +127,10 @@ fn default_config_value() -> serde_json::Value {
             "dice": {
                 "type": "native",
                 "id": "dice"
+            },
+            "tool_manager": {
+                "type": "native",
+                "id": "tool_manager"
             }
         }
     })
@@ -272,7 +276,7 @@ pub async fn rebuild_registry_into_state(
         *state.mcp.write().await = ToolRegistry::new(providers.clone());
     }
 
-    let n = state.mcp.read().await.mcp_tool_count();
+    let n = state.mcp.read().await.tool_names().len();
     state
         .emit_log(
             "mcp",

@@ -1,0 +1,16 @@
+{
+  "id": "pengine/file-manager",
+  "name": "File Manager",
+  "version": "0.1.0",
+  "description": "Read and list files from mounted directories via MCP",
+  "license": "Apache-2.0",
+  "limits": { "cpus": "0.5", "memory": "256m" },
+  "mount_workspace": true,
+  "mount_read_only": true,
+  "append_workspace_roots": true,
+  "direct_return": true,
+  "mcp_server_cmd": [
+    "node",
+    "/mcp/node_modules/@modelcontextprotocol/server-filesystem/dist/index.js"
+  ]
+}

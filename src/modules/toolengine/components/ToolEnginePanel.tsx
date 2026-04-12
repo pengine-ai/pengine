@@ -1,6 +1,7 @@
 import * as Accordion from "@radix-ui/react-accordion";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { notifyMcpRegistryChanged } from "../../../shared/mcpEvents";
+import { PENGINE_API_BASE } from "../../../shared/api/config";
 import {
   fetchRuntimeStatus,
   fetchToolCatalog,
@@ -20,9 +21,59 @@ export function ToolEnginePanel() {
   const [busyTool, setBusyTool] = useState<string | null>(null);
   const [busyKind, setBusyKind] = useState<"install" | "uninstall" | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [progressLines, setProgressLines] = useState<string[]>([]);
+  const busyToolRef = useRef<string | null>(null);
 
   const cancelledRef = useRef(false);
   const seqRef = useRef(0);
+
+  // Listen for toolengine log events to show pull progress.
+  useEffect(() => {
+    let cancelled = false;
+    let unlistenTauri: (() => void) | null = null;
+    let es: EventSource | null = null;
+
+    const handleLog = (kind: string, message: string) => {
+      if (cancelled || kind !== "toolengine") return;
+      // Only show lines tagged with the currently busy tool, e.g. "[pengine/file-manager] pulling…"
+      const currentBusy = busyToolRef.current;
+      if (currentBusy && message.startsWith(`[${currentBusy}]`)) {
+        const stripped = message.slice(currentBusy.length + 3); // strip "[id] " prefix
+        setProgressLines((prev) => [...prev.slice(-9), stripped]);
+      }
+    };
+
+    // Try Tauri native events first, fall back to SSE.
+    (async () => {
+      try {
+        const { listen } = await import("@tauri-apps/api/event");
+        unlistenTauri = await listen<{ kind: string; message: string }>("pengine-log", (event) =>
+          handleLog(event.payload.kind, event.payload.message),
+        );
+      } catch {
+        // Not in Tauri — use SSE fallback.
+        try {
+          es = new EventSource(`${PENGINE_API_BASE}/v1/logs`);
+          es.onmessage = (event) => {
+            try {
+              const data = JSON.parse(event.data) as { kind: string; message: string };
+              handleLog(data.kind, data.message);
+            } catch {
+              /* ignore parse errors */
+            }
+          };
+        } catch {
+          /* SSE not available */
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      unlistenTauri?.();
+      es?.close();
+    };
+  }, []);
 
   const loadData = useCallback(async () => {
     const id = ++seqRef.current;
@@ -54,9 +105,11 @@ export function ToolEnginePanel() {
 
   const handleInstall = async (toolId: string) => {
     setBusyTool(toolId);
+    busyToolRef.current = toolId;
     setBusyKind("install");
     setNotice(null);
     setActionError(null);
+    setProgressLines([]);
     try {
       const result = await installTool(toolId);
       if (cancelledRef.current) return;
@@ -70,6 +123,7 @@ export function ToolEnginePanel() {
     } finally {
       if (!cancelledRef.current) {
         setBusyTool(null);
+        busyToolRef.current = null;
         setBusyKind(null);
       }
     }
@@ -77,9 +131,11 @@ export function ToolEnginePanel() {
 
   const handleUninstall = async (toolId: string) => {
     setBusyTool(toolId);
+    busyToolRef.current = toolId;
     setBusyKind("uninstall");
     setNotice(null);
     setActionError(null);
+    setProgressLines([]);
     try {
       const result = await uninstallTool(toolId);
       if (cancelledRef.current) return;
@@ -93,6 +149,7 @@ export function ToolEnginePanel() {
     } finally {
       if (!cancelledRef.current) {
         setBusyTool(null);
+        busyToolRef.current = null;
         setBusyKind(null);
       }
     }
@@ -179,6 +236,15 @@ export function ToolEnginePanel() {
               }
             />
           </div>
+          {progressLines.length > 0 && (
+            <div className="mt-2 max-h-24 overflow-y-auto rounded border border-white/5 bg-black/20 px-2 py-1.5">
+              {progressLines.map((line, i) => (
+                <p key={i} className="truncate font-mono text-[10px] leading-relaxed text-white/50">
+                  {line}
+                </p>
+              ))}
+            </div>
+          )}
         </div>
       )}
 

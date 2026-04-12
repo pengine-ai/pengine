@@ -1,4 +1,4 @@
-use super::protocol::{JsonRpcRequest, JsonRpcResponse};
+use super::protocol::{jsonrpc_id_as_u64, JsonRpcRequest, JsonRpcResponse};
 use crate::infrastructure::executable_resolve;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -61,7 +61,7 @@ impl StdioTransport {
                     let Ok(resp) = serde_json::from_str::<JsonRpcResponse>(line) else {
                         continue;
                     };
-                    if let Some(id) = resp.id {
+                    if let Some(id) = resp.id.as_ref().and_then(jsonrpc_id_as_u64) {
                         if let Some(tx) = pending.lock().await.remove(&id) {
                             let _ = tx.send(resp);
                         }

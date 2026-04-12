@@ -25,12 +25,24 @@ impl<'a> JsonRpcRequest<'a> {
 pub struct JsonRpcResponse {
     #[allow(dead_code)]
     pub jsonrpc: Option<String>,
-    #[allow(dead_code)]
-    pub id: Option<u64>,
+    /// MCP permits `string | number` request ids; echo must deserialize or responses are dropped.
+    #[serde(default)]
+    pub id: Option<Value>,
     #[serde(default)]
     pub result: Option<Value>,
     #[serde(default)]
     pub error: Option<JsonRpcError>,
+}
+
+/// Normalize JSON-RPC `id` for matching our monotonic numeric outbound ids.
+pub fn jsonrpc_id_as_u64(id: &Value) -> Option<u64> {
+    match id {
+        Value::Number(n) => n
+            .as_u64()
+            .or_else(|| n.as_i64().and_then(|i| u64::try_from(i).ok())),
+        Value::String(s) => s.parse().ok(),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -38,4 +50,25 @@ pub struct JsonRpcError {
     #[allow(dead_code)]
     pub code: i64,
     pub message: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn jsonrpc_response_deserializes_string_id() {
+        let line = r#"{"jsonrpc":"2.0","id":"3","result":{"tools":[]}}"#;
+        let resp: JsonRpcResponse = serde_json::from_str(line).expect("parse");
+        let id = resp.id.as_ref().expect("id");
+        assert_eq!(jsonrpc_id_as_u64(id), Some(3));
+    }
+
+    #[test]
+    fn jsonrpc_response_deserializes_numeric_id() {
+        let line = r#"{"jsonrpc":"2.0","id":3,"result":{"tools":[]}}"#;
+        let resp: JsonRpcResponse = serde_json::from_str(line).expect("parse");
+        let id = resp.id.as_ref().expect("id");
+        assert_eq!(jsonrpc_id_as_u64(id), Some(3));
+    }
 }
