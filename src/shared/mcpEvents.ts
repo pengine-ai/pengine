@@ -9,18 +9,29 @@ export function notifyMcpRegistryChanged(): void {
 /** Tauri event name — must match `REGISTRY_CHANGED_EVENT` in `mcp/service.rs`. */
 const TAURI_REGISTRY_CHANGED = "pengine-registry-changed";
 
+let tauriBridgeInitialized = false;
+let tauriBridgeListenPromise: Promise<void> | null = null;
+
 /**
  * Bridge backend Tauri event into the browser window event that panels already listen for.
- * Call once at app startup.
+ * Call once at app startup. Safe to call multiple times — only one listener is registered.
  */
 export function initTauriRegistryBridge(): void {
-  import("@tauri-apps/api/event")
+  if (typeof window === "undefined") return;
+  if (tauriBridgeInitialized) return;
+  if (tauriBridgeListenPromise !== null) return;
+
+  tauriBridgeListenPromise = import("@tauri-apps/api/event")
     .then(({ listen }) =>
       listen(TAURI_REGISTRY_CHANGED, () => {
         notifyMcpRegistryChanged();
       }),
     )
+    .then(() => {
+      tauriBridgeInitialized = true;
+    })
     .catch(() => {
+      tauriBridgeListenPromise = null;
       // Not running inside Tauri shell — no bridge needed.
     });
 }

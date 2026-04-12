@@ -143,7 +143,10 @@ async fn handle_tool_manager(
 
 async fn handle_list_tools(state: &AppState) -> Result<String, String> {
     let catalog = tool_engine_service::load_catalog()?;
-    let installed = tool_engine_service::installed_tool_ids(&state.mcp_config_path);
+    let installed = {
+        let _cfg_guard = state.mcp_config_mutex.lock().await;
+        tool_engine_service::installed_tool_ids(&state.mcp_config_path)
+    };
     let installed_set: HashSet<&str> = installed.iter().map(|s| s.as_str()).collect();
 
     let mut lines = Vec::new();

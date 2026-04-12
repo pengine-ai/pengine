@@ -68,8 +68,8 @@ export function ToolEnginePanel() {
         notifyMcpRegistryChanged();
       } else {
         setActionError(result.error ?? "Install failed");
+        await loadData();
       }
-      await loadData();
     } finally {
       if (!cancelledRef.current) {
         setBusyTool(null);
@@ -91,8 +91,8 @@ export function ToolEnginePanel() {
         notifyMcpRegistryChanged();
       } else {
         setActionError(result.error ?? "Uninstall failed");
+        await loadData();
       }
-      await loadData();
     } finally {
       if (!cancelledRef.current) {
         setBusyTool(null);

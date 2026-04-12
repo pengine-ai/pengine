@@ -271,7 +271,14 @@ pub async fn rebuild_registry_into_state(
                     id: native::TOOL_MANAGER_ID.to_string(),
                 },
             );
-            let _ = save_config(&state.mcp_config_path, &cfg);
+            if let Err(e) = save_config(&state.mcp_config_path, &cfg) {
+                log::warn!(
+                    "failed to save mcp.json after auto-inserting native server {:?}: {} (path={})",
+                    native::TOOL_MANAGER_ID,
+                    e,
+                    state.mcp_config_path.display()
+                );
+            }
         }
 
         cfg
