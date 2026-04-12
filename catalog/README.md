@@ -21,7 +21,8 @@ catalog/
 - **`v1/tools.json.sig`** is the cosign detached signature, verifiable against the trust root embedded in the Pengine binary.
 - The Pengine binary embeds a build-time snapshot of `v1/tools.json` as its baseline catalog.
 - **OCI images** are built by [`.github/workflows/tools-publish.yml`](../.github/workflows/tools-publish.yml). On each push to `main`, only tools whose `catalog/entries/` or `tools/<slug>/` files changed are rebuilt (detected via `git diff`). Version tags like `file-manager-v0.2.0` publish that tool only. To add a new tool, create a `tools/<slug>/` directory with a `pengine-tool.json` manifest and a `Dockerfile`.
+- **Manual image publish** (GHCR URLs, Podman multi-arch, PAT scopes, catalog digest): [doc/tool-engine/manual-publish.md](../doc/tool-engine/manual-publish.md).
 
 ## Adding a tool
 
-See `docs/tool-engine/contributing.md` for the full contributor guide.
+Use [doc/tool-engine/manual-publish.md](../doc/tool-engine/manual-publish.md) for building and pushing images outside CI. Extend `catalog/entries/` and `tools/<slug>/` as described above and in the workflow file.
