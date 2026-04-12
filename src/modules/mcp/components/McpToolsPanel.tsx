@@ -8,7 +8,7 @@ import {
   type McpTool,
   type ServerEntry,
 } from "..";
-import { PENGINE_MCP_REGISTRY_CHANGED } from "../../../shared/mcpEvents";
+import { useRegistryChanged } from "../../../shared/useRegistryChanged";
 import { AddServerForm } from "./AddServerForm";
 import { McpServerCard } from "./McpServerCard";
 
@@ -119,13 +119,7 @@ export function McpToolsPanel() {
     };
   }, []);
 
-  useEffect(() => {
-    const onRegistryChanged = () => {
-      void reload();
-    };
-    window.addEventListener(PENGINE_MCP_REGISTRY_CHANGED, onRegistryChanged);
-    return () => window.removeEventListener(PENGINE_MCP_REGISTRY_CHANGED, onRegistryChanged);
-  }, [reload]);
+  useRegistryChanged(reload);
 
   // ── Server CRUD handlers ───────────────────────────────────────────
 

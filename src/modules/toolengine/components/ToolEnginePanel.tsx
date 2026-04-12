@@ -2,6 +2,7 @@ import * as Accordion from "@radix-ui/react-accordion";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { notifyMcpRegistryChanged } from "../../../shared/mcpEvents";
 import { PENGINE_API_BASE } from "../../../shared/api/config";
+import { useRegistryChanged } from "../../../shared/useRegistryChanged";
 import {
   fetchRuntimeStatus,
   fetchToolCatalog,
@@ -103,6 +104,8 @@ export function ToolEnginePanel() {
     };
   }, [loadData]);
 
+  useRegistryChanged(loadData);
+
   const handleInstall = async (toolId: string) => {
     setBusyTool(toolId);
     busyToolRef.current = toolId;
@@ -118,8 +121,8 @@ export function ToolEnginePanel() {
         notifyMcpRegistryChanged();
       } else {
         setActionError(result.error ?? "Install failed");
+        await loadData();
       }
-      await loadData();
     } finally {
       if (!cancelledRef.current) {
         setBusyTool(null);
@@ -144,8 +147,8 @@ export function ToolEnginePanel() {
         notifyMcpRegistryChanged();
       } else {
         setActionError(result.error ?? "Uninstall failed");
+        await loadData();
       }
-      await loadData();
     } finally {
       if (!cancelledRef.current) {
         setBusyTool(null);

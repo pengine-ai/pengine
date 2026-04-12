@@ -15,8 +15,8 @@ fn temp_mcp_path(name: &str) -> PathBuf {
     p
 }
 
-#[test]
-fn dice_returns_valid_result() {
+#[tokio::test]
+async fn dice_returns_valid_result() {
     let provider = native::dice();
     assert_eq!(provider.tools.len(), 1);
     assert_eq!(provider.tools[0].name, "roll_dice");
@@ -24,6 +24,7 @@ fn dice_returns_valid_result() {
 
     let out = provider
         .call("roll_dice", &json!({"sides": 20}))
+        .await
         .expect("dice call");
     assert!(out.starts_with("Rolled a d20: "), "got: {out}");
 
@@ -31,17 +32,19 @@ fn dice_returns_valid_result() {
     assert!((1..=20).contains(&num));
 }
 
-#[test]
-fn dice_clamps_invalid_sides() {
+#[tokio::test]
+async fn dice_clamps_invalid_sides() {
     let provider = native::dice();
 
     let out = provider
         .call("roll_dice", &json!({"sides": 0}))
+        .await
         .expect("sides=0");
     assert!(out.starts_with("Rolled a d2: "), "clamped to 2, got: {out}");
 
     let out = provider
         .call("roll_dice", &json!({"sides": 9999999}))
+        .await
         .expect("sides=9999999");
     assert!(
         out.starts_with("Rolled a d1000000: "),
@@ -49,10 +52,10 @@ fn dice_clamps_invalid_sides() {
     );
 }
 
-#[test]
-fn dice_rejects_unknown_tool() {
+#[tokio::test]
+async fn dice_rejects_unknown_tool() {
     let provider = native::dice();
-    let err = provider.call("unknown", &json!({})).unwrap_err();
+    let err = provider.call("unknown", &json!({})).await.unwrap_err();
     assert!(err.contains("unknown native tool"));
 }
 

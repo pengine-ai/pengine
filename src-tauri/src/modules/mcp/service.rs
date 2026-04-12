@@ -7,8 +7,10 @@ use super::registry::{Provider, ToolRegistry};
 use super::types::{McpConfig, ServerEntry};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tauri::Emitter;
 
 const FILESYSTEM_SERVER_KEY: &str = "filesystem";
+const REGISTRY_CHANGED_EVENT: &str = "pengine-registry-changed";
 
 fn app_data_mcp_path(store_path: &Path) -> PathBuf {
     store_path
@@ -153,12 +155,14 @@ pub fn load_or_init_config(path: &Path) -> Result<McpConfig, String> {
 }
 
 /// Connect one server from config (native or stdio). Shared by tests and incremental rebuilds.
+/// `app_state` is needed for stateful native tools (e.g. `tool_manager`); pass `None` in tests.
 pub async fn connect_one_server(
     server_key: &str,
     entry: &ServerEntry,
+    app_state: Option<&crate::shared::state::AppState>,
 ) -> (Option<Provider>, String) {
     match entry {
-        ServerEntry::Native { id } => match native::native_for(server_key, id) {
+        ServerEntry::Native { id } => match native::native_for(server_key, id, app_state) {
             Ok(p) => {
                 let n = p.tools.len();
                 let cmd_word = if n == 1 { "command" } else { "commands" };
@@ -201,7 +205,7 @@ pub async fn build_mcp_providers(cfg: &McpConfig) -> (Vec<Provider>, Vec<String>
     let mut status = Vec::new();
 
     for (server_key, entry) in &cfg.servers {
-        let (prov, line) = connect_one_server(server_key, entry).await;
+        let (prov, line) = connect_one_server(server_key, entry, None).await;
         status.push(line);
         if let Some(p) = prov {
             providers.push(p);
@@ -259,6 +263,24 @@ pub async fn rebuild_registry_into_state(
             }
         }
 
+        // Ensure tool_manager is always present (auto-add for existing configs).
+        if !cfg.servers.contains_key(native::TOOL_MANAGER_ID) {
+            cfg.servers.insert(
+                native::TOOL_MANAGER_ID.to_string(),
+                ServerEntry::Native {
+                    id: native::TOOL_MANAGER_ID.to_string(),
+                },
+            );
+            if let Err(e) = save_config(&state.mcp_config_path, &cfg) {
+                log::warn!(
+                    "failed to save mcp.json after auto-inserting native server {:?}: {} (path={})",
+                    native::TOOL_MANAGER_ID,
+                    e,
+                    state.mcp_config_path.display()
+                );
+            }
+        }
+
         cfg
     };
 
@@ -269,7 +291,7 @@ pub async fn rebuild_registry_into_state(
     // connects only emit a log line — no need to rebuild the registry.
     let mut providers = Vec::new();
     for (server_key, entry) in &cfg.servers {
-        let (prov, line) = connect_one_server(server_key, entry).await;
+        let (prov, line) = connect_one_server(server_key, entry, Some(state)).await;
         state.emit_log("mcp", &line).await;
         let Some(p) = prov else { continue };
         providers.push(p);
@@ -283,6 +305,11 @@ pub async fn rebuild_registry_into_state(
             &format!("ready ({n} tool{})", if n == 1 { "" } else { "s" }),
         )
         .await;
+
+    if let Some(handle) = state.app_handle.lock().await.as_ref() {
+        let _ = handle.emit(REGISTRY_CHANGED_EVENT, ());
+    }
+
     Ok(())
 }
 

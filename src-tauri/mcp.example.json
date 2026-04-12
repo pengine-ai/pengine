@@ -4,6 +4,10 @@
     "dice": {
       "type": "native",
       "id": "dice"
+    },
+    "tool_manager": {
+      "type": "native",
+      "id": "tool_manager"
     }
   }
 }

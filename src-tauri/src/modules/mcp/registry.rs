@@ -120,7 +120,7 @@ impl Provider {
 
     pub async fn call_tool(&self, name: &str, args: Value) -> Result<String, String> {
         match self {
-            Provider::Native(n) => n.call(name, &args),
+            Provider::Native(n) => n.call(name, &args).await,
             Provider::Mcp(c) => c.call_tool(name, args).await,
         }
     }
