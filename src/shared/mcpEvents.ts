@@ -32,6 +32,5 @@ export function initTauriRegistryBridge(): void {
     })
     .catch(() => {
       tauriBridgeListenPromise = null;
-      // Not running inside Tauri shell — no bridge needed.
     });
 }

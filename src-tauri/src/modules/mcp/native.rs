@@ -84,10 +84,12 @@ pub fn tool_manager_named(server_key: &str, state: AppState) -> NativeProvider {
             server_name: server_key.to_string(),
             name: "manage_tools".to_string(),
             description: Some(
-                "Manage container-based tools: list available tools, install a tool, or uninstall a tool. \
-                 Use action 'list' to see all available tools and their install status. \
-                 Use action 'install' with a tool_id to install a new tool. \
-                 Use action 'uninstall' with a tool_id to remove an installed tool."
+                "Manage container-based tools from the catalog. All catalog tools (e.g. File Manager) \
+                 are user-managed and can be freely installed or uninstalled on request. \
+                 Use action 'list' to see all available catalog tools and their install status. \
+                 Use action 'install' with a tool_id to install a tool. \
+                 Use action 'uninstall' with a tool_id to remove an installed tool. \
+                 Always call this tool when the user asks to install, uninstall, or list tools."
                     .to_string(),
             ),
             input_schema: json!({
@@ -97,11 +99,11 @@ pub fn tool_manager_named(server_key: &str, state: AppState) -> NativeProvider {
                     "action": {
                         "type": "string",
                         "enum": ["list", "install", "uninstall"],
-                        "description": "The operation to perform"
+                        "description": "The operation: 'list' to show available tools, 'install' or 'uninstall' to change a tool"
                     },
                     "tool_id": {
                         "type": "string",
-                        "description": "Tool identifier (required for install/uninstall, e.g. 'pengine/file-manager')"
+                        "description": "Required for install/uninstall. Use the exact id from the 'list' output (e.g. 'pengine/file-manager'). Call with action 'list' first if unsure."
                     }
                 }
             }),
@@ -231,6 +233,7 @@ async fn run_tool_mutation(
         state
             .emit_log("mcp", &format!("registry rebuild after {verb} failed: {e}"))
             .await;
+        return Err(e);
     }
     Ok(())
 }
