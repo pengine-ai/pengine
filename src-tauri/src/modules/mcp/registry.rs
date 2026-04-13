@@ -143,11 +143,6 @@ impl Default for ToolRegistry {
 }
 
 impl ToolRegistry {
-    /// Number of MCP tools connected (one per `servers` entry in `mcp.json`: `dice`, `te_*`, …).
-    pub fn mcp_tool_count(&self) -> usize {
-        self.providers.len()
-    }
-
     pub fn new(providers: Vec<Provider>) -> Self {
         let cached_ollama_tools = build_ollama_tools(&providers);
         let cached_tool_names = providers

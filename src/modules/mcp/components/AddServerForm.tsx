@@ -7,10 +7,12 @@ type Props = {
 };
 
 type Mode = "paste" | "form";
+type ManualKind = "stdio" | "native";
 
 export function AddServerForm({ busy, onAdd }: Props) {
   const [open, setOpen] = useState(false);
   const [mode, setMode] = useState<Mode>("paste");
+  const [manualKind, setManualKind] = useState<ManualKind>("stdio");
   const [error, setError] = useState<string | null>(null);
 
   // Paste mode state
@@ -19,6 +21,7 @@ export function AddServerForm({ busy, onAdd }: Props) {
 
   // Form mode state
   const [formName, setFormName] = useState("");
+  const [nativeId, setNativeId] = useState("");
   const [command, setCommand] = useState("");
   const [argsText, setArgsText] = useState("");
   const [envText, setEnvText] = useState("");
@@ -28,6 +31,8 @@ export function AddServerForm({ busy, onAdd }: Props) {
     setJsonText("");
     setPasteName("");
     setFormName("");
+    setNativeId("");
+    setManualKind("stdio");
     setCommand("");
     setArgsText("");
     setEnvText("");
@@ -96,6 +101,23 @@ export function AddServerForm({ busy, onAdd }: Props) {
       setError("Tool name is required");
       return;
     }
+
+    if (manualKind === "native") {
+      const id = nativeId.trim();
+      if (!id) {
+        setError("Native id is required (e.g. dice or tool_manager)");
+        return;
+      }
+      try {
+        await onAdd(name, { type: "native", id });
+        reset();
+        setOpen(false);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Could not add tool");
+      }
+      return;
+    }
+
     if (!command.trim()) {
       setError("Command is required");
       return;
@@ -136,7 +158,7 @@ export function AddServerForm({ busy, onAdd }: Props) {
         onClick={() => setOpen(true)}
         className="mt-3 w-full rounded-xl border border-dashed border-white/15 px-3 py-3 text-center font-mono text-xs text-(--mid) transition hover:border-white/30 hover:text-white"
       >
-        + Add tool
+        + Add custom tool
       </button>
     );
   }
@@ -144,7 +166,9 @@ export function AddServerForm({ busy, onAdd }: Props) {
   return (
     <div className="mt-3 rounded-2xl border border-white/10 bg-black/20 p-3 sm:p-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className="font-mono text-[11px] uppercase tracking-[0.12em] text-(--mid)">Add tool</p>
+        <p className="font-mono text-[11px] uppercase tracking-[0.12em] text-(--mid)">
+          Add custom tool
+        </p>
         <button
           type="button"
           onClick={() => {
@@ -166,6 +190,7 @@ export function AddServerForm({ busy, onAdd }: Props) {
             onClick={() => {
               setMode(m);
               setError(null);
+              if (m === "form") setManualKind("stdio");
             }}
             className={`flex-1 rounded-md px-3 py-1.5 font-mono text-[11px] uppercase tracking-wider transition ${
               mode === m ? "bg-white/10 text-white" : "text-(--mid) hover:text-white"
@@ -208,77 +233,136 @@ export function AddServerForm({ busy, onAdd }: Props) {
             onClick={handlePasteSubmit}
             className="rounded-lg border border-white/20 bg-white/10 px-3 py-1.5 text-xs font-medium text-white hover:bg-white/15 disabled:opacity-40"
           >
-            Add tool
+            Add custom tool
           </button>
         </div>
       )}
 
       {mode === "form" && (
-        <div className="mt-3 grid gap-3 md:grid-cols-2">
-          <div>
-            <label className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-(--mid)">
-              Tool name
-            </label>
-            <input
-              type="text"
-              value={formName}
-              onChange={(e) => setFormName(e.target.value)}
-              placeholder="my-tool"
-              className={inputClass}
-            />
+        <div className="mt-3 grid gap-3">
+          <div className="flex gap-1 rounded-lg border border-white/10 bg-white/5 p-0.5">
+            {(["stdio", "native"] as const).map((k) => (
+              <button
+                key={k}
+                type="button"
+                onClick={() => {
+                  setManualKind(k);
+                  setError(null);
+                }}
+                className={`flex-1 rounded-md px-3 py-1.5 font-mono text-[11px] uppercase tracking-wider transition ${
+                  manualKind === k ? "bg-white/10 text-white" : "text-(--mid) hover:text-white"
+                }`}
+              >
+                {k === "stdio" ? "Subprocess" : "Native"}
+              </button>
+            ))}
           </div>
-          <div>
-            <label className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-(--mid)">
-              Command
-            </label>
-            <input
-              type="text"
-              value={command}
-              onChange={(e) => setCommand(e.target.value)}
-              placeholder="npx"
-              className={inputClass}
-            />
+
+          <div className="grid gap-3 md:grid-cols-2">
+            <div>
+              <label className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-(--mid)">
+                Tool name
+              </label>
+              <input
+                type="text"
+                value={formName}
+                onChange={(e) => setFormName(e.target.value)}
+                placeholder="my-tool"
+                className={inputClass}
+              />
+            </div>
+
+            {manualKind === "native" ? (
+              <div>
+                <label className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-(--mid)">
+                  Native id
+                </label>
+                <input
+                  type="text"
+                  value={nativeId}
+                  onChange={(e) => setNativeId(e.target.value)}
+                  placeholder="tool_manager"
+                  list="pengine-known-native-ids"
+                  className={inputClass}
+                />
+                <datalist id="pengine-known-native-ids">
+                  <option value="dice" />
+                  <option value="tool_manager" />
+                </datalist>
+              </div>
+            ) : (
+              <div>
+                <label className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-(--mid)">
+                  Command
+                </label>
+                <input
+                  type="text"
+                  value={command}
+                  onChange={(e) => setCommand(e.target.value)}
+                  placeholder="npx"
+                  className={inputClass}
+                />
+              </div>
+            )}
           </div>
-          <div className="md:col-span-2">
-            <label className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-(--mid)">
-              Args (one per line)
-            </label>
-            <textarea
-              value={argsText}
-              onChange={(e) => setArgsText(e.target.value)}
-              rows={3}
-              placeholder={"-y\n@modelcontextprotocol/server-something"}
-              className={`${inputClass} resize-y`}
-            />
-          </div>
-          <div className="md:col-span-2">
-            <label className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-(--mid)">
-              Env (KEY=value per line)
-            </label>
-            <textarea
-              value={envText}
-              onChange={(e) => setEnvText(e.target.value)}
-              rows={2}
-              placeholder={"API_KEY=sk-..."}
-              className={`${inputClass} resize-y`}
-            />
-          </div>
-          <label className="flex items-center gap-2 text-xs text-white/80">
-            <input
-              type="checkbox"
-              checked={directReturn}
-              onChange={(e) => setDirectReturn(e.target.checked)}
-              className="accent-emerald-400"
-            />
-            Direct return (skip model summary)
-          </label>
+
+          {manualKind === "native" && (
+            <p className="text-[11px] leading-snug text-(--mid)">
+              Built-in tools run inside Pengine (no subprocess). Use{" "}
+              <code className="text-white/70">tool_manager</code> for install/uninstall via chat, or{" "}
+              <code className="text-white/70">dice</code> for the sample die roll.
+            </p>
+          )}
+
+          {manualKind === "stdio" && (
+            <div className="grid gap-3 md:grid-cols-2">
+              <div className="md:col-span-2">
+                <label className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-(--mid)">
+                  Args (one per line)
+                </label>
+                <textarea
+                  value={argsText}
+                  onChange={(e) => setArgsText(e.target.value)}
+                  rows={3}
+                  placeholder={"-y\n@modelcontextprotocol/server-something"}
+                  className={`${inputClass} resize-y`}
+                />
+              </div>
+              <div className="md:col-span-2">
+                <label className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-(--mid)">
+                  Env (KEY=value per line)
+                </label>
+                <textarea
+                  value={envText}
+                  onChange={(e) => setEnvText(e.target.value)}
+                  rows={2}
+                  placeholder={"API_KEY=sk-..."}
+                  className={`${inputClass} resize-y`}
+                />
+              </div>
+              <label className="flex items-center gap-2 text-xs text-white/80 md:col-span-2">
+                <input
+                  type="checkbox"
+                  checked={directReturn}
+                  onChange={(e) => setDirectReturn(e.target.checked)}
+                  className="accent-emerald-400"
+                />
+                Direct return (skip model summary)
+              </label>
+            </div>
+          )}
+
           <button
             type="button"
-            disabled={busy || !formName.trim() || !command.trim()}
+            disabled={
+              busy ||
+              !formName.trim() ||
+              (manualKind === "native" ? !nativeId.trim() : !command.trim())
+            }
             onClick={handleFormSubmit}
-            className="rounded-lg border border-white/20 bg-white/10 px-3 py-2 text-xs font-medium text-white hover:bg-white/15 disabled:opacity-40 md:justify-self-start md:px-4"
+            className="rounded-lg border border-white/20 bg-white/10 px-3 py-2 text-xs font-medium text-white hover:bg-white/15 disabled:opacity-40 md:w-fit md:px-4"
           >
-            Add tool
+            Add custom tool
           </button>
         </div>
       )}

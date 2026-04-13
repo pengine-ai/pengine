@@ -12,6 +12,12 @@ use tauri::Emitter;
 const FILESYSTEM_SERVER_KEY: &str = "filesystem";
 const REGISTRY_CHANGED_EVENT: &str = "pengine-registry-changed";
 
+async fn emit_registry_changed_event(state: &crate::shared::state::AppState) {
+    if let Some(handle) = state.app_handle.lock().await.as_ref() {
+        let _ = handle.emit(REGISTRY_CHANGED_EVENT, ());
+    }
+}
+
 fn app_data_mcp_path(store_path: &Path) -> PathBuf {
     store_path
         .parent()
@@ -241,24 +247,27 @@ pub async fn rebuild_registry_into_state(
         };
 
         let paths = filesystem_allowed_paths(&cfg);
+        let mut ws_changed = false;
         match crate::modules::tool_engine::service::sync_workspace_mounted_tools_if_installed(
             &mut cfg, &paths,
         ) {
-            Ok(changed) => {
-                if changed {
-                    if let Err(e) = save_config(&state.mcp_config_path, &cfg) {
-                        state
-                            .emit_log(
-                                "mcp",
-                                &format!("mcp.json not saved after workspace sync: {e}"),
-                            )
-                            .await;
-                    }
-                }
-            }
+            Ok(changed) => ws_changed |= changed,
             Err(e) => {
                 state
                     .emit_log("toolengine", &format!("workspace mount sync skipped: {e}"))
+                    .await;
+            }
+        }
+        ws_changed |=
+            crate::modules::tool_engine::service::sync_custom_tools_if_installed(&mut cfg, &paths);
+
+        if ws_changed {
+            if let Err(e) = save_config(&state.mcp_config_path, &cfg) {
+                state
+                    .emit_log(
+                        "mcp",
+                        &format!("mcp.json not saved after workspace sync: {e}"),
+                    )
                     .await;
             }
         }
@@ -289,6 +298,10 @@ pub async fn rebuild_registry_into_state(
     // Publish the registry after each *successful* connect so native tools (e.g. dice) are usable
     // while slow stdio servers (Podman-backed Tool Engine, npx, …) are still connecting. Failed
     // connects only emit a log line — no need to rebuild the registry.
+    //
+    // Emit `pengine-registry-changed` after each incremental update so the dashboard reloads MCP
+    // commands as soon as a server connects, instead of waiting for every server in `mcp.json`
+    // (install returns before background rebuild finishes; stdio can take minutes).
     let mut providers = Vec::new();
     for (server_key, entry) in &cfg.servers {
         let (prov, line) = connect_one_server(server_key, entry, Some(state)).await;
@@ -296,9 +309,10 @@ pub async fn rebuild_registry_into_state(
         let Some(p) = prov else { continue };
         providers.push(p);
         *state.mcp.write().await = ToolRegistry::new(providers.clone());
+        emit_registry_changed_event(state).await;
     }
 
-    let n = state.mcp.read().await.mcp_tool_count();
+    let n = state.mcp.read().await.tool_names().len();
     state
         .emit_log(
             "mcp",
@@ -306,8 +320,10 @@ pub async fn rebuild_registry_into_state(
         )
         .await;
 
-    if let Some(handle) = state.app_handle.lock().await.as_ref() {
-        let _ = handle.emit(REGISTRY_CHANGED_EVENT, ());
+    // If every server failed to connect, nothing in the loop emitted — still notify once so the
+    // dashboard can stop waiting on the same stale list as before rebuild.
+    if providers.is_empty() {
+        emit_registry_changed_event(state).await;
     }
 
     Ok(())

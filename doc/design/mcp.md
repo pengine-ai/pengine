@@ -47,13 +47,17 @@ The registry lives on `AppState.mcp` (`Arc<RwLock<McpRegistry>>`) so the bot age
 
 File: `$APP_DATA/mcp.json` (next to `connection.json`). Created on first launch with a sane default if missing.
 
+**User-facing guide (stdio packages, Docker images, API):** [custom-mcp-tools.md](../custom-mcp-tools.md).
+
 ```json
 {
   "servers": {
     "filesystem": {
+      "type": "stdio",
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
-      "env": {}
+      "env": {},
+      "direct_return": false
     }
   }
 }

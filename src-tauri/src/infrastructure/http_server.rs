@@ -104,6 +104,12 @@ pub async fn start_server(state: AppState) {
             "/v1/toolengine/uninstall",
             post(handle_toolengine_uninstall),
         )
+        .route("/v1/toolengine/custom", get(handle_toolengine_custom_list))
+        .route("/v1/toolengine/custom", post(handle_toolengine_custom_add))
+        .route(
+            "/v1/toolengine/custom/{key}",
+            delete(handle_toolengine_custom_remove),
+        )
         .layer(cors)
         .with_state(state.clone());
 
@@ -597,7 +603,7 @@ async fn handle_toolengine_runtime(State(_state): State<AppState>) -> Json<serde
 async fn handle_toolengine_catalog(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    let catalog = te_service::load_catalog().map_err(|e| {
+    let catalog = te_service::load_catalog().await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse { error: e }),
@@ -623,7 +629,7 @@ async fn handle_toolengine_catalog(
             serde_json::json!({
                 "id": t.id,
                 "name": t.name,
-                "version": t.version,
+                "version": t.current,
                 "description": t.description,
                 "installed": installed_ids.contains(&t.id),
                 "commands": commands,
@@ -668,11 +674,19 @@ async fn handle_toolengine_install(
             .emit_log("toolengine", &format!("installing {tool_id}…"))
             .await;
 
+        let log_state = state.clone();
+        let log_fn: Box<dyn Fn(&str) + Send + Sync> = Box::new(move |msg: &str| {
+            let s = log_state.clone();
+            let m = msg.to_string();
+            tokio::spawn(async move { s.emit_log("toolengine", &m).await });
+        });
+
         if let Err(e) = te_service::install_tool(
             &tool_id,
             &runtime,
             &state.mcp_config_path,
             &state.mcp_config_mutex,
+            &log_fn,
         )
         .await
         {
@@ -756,6 +770,177 @@ async fn handle_toolengine_uninstall(
                 &format!("ERROR: MCP registry rebuild failed after tool uninstall: {e}"),
             )
             .await;
+        }
+    });
+
+    Ok((StatusCode::OK, Json(serde_json::json!({ "ok": true }))))
+}
+
+// ── Custom tools endpoints ────────────────────────────────────────────
+
+async fn handle_toolengine_custom_list(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let tools = te_service::list_custom_tools(&state.mcp_config_path);
+    let items: Vec<serde_json::Value> = tools
+        .iter()
+        .map(|t| {
+            serde_json::json!({
+                "key": t.key,
+                "name": t.name,
+                "image": t.image,
+                "mount_workspace": t.mount_workspace,
+                "mount_read_only": t.mount_read_only,
+                "append_workspace_roots": t.append_workspace_roots,
+                "direct_return": t.direct_return,
+            })
+        })
+        .collect();
+    Json(serde_json::json!({ "custom_tools": items }))
+}
+
+#[derive(Deserialize)]
+struct CustomToolAddBody {
+    key: String,
+    name: String,
+    image: String,
+    #[serde(default)]
+    mcp_server_cmd: Vec<String>,
+    #[serde(default)]
+    mount_workspace: bool,
+    #[serde(default = "default_true_serde")]
+    mount_read_only: bool,
+    #[serde(default)]
+    append_workspace_roots: bool,
+    #[serde(default)]
+    direct_return: bool,
+}
+
+fn default_true_serde() -> bool {
+    true
+}
+
+async fn handle_toolengine_custom_add(
+    State(state): State<AppState>,
+    Json(body): Json<CustomToolAddBody>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ErrorResponse>)> {
+    let runtime = match te_runtime::detect_runtime().await {
+        Some(rt) => rt,
+        None => {
+            let msg = "no container runtime found (install Podman or Docker)";
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ErrorResponse { error: msg.into() }),
+            ));
+        }
+    };
+
+    let entry = crate::modules::mcp::types::CustomToolEntry {
+        key: body.key.clone(),
+        name: body.name,
+        image: body.image,
+        mcp_server_cmd: body.mcp_server_cmd,
+        mount_workspace: body.mount_workspace,
+        mount_read_only: body.mount_read_only,
+        append_workspace_roots: body.append_workspace_roots,
+        direct_return: body.direct_return,
+    };
+
+    {
+        let _guard = state.tool_engine_mutex.lock().await;
+
+        state
+            .emit_log("toolengine", &format!("adding custom tool '{}'…", body.key))
+            .await;
+
+        let log_state = state.clone();
+        let log_fn: Box<dyn Fn(&str) + Send + Sync> = Box::new(move |msg: &str| {
+            let s = log_state.clone();
+            let m = msg.to_string();
+            tokio::spawn(async move { s.emit_log("toolengine", &m).await });
+        });
+
+        if let Err(e) = te_service::add_custom_tool(
+            entry,
+            &runtime,
+            &state.mcp_config_path,
+            &state.mcp_config_mutex,
+            &log_fn,
+        )
+        .await
+        {
+            state
+                .emit_log("toolengine", &format!("add custom tool failed: {e}"))
+                .await;
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse { error: e }),
+            ));
+        }
+
+        state
+            .emit_log("toolengine", &format!("custom tool '{}' added", body.key))
+            .await;
+    }
+
+    let bg = state.clone();
+    tokio::spawn(async move {
+        if let Err(e) = mcp_service::rebuild_registry_into_state(&bg).await {
+            bg.emit_log("mcp", &format!("ERROR: registry rebuild failed: {e}"))
+                .await;
+        }
+    });
+
+    Ok((StatusCode::OK, Json(serde_json::json!({ "ok": true }))))
+}
+
+async fn handle_toolengine_custom_remove(
+    State(state): State<AppState>,
+    Path(key): Path<String>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ErrorResponse>)> {
+    let runtime = match te_runtime::detect_runtime().await {
+        Some(rt) => rt,
+        None => {
+            let msg = "no container runtime found";
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ErrorResponse { error: msg.into() }),
+            ));
+        }
+    };
+
+    {
+        let _guard = state.tool_engine_mutex.lock().await;
+
+        state
+            .emit_log("toolengine", &format!("removing custom tool '{key}'…"))
+            .await;
+
+        if let Err(e) = te_service::remove_custom_tool(
+            &key,
+            &runtime,
+            &state.mcp_config_path,
+            &state.mcp_config_mutex,
+        )
+        .await
+        {
+            state
+                .emit_log("toolengine", &format!("remove custom tool failed: {e}"))
+                .await;
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse { error: e }),
+            ));
+        }
+
+        state
+            .emit_log("toolengine", &format!("custom tool '{key}' removed"))
+            .await;
+    }
+
+    let bg = state.clone();
+    tokio::spawn(async move {
+        if let Err(e) = mcp_service::rebuild_registry_into_state(&bg).await {
+            bg.emit_log("mcp", &format!("ERROR: registry rebuild failed: {e}"))
+                .await;
         }
     });
 

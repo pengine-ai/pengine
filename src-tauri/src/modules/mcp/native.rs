@@ -144,7 +144,7 @@ async fn handle_tool_manager(
 }
 
 async fn handle_list_tools(state: &AppState) -> Result<String, String> {
-    let catalog = tool_engine_service::load_catalog()?;
+    let catalog = tool_engine_service::load_catalog().await?;
     let installed = {
         let _cfg_guard = state.mcp_config_mutex.lock().await;
         tool_engine_service::installed_tool_ids(&state.mcp_config_path)
@@ -160,7 +160,7 @@ async fn handle_list_tools(state: &AppState) -> Result<String, String> {
         };
         lines.push(format!(
             "- {} (id: {}, v{}): {} [{}]",
-            tool.name, tool.id, tool.version, tool.description, status
+            tool.name, tool.id, tool.current, tool.description, status
         ));
     }
 
@@ -206,11 +206,18 @@ async fn run_tool_mutation(
             .await;
         match action {
             ToolAction::Install => {
+                let log_state = state.clone();
+                let log_fn: tool_engine_service::LogFn = Box::new(move |msg: &str| {
+                    let s = log_state.clone();
+                    let m = msg.to_string();
+                    tokio::spawn(async move { s.emit_log("toolengine", &m).await });
+                });
                 tool_engine_service::install_tool(
                     tool_id,
                     &runtime,
                     &state.mcp_config_path,
                     &state.mcp_config_mutex,
+                    &log_fn,
                 )
                 .await?;
             }

@@ -11,11 +11,36 @@ fn default_true() -> bool {
     true
 }
 
-/// Catalog command line shown in the Tool Engine UI (mirrors the MCP server’s tool list).
+/// Catalog command line shown in the Tool Engine UI (mirrors the MCP server's tool list).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CatalogCommand {
     pub name: String,
     pub description: String,
+}
+
+/// A single released version of a tool, referenced by digest.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VersionEntry {
+    pub version: String,
+    /// Image digest, e.g. "sha256:abc123…".
+    pub digest: String,
+    pub released_at: String,
+    #[serde(default)]
+    pub yanked: bool,
+    #[serde(default)]
+    pub revoked: bool,
+    /// True if this version is a security fix.
+    #[serde(default)]
+    pub security: bool,
+}
+
+/// Optional npm package pinned inside a container image (see `tools/<slug>/Dockerfile`).
+/// CI passes these as `docker build` args from `mcp-tools.json` so the registry stays the
+/// source of truth for upstream MCP server releases (separate from Pengine’s image `current`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpstreamMcpNpm {
+    pub package: String,
+    pub version: String,
 }
 
 /// One entry in the tool catalog (`tools.json`).
@@ -24,17 +49,13 @@ pub struct ToolEntry {
     /// Unique tool identifier, e.g. "pengine/file-manager".
     pub id: String,
     pub name: String,
-    pub version: String,
     pub description: String,
-    /// Full OCI image reference, e.g. "file-manager:0.1.0".
+    /// Full OCI image reference (without tag/digest), e.g. "ghcr.io/pengine-ai/tools/pengine-file-manager".
     pub image: String,
-    /// Expected image digest for verification after pull (empty = skip).
-    #[serde(default)]
-    pub digest: String,
-    /// Relative to the `src-tauri` crate root: if pull fails and the image is missing, run
-    /// `podman|docker build -t <image> -f Dockerfile .` in this directory (first install from dev tree).
-    #[serde(default)]
-    pub build_context: Option<String>,
+    /// The current (latest non-yanked, non-revoked) version string, e.g. "0.1.0".
+    pub current: String,
+    /// All released versions with their digests and status flags.
+    pub versions: Vec<VersionEntry>,
     /// Extra argv after the image (before auto-appended root paths). Often empty when the image ENTRYPOINT runs MCP.
     #[serde(default)]
     pub mcp_server_cmd: Vec<String>,
@@ -60,6 +81,9 @@ pub struct ToolEntry {
     /// When true, tool results go directly to the user without model summarisation.
     #[serde(default)]
     pub direct_return: bool,
+    /// When set, image build (`tools-publish.yml`) installs this npm package at this version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_mcp_npm: Option<UpstreamMcpNpm>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -95,9 +119,17 @@ impl Default for ResourceLimits {
     }
 }
 
-/// Root of the embedded `tools.json` catalog.
+/// Root of the versioned tool catalog (`tools.json`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCatalog {
-    pub version: u32,
+    pub schema_version: u32,
+    #[serde(default)]
+    pub generated_at: String,
+    #[serde(default)]
+    pub catalog_revision: u64,
+    #[serde(default)]
+    pub valid_until: String,
+    #[serde(default)]
+    pub minimum_pengine_version: String,
     pub tools: Vec<ToolEntry>,
 }

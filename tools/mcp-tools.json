@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-04-12T00:00:00Z",
-  "catalog_revision": 1,
-  "valid_until": "2026-05-12T00:00:00Z",
+  "generated_at": "2026-04-13T00:00:00Z",
+  "catalog_revision": 2,
+  "valid_until": "2026-05-13T00:00:00Z",
   "minimum_pengine_version": "0.5.0",
   "tools": [
     {

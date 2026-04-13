@@ -12,6 +12,9 @@ pub struct McpConfig {
     pub workspace_roots: Vec<String>,
     #[serde(default)]
     pub servers: BTreeMap<String, ServerEntry>,
+    /// Developer-added Docker images not in the remote registry. Local only — never pushed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub custom_tools: Vec<CustomToolEntry>,
 }
 
 /// One logical MCP server. Same top-level shape for every backend: `type` picks the loader.
@@ -20,7 +23,7 @@ pub struct McpConfig {
 pub enum ServerEntry {
     /// In-process tool pack; `id` selects a built-in (e.g. `dice`).
     Native { id: String },
-    /// Child process speaking MCP over stdio (`docker run … -i` is just command + args).
+    /// Child process speaking MCP over stdio (`command` + `args`; Tool Engine uses this for `te_*`).
     Stdio {
         command: String,
         #[serde(default)]
@@ -32,6 +35,37 @@ pub enum ServerEntry {
         #[serde(default)]
         direct_return: bool,
     },
+}
+
+/// A developer-added custom Docker image registered as an MCP tool.
+/// Stored locally in `mcp.json` — never pushed to the remote registry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CustomToolEntry {
+    /// Unique local key, e.g. "my-tool". Used as the server key prefix `te_custom_<key>`.
+    pub key: String,
+    /// Human-readable name shown in the dashboard.
+    pub name: String,
+    /// Full Docker/OCI image reference, e.g. "ghcr.io/user/my-mcp:latest" or "localhost/my-mcp:dev".
+    pub image: String,
+    /// Extra argv after the image (before workspace roots). Empty when ENTRYPOINT is the MCP server.
+    #[serde(default)]
+    pub mcp_server_cmd: Vec<String>,
+    /// Bind-mount workspace folders into the container.
+    #[serde(default)]
+    pub mount_workspace: bool,
+    /// Use `:ro` on bind mounts (ignored when mount_workspace is false).
+    #[serde(default = "super_default_true")]
+    pub mount_read_only: bool,
+    /// Append container mount paths as argv (for MCP servers that take roots as args).
+    #[serde(default)]
+    pub append_workspace_roots: bool,
+    /// Return tool results directly to user without model summarisation.
+    #[serde(default)]
+    pub direct_return: bool,
+}
+
+fn super_default_true() -> bool {
+    true
 }
 
 /// Definition of a single tool, regardless of where it runs.

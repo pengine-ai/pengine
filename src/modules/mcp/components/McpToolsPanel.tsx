@@ -123,36 +123,42 @@ export function McpToolsPanel() {
 
   // ── Server CRUD handlers ───────────────────────────────────────────
 
+  const persistServerEntry = async (name: string, entry: ServerEntry) => {
+    const result = await upsertMcpServer(name, entry);
+    if (!result.ok) return result;
+    setEditingName(null);
+    await reload();
+    setNotice(`Tool "${name}" saved — commands reloaded`);
+    return { ok: true as const };
+  };
+
   const handleSaveServer = async (name: string, entry: ServerEntry): Promise<boolean> => {
     setBusy(true);
     setNotice(null);
-    const ok = await upsertMcpServer(name, entry);
-    if (!ok) {
-      setNotice(`Could not save "${name}"`);
-      setBusy(false);
+    const out = await persistServerEntry(name, entry);
+    setBusy(false);
+    if (!out.ok) {
+      setNotice(out.error);
       return false;
     }
-    setEditingName(null);
-    await reload();
-    setBusy(false);
-    setNotice(`Tool "${name}" saved — commands reloaded`);
     return true;
   };
 
   const handleAddServer = async (name: string, entry: ServerEntry) => {
-    const ok = await handleSaveServer(name, entry);
-    if (!ok) {
-      throw new Error(`Could not save "${name}"`);
-    }
+    setBusy(true);
+    setNotice(null);
+    const out = await persistServerEntry(name, entry);
+    setBusy(false);
+    if (!out.ok) throw new Error(out.error);
   };
 
   const handleDeleteServer = async (name: string) => {
     setBusy(true);
     setNotice(null);
-    const ok = await deleteMcpServer(name);
-    if (!ok) {
+    const result = await deleteMcpServer(name);
+    if (!result.ok) {
       setBusy(false);
-      throw new Error(`Could not remove "${name}"`);
+      throw new Error(result.error);
     }
     await reload();
     setBusy(false);

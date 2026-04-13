@@ -27,6 +27,21 @@ export type ServerEntryNative = {
 
 export type ServerEntry = ServerEntryStdio | ServerEntryNative;
 
+export type McpMutationOk = { ok: true };
+export type McpMutationErr = { ok: false; error: string };
+export type UpsertMcpServerResult = McpMutationOk | McpMutationErr;
+export type DeleteMcpServerResult = McpMutationOk | McpMutationErr;
+
+async function readMcpErrorResponse(resp: Response): Promise<string> {
+  try {
+    const body = (await resp.json()) as { error?: unknown };
+    if (typeof body.error === "string" && body.error.length > 0) return body.error;
+  } catch {
+    /* non-JSON body */
+  }
+  return `Request failed (${resp.status})`;
+}
+
 function makeTimeoutSignal(timeoutMs: number): { signal: AbortSignal; cleanup: () => void } {
   if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
     return { signal: AbortSignal.timeout(timeoutMs), cleanup: () => {} };
@@ -113,7 +128,7 @@ export async function upsertMcpServer(
   name: string,
   entry: ServerEntry,
   timeoutMs = 20000,
-): Promise<boolean> {
+): Promise<UpsertMcpServerResult> {
   const { signal, cleanup } = makeTimeoutSignal(timeoutMs);
   try {
     const resp = await fetch(`${PENGINE_API_BASE}/v1/mcp/servers/${encodeURIComponent(name)}`, {
@@ -122,25 +137,30 @@ export async function upsertMcpServer(
       body: JSON.stringify(entry),
       signal,
     });
-    return resp.ok;
+    if (resp.ok) return { ok: true };
+    return { ok: false, error: await readMcpErrorResponse(resp) };
   } catch {
-    return false;
+    return { ok: false, error: "Could not reach Pengine API" };
   } finally {
     cleanup();
   }
 }
 
 /** DELETE `/v1/mcp/servers/{name}` — remove a server and rebuild tools. */
-export async function deleteMcpServer(name: string, timeoutMs = 20000): Promise<boolean> {
+export async function deleteMcpServer(
+  name: string,
+  timeoutMs = 20000,
+): Promise<DeleteMcpServerResult> {
   const { signal, cleanup } = makeTimeoutSignal(timeoutMs);
   try {
     const resp = await fetch(`${PENGINE_API_BASE}/v1/mcp/servers/${encodeURIComponent(name)}`, {
       method: "DELETE",
       signal,
     });
-    return resp.ok;
+    if (resp.ok) return { ok: true };
+    return { ok: false, error: await readMcpErrorResponse(resp) };
   } catch {
-    return false;
+    return { ok: false, error: "Could not reach Pengine API" };
   } finally {
     cleanup();
   }

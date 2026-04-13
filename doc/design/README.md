@@ -17,7 +17,10 @@ pengine/
 ├── src/                  # Frontend — React + TypeScript
 ├── src-tauri/            # Backend — Rust (Tauri + Axum + teloxide)
 ├── e2e/                  # Playwright end-to-end tests
-├── doc/design/           # Architecture docs (this file)
+├── doc/
+│   ├── custom-mcp-tools.md  # Adding MCP tools (npx, Docker, API)
+│   ├── design/              # Architecture docs (this file)
+│   └── tool-engine/         # Catalog / publish notes
 ├── eslint.config.ts
 ├── .prettierrc
 └── package.json

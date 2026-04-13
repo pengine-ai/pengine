@@ -1,0 +1,105 @@
+name: Publish tool images
+
+# Build and push tool container images to GHCR.
+#
+# tools/mcp-tools.json is the registry — one entry per tool.
+# tools/<slug>/Dockerfile is the build context.
+#
+# Triggers:
+#   - Push to main touching tools/** → build only changed tools
+#   - Manual dispatch → pick one slug or "all"
+#
+# Shell logic lives in .github/scripts/tools-publish/*.sh
+
+on:
+  workflow_dispatch:
+    inputs:
+      tool:
+        description: 'Tool slug (e.g. "file-manager") or "all"'
+        required: false
+        default: "all"
+  push:
+    branches: [main]
+    paths: ["tools/**"]
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.detect.outputs.matrix }}
+      skip:   ${{ steps.detect.outputs.skip }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Find tools to publish
+        id: detect
+        env:
+          INPUT_TOOL: ${{ github.event.inputs.tool }}
+        run: bash .github/scripts/tools-publish/detect-matrix.sh
+
+  publish:
+    needs: detect
+    if: needs.detect.outputs.skip == 'false'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        slug: ${{ fromJson(needs.detect.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: sigstore/cosign-installer@v3
+
+      - name: Read manifest
+        id: cfg
+        env:
+          TOOL_SLUG: ${{ matrix.slug }}
+        run: bash .github/scripts/tools-publish/read-tool-manifest.sh
+
+      - name: Compute image tags
+        id: img_tags
+        env:
+          IMAGE: ${{ steps.cfg.outputs.image }}
+          VERSION: ${{ steps.cfg.outputs.version }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: bash .github/scripts/tools-publish/compute-image-tags.sh
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: tools/${{ matrix.slug }}/
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            UPSTREAM_MCP_NPM_PACKAGE=${{ steps.cfg.outputs.npm_pkg }}
+            UPSTREAM_MCP_NPM_VERSION=${{ steps.cfg.outputs.npm_ver }}
+          tags: ${{ steps.img_tags.outputs.tags }}
+
+      - name: Sign image
+        run: cosign sign --yes "${{ steps.cfg.outputs.image }}@${{ steps.build.outputs.digest }}"
+
+      - name: Smoke test (MCP init handshake)
+        env:
+          IMAGE_WITH_DIGEST: ${{ steps.cfg.outputs.image }}@${{ steps.build.outputs.digest }}
+        run: bash .github/scripts/tools-publish/smoke-test-mcp.sh
+
+      - name: Summary
+        env:
+          TOOL_SLUG: ${{ matrix.slug }}
+          TOOL_VERSION: ${{ steps.cfg.outputs.version }}
+          IMAGE_REF: ${{ steps.cfg.outputs.image }}@${{ steps.build.outputs.digest }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: bash .github/scripts/tools-publish/write-publish-summary.sh
