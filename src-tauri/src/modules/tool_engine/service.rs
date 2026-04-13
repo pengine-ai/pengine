@@ -364,24 +364,39 @@ pub async fn uninstall_tool(
     mcp_config_path: &Path,
     mcp_cfg_lock: &tokio::sync::Mutex<()>,
 ) -> Result<(), String> {
-    // Remove from mcp.json.
+    // Read the installed image ref from mcp.json before removing the entry, so we
+    // remove the image that was actually pulled — not whatever the catalog currently
+    // resolves to (which may have been updated since install).
     let key = server_key(tool_id);
+    let mut installed_image_ref: Option<String> = None;
     if mcp_config_path.exists() {
         let _cfg_guard = mcp_cfg_lock.lock().await;
         let mut cfg = mcp_service::read_config(mcp_config_path)?;
+        if let Some(ServerEntry::Stdio { args, .. }) = cfg.servers.get(&key) {
+            // In the podman run argv the image ref is the first non-flag token
+            // after "run" (flags start with `-`; "run" itself is skipped).
+            installed_image_ref = args
+                .iter()
+                .skip_while(|a| *a == "run")
+                .find(|a| !a.starts_with('-'))
+                .cloned();
+        }
         cfg.servers.remove(&key);
         mcp_service::save_config(mcp_config_path, &cfg)?;
     }
 
-    // Remove the container image.
-    let catalog = load_catalog()?;
-    if let Some(entry) = catalog.tools.iter().find(|t| t.id == tool_id) {
-        if let Ok(image_ref) = image_reference(entry) {
-            let _ = tokio::process::Command::new(&runtime.binary)
-                .args(["rmi", &image_ref])
-                .output()
-                .await;
-        }
+    // Remove the container image — prefer the ref from the installed entry.
+    let image_ref = installed_image_ref.or_else(|| {
+        load_catalog()
+            .ok()
+            .and_then(|cat| cat.tools.iter().find(|t| t.id == tool_id).cloned())
+            .and_then(|entry| image_reference(&entry).ok())
+    });
+    if let Some(ref img) = image_ref {
+        let _ = tokio::process::Command::new(&runtime.binary)
+            .args(["rmi", img])
+            .output()
+            .await;
     }
 
     Ok(())

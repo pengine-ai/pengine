@@ -1,23 +1,25 @@
 name: Publish tool images
 
-# Builds and pushes only tools whose files changed since the last commit.
-# Discovery: tools/<slug>/pengine-tool.json (stable marker; content can stay `{}`).
-# Metadata for image tags + npm: catalog/entries/pengine-<slug>.json. Build: Dockerfile.
+# Build and push tool container images to GHCR.
+#
+# Each tool lives in tools/<slug>/ with:
+#   - pengine-tool.json   (manifest: id, version, upstream npm, etc.)
+#   - Dockerfile
+#
+# Triggers:
+#   - Push to main touching tools/** → build only changed tools
+#   - Manual dispatch → pick one slug or "all"
 
 on:
   workflow_dispatch:
     inputs:
-      tools:
-        description: 'Comma-separated tool slugs (directory names under tools/), or "all"'
+      tool:
+        description: 'Tool slug (e.g. "file-manager") or "all"'
         required: false
         default: "all"
   push:
     branches: [main]
-    paths:
-      - "tools/**"
-      - "catalog/entries/**"
-    tags:
-      - "*-v*"
+    paths: ["tools/**"]
 
 permissions:
   contents: read
@@ -29,135 +31,92 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.detect.outputs.matrix }}
-      skip: ${{ steps.detect.outputs.skip }}
+      skip:   ${{ steps.detect.outputs.skip }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 2
 
-      - name: Detect changed tools
+      - name: Find tools to publish
         id: detect
         run: |
           set -euo pipefail
 
-          # List slugs that contain pengine-tool.json (marker); keep only if Dockerfile + catalog exist.
-          all_slugs=""
-          while IFS= read -r s; do
-            [[ -z "$s" ]] && continue
-            [[ -f "tools/${s}/Dockerfile" ]] || continue
-            [[ -f "catalog/entries/pengine-${s}.json" ]] || continue
-            all_slugs="${all_slugs}${s}"$'\n'
-          done < <(find tools -maxdepth 2 -name pengine-tool.json -printf '%h\n' | sed 's|^tools/||' | sort -u)
-          all_slugs=$(echo -n "$all_slugs" | sort -u)
+          # All valid tool slugs: dirs under tools/ that have both manifest + Dockerfile.
+          all=""
+          for manifest in tools/*/pengine-tool.json; do
+            dir=$(dirname "$manifest")
+            slug=$(basename "$dir")
+            [ -f "$dir/Dockerfile" ] && all="$all $slug"
+          done
 
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            input="${{ github.event.inputs.tools }}"
+            input="${{ github.event.inputs.tool }}"
             if [[ "$input" == "all" || -z "$input" ]]; then
-              slugs="$all_slugs"
+              slugs="$all"
             else
-              slugs=$(echo "$input" | tr ',' '\n' | xargs)
-            fi
-          elif [[ "${{ github.ref_type }}" == "tag" ]]; then
-            # Tag like "file-manager-v0.2.0" → slug "file-manager"
-            tag="${{ github.ref_name }}"
-            slug="${tag%-v*}"
-            if echo "$all_slugs" | grep -qx "$slug"; then
-              slugs="$slug"
-            else
-              echo "Tag '$tag' does not match any tool (marker + Dockerfile + catalog)"
-              echo 'skip=true' >> "$GITHUB_OUTPUT"
-              echo 'matrix=[]' >> "$GITHUB_OUTPUT"
-              exit 0
+              slugs="$input"
             fi
           else
-            # Push to main: tools/<slug>/ or catalog/entries/pengine-<slug>.json changed
-            changed=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || git ls-files)
-            slugs_tools=$(echo "$changed" | grep '^tools/' | cut -d/ -f2 | sort -u)
-            # catalog/entries/pengine-file-manager.json → slug file-manager
-            slugs_cat=$(echo "$changed" | grep '^catalog/entries/pengine-.*\.json$' | while read -r path; do
-              b=$(basename "$path" .json)
-              echo "${b#pengine-}"
-            done | sort -u)
-            slugs=$(printf '%s\n%s\n' "$slugs_tools" "$slugs_cat" | sort -u | grep -v '^$' || true)
+            # Push to main: only tools whose directory changed.
+            changed=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || true)
+            slugs=""
+            for s in $all; do
+              if echo "$changed" | grep -q "^tools/${s}/"; then
+                slugs="$slugs $s"
+              fi
+            done
           fi
 
-          valid=""
+          # Build JSON matrix.
+          json="["
           for s in $slugs; do
-            if [[ -f "tools/${s}/pengine-tool.json" ]] && [[ -f "tools/${s}/Dockerfile" ]] && [[ -f "catalog/entries/pengine-${s}.json" ]]; then
-              valid="$valid\"$s\","
-            fi
+            [ -f "tools/${s}/pengine-tool.json" ] && [ -f "tools/${s}/Dockerfile" ] && json="$json\"$s\","
           done
-          valid="[${valid%,}]"
+          json="${json%,}]"
 
-          if [[ "$valid" == "[]" ]]; then
-            echo 'skip=true' >> "$GITHUB_OUTPUT"
+          if [[ "$json" == "[]" ]]; then
+            echo "skip=true"  >> "$GITHUB_OUTPUT"
           else
-            echo 'skip=false' >> "$GITHUB_OUTPUT"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
-          echo "matrix=$valid" >> "$GITHUB_OUTPUT"
-          echo "Publishing: $valid"
+          echo "matrix=$json" >> "$GITHUB_OUTPUT"
+          echo "Tools: $json"
 
   publish:
     needs: detect
     if: needs.detect.outputs.skip == 'false'
     runs-on: ubuntu-latest
-    concurrency:
-      group: tools-publish-${{ matrix.slug }}
-      cancel-in-progress: false
     strategy:
       fail-fast: false
       matrix:
         slug: ${{ fromJson(needs.detect.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
-
       - uses: docker/setup-buildx-action@v3
-
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
       - uses: sigstore/cosign-installer@v3
 
-      - name: Read tool coordinates from catalog
+      - name: Read manifest
         id: cfg
         run: |
           set -euo pipefail
-          CATALOG="catalog/entries/pengine-${{ matrix.slug }}.json"
-          [[ -f "$CATALOG" ]] || { echo "missing catalog: $CATALOG"; exit 1; }
-          echo "image=ghcr.io/pengine-ai/tools/pengine-$(jq -r '.id | split("/")[1]' "$CATALOG")" >> "$GITHUB_OUTPUT"
-          echo "version=$(jq -r '.current' "$CATALOG")" >> "$GITHUB_OUTPUT"
+          MANIFEST="tools/${{ matrix.slug }}/pengine-tool.json"
+          SUFFIX=$(jq -r '.id | split("/")[1]' "$MANIFEST")
+          echo "image=ghcr.io/pengine-ai/tools/pengine-${SUFFIX}" >> "$GITHUB_OUTPUT"
+          echo "version=$(jq -r '.version' "$MANIFEST")"          >> "$GITHUB_OUTPUT"
 
-      - name: Resolve version from tag (override)
-        id: version
-        run: |
-          if [[ "${{ github.ref_type }}" == "tag" ]]; then
-            echo "version=${{ github.ref_name }}" | sed 's/.*-v/version=/' >> "$GITHUB_OUTPUT"
-          else
-            echo "version=${{ steps.cfg.outputs.version }}" >> "$GITHUB_OUTPUT"
-          fi
+          # Optional: upstream npm package for docker build-args.
+          PKG=$(jq -r '(.upstream_mcp_npm // {}).package // ""' "$MANIFEST")
+          VER=$(jq -r '(.upstream_mcp_npm // {}).version // ""' "$MANIFEST")
+          echo "npm_pkg=$PKG" >> "$GITHUB_OUTPUT"
+          echo "npm_ver=$VER" >> "$GITHUB_OUTPUT"
 
-      - name: Upstream MCP npm from catalog (build-args)
-        id: upstream
-        run: |
-          set -euo pipefail
-          CATALOG="catalog/entries/pengine-${{ matrix.slug }}.json"
-          PKG_DEFAULT='@modelcontextprotocol/server-filesystem'
-          VER_DEFAULT='2026.1.14'
-          PKG="$PKG_DEFAULT"
-          VER="$VER_DEFAULT"
-          if [[ -f "$CATALOG" ]]; then
-            PKG=$(jq -r "(.upstream_mcp_npm // {}) | .package // \"\"" "$CATALOG")
-            VER=$(jq -r "(.upstream_mcp_npm // {}) | .version // \"\"" "$CATALOG")
-            [[ -n "$PKG" ]] || PKG="$PKG_DEFAULT"
-            [[ -n "$VER" ]] || VER="$VER_DEFAULT"
-          fi
-          echo "package=$PKG" >> "$GITHUB_OUTPUT"
-          echo "version=$VER" >> "$GITHUB_OUTPUT"
-
-      - name: Build and push multi-arch image
+      - name: Build and push
         id: build
         uses: docker/build-push-action@v6
         with:
@@ -165,53 +124,36 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           build-args: |
-            UPSTREAM_MCP_NPM_PACKAGE=${{ steps.upstream.outputs.package }}
-            UPSTREAM_MCP_NPM_VERSION=${{ steps.upstream.outputs.version }}
+            UPSTREAM_MCP_NPM_PACKAGE=${{ steps.cfg.outputs.npm_pkg }}
+            UPSTREAM_MCP_NPM_VERSION=${{ steps.cfg.outputs.npm_ver }}
           tags: |
-            ${{ steps.cfg.outputs.image }}:${{ steps.version.outputs.version }}
+            ${{ steps.cfg.outputs.image }}:${{ steps.cfg.outputs.version }}
             ${{ steps.cfg.outputs.image }}:latest
 
-      - name: Sign image with cosign (keyless OIDC)
+      - name: Sign image
         run: cosign sign --yes "${{ steps.cfg.outputs.image }}@${{ steps.build.outputs.digest }}"
 
-      - name: MCP smoke test
+      - name: Smoke test (MCP init handshake)
         run: |
           set -euo pipefail
-          DIGEST="${{ steps.build.outputs.digest }}"
-          IMAGE="${{ steps.cfg.outputs.image }}@${DIGEST}"
+          IMAGE="${{ steps.cfg.outputs.image }}@${{ steps.build.outputs.digest }}"
           docker pull "$IMAGE"
-          echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke","version":"0.0.1"}}}' \
+          RESP=$(echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke","version":"0.0.1"}}}' \
             | timeout 15 docker run --rm -i --network=none "$IMAGE" /tmp \
-            | head -1 \
-            | python3 -c "import sys,json; d=json.load(sys.stdin); assert d.get('result',{}).get('serverInfo'), f'bad init: {d}'"
+            | head -1)
+          echo "$RESP" | jq -e '.result.serverInfo' > /dev/null \
+            || { echo "::error::MCP init failed: $RESP"; exit 1; }
 
-      - name: Export image tarball (cold archive)
+      - name: Summary
         run: |
-          DIGEST="${{ steps.build.outputs.digest }}"
-          mkdir -p /tmp/archive
-          docker save "${{ steps.cfg.outputs.image }}@${DIGEST}" \
-            | gzip > "/tmp/archive/${{ matrix.slug }}-${{ steps.version.outputs.version }}.tar.gz"
-
-      - name: Upload archive artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.slug }}-${{ steps.version.outputs.version }}-archive
-          path: /tmp/archive/*.tar.gz
-          retention-days: 90
-
-      - name: Job summary
-        run: |
-          DIGEST="${{ steps.build.outputs.digest }}"
           cat >> "$GITHUB_STEP_SUMMARY" <<EOF
-          ## Published ${{ matrix.slug }}
-
-          - **Version:** ${{ steps.version.outputs.version }}
-          - **Image:** \`${{ steps.cfg.outputs.image }}@${DIGEST}\`
+          ### ${{ matrix.slug }} v${{ steps.cfg.outputs.version }}
+          - **Image:** \`${{ steps.cfg.outputs.image }}@${{ steps.build.outputs.digest }}\`
           - **Platforms:** linux/amd64, linux/arm64
-          - **Signed:** cosign keyless (GitHub Actions OIDC)
+          - **Signed:** cosign keyless
 
-          Update \`catalog/entries/pengine-${{ matrix.slug }}.json\` with digest:
+          Digest for catalog:
           \`\`\`
-          ${DIGEST}
+          ${{ steps.build.outputs.digest }}
           \`\`\`
           EOF

@@ -1,5 +1,5 @@
-# Upstream MCP npm package + version: defaults match catalog; CI passes --build-arg from
-# catalog/entries/pengine-file-manager.json (`upstream_mcp_npm`) so that file is the source of truth.
+# Upstream MCP npm package + version: defaults match the tool manifest; CI passes --build-arg from
+# tools/file-manager/pengine-tool.json (`upstream_mcp_npm`) so that file is the source of truth.
 FROM node:22-alpine
 ARG UPSTREAM_MCP_NPM_PACKAGE=@modelcontextprotocol/server-filesystem
 ARG UPSTREAM_MCP_NPM_VERSION=2026.1.14
