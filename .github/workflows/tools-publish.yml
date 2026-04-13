@@ -5,8 +5,8 @@ name: Publish tool images
 # tools/mcp-tools.json is the registry — one entry per tool.
 # tools/<slug>/Dockerfile is the build context.
 #
-# Multi-arch: linux/arm64 is built on ubuntu-24.04-arm (native). Building arm64
-# on ubuntu-latest uses QEMU; Node/npm often crashes with "Illegal instruction".
+# Two build-push steps (amd64, arm64) on ubuntu-24.04-arm, then one merge step
+# so GHCR and the job summary show a single multi-arch digest (not two products).
 #
 # Triggers:
 #   - Push to main touching tools/** → build only changed tools
@@ -47,63 +47,17 @@ jobs:
           INPUT_TOOL: ${{ github.event.inputs.tool }}
         run: bash .github/scripts/tools-publish/detect-matrix.sh
 
-  publish-arch:
+  publish:
     needs: detect
     if: needs.detect.outputs.skip == 'false'
-    strategy:
-      fail-fast: false
-      matrix:
-        slug: ${{ fromJson(needs.detect.outputs.matrix) }}
-        arch: [amd64, arm64]
-    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.repository_owner }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Read manifest
-        id: cfg
-        env:
-          TOOL_SLUG: ${{ matrix.slug }}
-        run: bash .github/scripts/tools-publish/read-tool-manifest.sh
-
-      - name: Build and push (single arch)
-        id: build
-        uses: docker/build-push-action@v6
-        with:
-          context: tools/${{ matrix.slug }}/
-          platforms: linux/${{ matrix.arch }}
-          push: true
-          provenance: false
-          sbom: false
-          build-args: |
-            UPSTREAM_MCP_NPM_PACKAGE=${{ steps.cfg.outputs.npm_pkg }}
-            UPSTREAM_MCP_NPM_VERSION=${{ steps.cfg.outputs.npm_ver }}
-          tags: ${{ steps.cfg.outputs.image }}:${{ steps.cfg.outputs.version }}-build-${{ github.run_id }}-${{ matrix.slug }}-${{ matrix.arch }}
-
-      - name: Upload image ref for manifest merge
-        run: |
-          echo "${{ steps.cfg.outputs.image }}@${{ steps.build.outputs.digest }}" > image-ref.txt
-      - uses: actions/upload-artifact@v4
-        with:
-          name: tool-${{ matrix.slug }}-${{ matrix.arch }}
-          path: image-ref.txt
-          retention-days: 2
-
-  publish-merge:
-    needs: [detect, publish-arch]
-    if: needs.detect.outputs.skip == 'false'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     strategy:
       fail-fast: false
       matrix:
         slug: ${{ fromJson(needs.detect.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
@@ -118,26 +72,43 @@ jobs:
           TOOL_SLUG: ${{ matrix.slug }}
         run: bash .github/scripts/tools-publish/read-tool-manifest.sh
 
-      - name: Download amd64 image ref
-        uses: actions/download-artifact@v4
+      - name: Build and push (linux/arm64)
+        id: build_arm64
+        uses: docker/build-push-action@v6
         with:
-          name: tool-${{ matrix.slug }}-amd64
-          path: arch-refs/amd64
-      - name: Download arm64 image ref
-        uses: actions/download-artifact@v4
-        with:
-          name: tool-${{ matrix.slug }}-arm64
-          path: arch-refs/arm64
+          context: tools/${{ matrix.slug }}/
+          platforms: linux/arm64
+          push: true
+          provenance: false
+          sbom: false
+          build-args: |
+            UPSTREAM_MCP_NPM_PACKAGE=${{ steps.cfg.outputs.npm_pkg }}
+            UPSTREAM_MCP_NPM_VERSION=${{ steps.cfg.outputs.npm_ver }}
+          tags: ${{ steps.cfg.outputs.image }}:${{ steps.cfg.outputs.version }}-ci-arm64-${{ github.run_id }}
 
-      - name: Merge manifest list
+      - name: Build and push (linux/amd64)
+        id: build_amd64
+        uses: docker/build-push-action@v6
+        with:
+          context: tools/${{ matrix.slug }}/
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          sbom: false
+          build-args: |
+            UPSTREAM_MCP_NPM_PACKAGE=${{ steps.cfg.outputs.npm_pkg }}
+            UPSTREAM_MCP_NPM_VERSION=${{ steps.cfg.outputs.npm_ver }}
+          tags: ${{ steps.cfg.outputs.image }}:${{ steps.cfg.outputs.version }}-ci-amd64-${{ github.run_id }}
+
+      - name: Merge multi-arch manifest
         id: merge
         env:
           IMAGE: ${{ steps.cfg.outputs.image }}
           VERSION: ${{ steps.cfg.outputs.version }}
           REF_TYPE: ${{ github.ref_type }}
           GITHUB_REF: ${{ github.ref }}
-          AMD_FILE: arch-refs/amd64/image-ref.txt
-          ARM_FILE: arch-refs/arm64/image-ref.txt
+          AMD_REF: ${{ steps.cfg.outputs.image }}@${{ steps.build_amd64.outputs.digest }}
+          ARM_REF: ${{ steps.cfg.outputs.image }}@${{ steps.build_arm64.outputs.digest }}
         run: bash .github/scripts/tools-publish/merge-multiarch-manifest.sh
 
       - name: Sign image
@@ -154,4 +125,5 @@ jobs:
           TOOL_VERSION: ${{ steps.cfg.outputs.version }}
           IMAGE_REF: ${{ steps.cfg.outputs.image }}@${{ steps.merge.outputs.digest }}
           IMAGE_DIGEST: ${{ steps.merge.outputs.digest }}
+          RUNNER_ARCH: ${{ runner.arch }}
         run: bash .github/scripts/tools-publish/write-publish-summary.sh

@@ -9,7 +9,7 @@
       "id": "pengine/file-manager",
       "name": "File Manager",
       "description": "Filesystem MCP in a container. Add folders in MCP Tools; each mounts at /app/<folder-name>. Install works before any folder is set.",
-      "image": "ghcr.io/pengine-ai/tools/pengine-file-manager",
+      "image": "ghcr.io/pengine-ai/pengine-file-manager",
       "current": "0.1.0",
       "versions": [
         {

@@ -211,8 +211,8 @@ fn resolve_current_digest(entry: &ToolEntry) -> Result<Option<String>, String> {
 
 /// The OCI image reference for a tool entry.
 ///
-/// - **Production** (real digest): `ghcr.io/pengine-ai/tools/pengine-file-manager@sha256:abc123…`
-/// - **Dev** (placeholder digest): `ghcr.io/pengine-ai/tools/pengine-file-manager:0.1.0` (tagged)
+/// - **Production** (real digest): `ghcr.io/pengine-ai/pengine-file-manager@sha256:abc123…`
+/// - **Dev** (placeholder digest): `ghcr.io/pengine-ai/pengine-file-manager:0.1.0` (tagged)
 fn image_reference(entry: &ToolEntry) -> Result<String, String> {
     match resolve_current_digest(entry)? {
         Some(digest) => Ok(format!("{}@{}", entry.image, digest)),
@@ -654,7 +654,7 @@ mod tests {
             .expect("file-manager must be in embedded catalog");
         assert_eq!(fm.current, "0.1.0");
         assert!(!fm.versions.is_empty());
-        assert!(fm.image.contains("ghcr.io/pengine-ai/tools/"));
+        assert!(fm.image.contains("ghcr.io/pengine-ai/pengine-file-manager"));
         let u = fm
             .upstream_mcp_npm
             .as_ref()

@@ -50,7 +50,7 @@ pub struct ToolEntry {
     pub id: String,
     pub name: String,
     pub description: String,
-    /// Full OCI image reference (without tag/digest), e.g. "ghcr.io/pengine-ai/tools/pengine-file-manager".
+    /// Full OCI image reference (without tag/digest), e.g. "ghcr.io/pengine-ai/pengine-file-manager".
     pub image: String,
     /// The current (latest non-yanked, non-revoked) version string, e.g. "0.1.0".
     pub current: String,

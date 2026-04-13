@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Merge two single-arch image refs (image@sha256:...) into one multi-arch tag on GHCR.
-# Env: IMAGE, VERSION, REF_TYPE, GITHUB_REF, AMD_FILE, ARM_FILE (paths to one-line image@digest each).
+# Merge two single-arch refs (image@sha256:...) into one multi-arch tag on GHCR.
+# Env: IMAGE, VERSION, REF_TYPE, GITHUB_REF, AMD_REF, ARM_REF.
 # Appends digest=sha256:... to GITHUB_OUTPUT (manifest list digest for cosign).
 set -euo pipefail
 
-AMD=$(tr -d '[:space:]' <"$AMD_FILE")
-ARM=$(tr -d '[:space:]' <"$ARM_FILE")
+AMD="${AMD_REF:?}"
+ARM="${ARM_REF:?}"
 
 ARGS=(-t "${IMAGE}:${VERSION}")
 LATEST=false
@@ -24,7 +24,6 @@ fi
 
 docker buildx imagetools create "${ARGS[@]}" "$AMD" "$ARM"
 
-# Index digest for signing (text/json shape varies across buildx versions).
 json=$(docker buildx imagetools inspect "${IMAGE}:${VERSION}" --format '{{json .}}' 2>/dev/null || true)
 DIGEST=$(echo "$json" | jq -r '.digest // .manifest.digest // .Manifest.Descriptor.Digest // empty' 2>/dev/null || true)
 if [[ -z "$DIGEST" || "$DIGEST" == "null" ]]; then
