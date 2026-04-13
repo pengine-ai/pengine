@@ -2,9 +2,8 @@ name: Publish tool images
 
 # Build and push tool container images to GHCR.
 #
-# Each tool lives in tools/<slug>/ with:
-#   - pengine-tool.json   (manifest: id, version, upstream npm, etc.)
-#   - Dockerfile
+# tools/mcp-tools.json is the registry — one entry per tool.
+# tools/<slug>/Dockerfile is the build context.
 #
 # Triggers:
 #   - Push to main touching tools/** → build only changed tools
@@ -41,13 +40,12 @@ jobs:
         id: detect
         run: |
           set -euo pipefail
+          REGISTRY="tools/mcp-tools.json"
 
-          # All valid tool slugs: dirs under tools/ that have both manifest + Dockerfile.
+          # All valid slugs: tools in mcp-tools.json that have a Dockerfile.
           all=""
-          for manifest in tools/*/pengine-tool.json; do
-            dir=$(dirname "$manifest")
-            slug=$(basename "$dir")
-            [ -f "$dir/Dockerfile" ] && all="$all $slug"
+          for slug in $(jq -r '.tools[].id | split("/")[1]' "$REGISTRY"); do
+            [ -f "tools/${slug}/Dockerfile" ] && all="$all $slug"
           done
 
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
@@ -58,12 +56,27 @@ jobs:
               slugs="$input"
             fi
           else
-            # Push to main: only tools whose directory changed.
+            # Push to main: check two things:
+            #   1. Dockerfile changed in tools/<slug>/
+            #   2. Tool version bumped in mcp-tools.json
             changed=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || true)
             slugs=""
+
             for s in $all; do
+              # Dockerfile or other build files changed
               if echo "$changed" | grep -q "^tools/${s}/"; then
                 slugs="$slugs $s"
+                continue
+              fi
+
+              # Version bumped in mcp-tools.json
+              if echo "$changed" | grep -q "^tools/mcp-tools.json$"; then
+                old_ver=$(git show HEAD~1:tools/mcp-tools.json 2>/dev/null \
+                  | jq -r --arg s "$s" '.tools[] | select(.id | endswith("/" + $s)) | .current // ""' 2>/dev/null || echo "")
+                new_ver=$(jq -r --arg s "$s" '.tools[] | select(.id | endswith("/" + $s)) | .current' "$REGISTRY")
+                if [[ -n "$old_ver" && "$old_ver" != "$new_ver" ]]; then
+                  slugs="$slugs $s"
+                fi
               fi
             done
           fi
@@ -71,7 +84,7 @@ jobs:
           # Build JSON matrix.
           json="["
           for s in $slugs; do
-            [ -f "tools/${s}/pengine-tool.json" ] && [ -f "tools/${s}/Dockerfile" ] && json="$json\"$s\","
+            [ -f "tools/${s}/Dockerfile" ] && json="$json\"$s\","
           done
           json="${json%,}]"
 
@@ -105,14 +118,16 @@ jobs:
         id: cfg
         run: |
           set -euo pipefail
-          MANIFEST="tools/${{ matrix.slug }}/pengine-tool.json"
-          SUFFIX=$(jq -r '.id | split("/")[1]' "$MANIFEST")
-          echo "image=ghcr.io/pengine-ai/tools/pengine-${SUFFIX}" >> "$GITHUB_OUTPUT"
-          echo "version=$(jq -r '.version' "$MANIFEST")"          >> "$GITHUB_OUTPUT"
+          REGISTRY="tools/mcp-tools.json"
+          SUFFIX="${{ matrix.slug }}"
+          IMAGE=$(jq -r --arg s "$SUFFIX" '.tools[] | select(.id | endswith("/" + $s)) | .image' "$REGISTRY")
+          VERSION=$(jq -r --arg s "$SUFFIX" '.tools[] | select(.id | endswith("/" + $s)) | .current' "$REGISTRY")
+          echo "image=$IMAGE"     >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
           # Optional: upstream npm package for docker build-args.
-          PKG=$(jq -r '(.upstream_mcp_npm // {}).package // ""' "$MANIFEST")
-          VER=$(jq -r '(.upstream_mcp_npm // {}).version // ""' "$MANIFEST")
+          PKG=$(jq -r --arg s "$SUFFIX" '.tools[] | select(.id | endswith("/" + $s)) | (.upstream_mcp_npm // {}).package // ""' "$REGISTRY")
+          VER=$(jq -r --arg s "$SUFFIX" '.tools[] | select(.id | endswith("/" + $s)) | (.upstream_mcp_npm // {}).version // ""' "$REGISTRY")
           echo "npm_pkg=$PKG" >> "$GITHUB_OUTPUT"
           echo "npm_ver=$VER" >> "$GITHUB_OUTPUT"
 
@@ -152,7 +167,7 @@ jobs:
           - **Platforms:** linux/amd64, linux/arm64
           - **Signed:** cosign keyless
 
-          Digest for catalog:
+          Digest for mcp-tools.json:
           \`\`\`
           ${{ steps.build.outputs.digest }}
           \`\`\`

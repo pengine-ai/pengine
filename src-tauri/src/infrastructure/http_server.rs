@@ -597,7 +597,7 @@ async fn handle_toolengine_runtime(State(_state): State<AppState>) -> Json<serde
 async fn handle_toolengine_catalog(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    let catalog = te_service::load_catalog().map_err(|e| {
+    let catalog = te_service::load_catalog().await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse { error: e }),

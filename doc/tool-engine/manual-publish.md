@@ -9,7 +9,7 @@ Tool container images for Pengine live on **GitHub Container Registry (GHCR)**. 
 | Registry host | `ghcr.io` |
 | Repository path | `pengine-ai/tools/pengine-<suffix>` |
 
-The `<suffix>` comes from the tool `id` in `tools/<slug>/pengine-tool.json`. Example: id `pengine/file-manager` → image `ghcr.io/pengine-ai/tools/pengine-file-manager`.
+The `<suffix>` comes from the tool `id` in `tools/mcp-tools.json`. Example: id `pengine/file-manager` → image `ghcr.io/pengine-ai/tools/pengine-file-manager`.
 
 Pull examples:
 
@@ -40,9 +40,9 @@ From the **repository root**:
 
 ```bash
 SLUG=file-manager
-MANIFEST_FILE="tools/${SLUG}/pengine-tool.json"
-VERSION=$(jq -r '.version' "$MANIFEST_FILE")
-IMAGE=ghcr.io/pengine-ai/tools/pengine-$(jq -r '.id | split("/")[1]' "$MANIFEST_FILE")
+REGISTRY="tools/mcp-tools.json"
+VERSION=$(jq -r --arg s "$SLUG" '.tools[] | select(.id | endswith("/" + $s)) | .current' "$REGISTRY")
+IMAGE=$(jq -r --arg s "$SLUG" '.tools[] | select(.id | endswith("/" + $s)) | .image' "$REGISTRY")
 MANIFEST="${IMAGE}:${VERSION}"
 ```
 
@@ -71,7 +71,7 @@ On **Apple Silicon**, building `linux/amd64` requires QEMU (Podman Machine usual
 
 ---
 
-## After push: update the embedded catalog
+## After push: update the registry
 
 After a successful push, get the digest:
 
@@ -79,7 +79,20 @@ After a successful push, get the digest:
 podman image inspect "${IMAGE}:${VERSION}" --format '{{index .RepoDigests 0}}'
 ```
 
-Update the `sha256:…` value in the matching `versions[]` entry in **`src-tauri/src/modules/tool_engine/tools.json`** (the embedded catalog baked into the Pengine binary).
+Update the `sha256:…` value in the matching `versions[]` entry in **`tools/mcp-tools.json`**. The app fetches this file from GitHub at runtime; the embedded `src-tauri/src/modules/tool_engine/tools.json` is the offline fallback.
+
+---
+
+## Updating upstream npm versions
+
+Run the update script (like `npm update` for tool images):
+
+```bash
+./tools/update-upstream.sh              # check all tools
+./tools/update-upstream.sh file-manager # check one tool
+```
+
+This checks the npm registry for newer versions, bumps `mcp-tools.json`, and prints a summary. Commit, push, and CI builds only the affected tools.
 
 ---
 
@@ -88,21 +101,21 @@ Update the `sha256:…` value in the matching `versions[]` entry in **`src-tauri
 1. Actions → **Publish tool images** ([`tools-publish.yml`](../../.github/workflows/tools-publish.yml)).
 2. **Run workflow**; set **tool** to the slug (e.g. `file-manager`) or `all`.
 
-Or just push changes to `tools/<slug>/` on `main` — CI builds automatically.
+Or just push changes to `tools/` on `main` — CI builds automatically for tools whose version changed.
 
 ---
 
 ## Troubleshooting: 0 commands
 
-If a tool shows in the MCP Tools list but has **0 commands**, the `podman run` argv is wrong. For images whose Dockerfile sets `ENTRYPOINT` to the MCP server, `mcp_server_cmd` in the embedded catalog must be `[]`. Extra tokens get appended as argv and break startup.
+If a tool shows in the MCP Tools list but has **0 commands**, the `podman run` argv is wrong. For images whose Dockerfile sets `ENTRYPOINT` to the MCP server, `mcp_server_cmd` in the registry must be `[]`. Extra tokens get appended as argv and break startup.
 
-Fix: update the embedded catalog and reinstall the tool from the Tool Engine panel.
+Fix: update the registry and reinstall the tool from the Tool Engine panel.
 
 ---
 
 ## Upstream MCP npm version
 
-For tools that install an npm package (e.g. File Manager), put `upstream_mcp_npm` in `pengine-tool.json`:
+For tools that install an npm package (e.g. File Manager), put `upstream_mcp_npm` in the tool's entry in `mcp-tools.json`:
 
 ```json
 "upstream_mcp_npm": {
@@ -111,13 +124,14 @@ For tools that install an npm package (e.g. File Manager), put `upstream_mcp_npm
 }
 ```
 
-CI passes these as `docker build` args so you bump the npm version in the manifest instead of editing the Dockerfile.
+CI passes these as `docker build` args so you bump the npm version in the registry instead of editing the Dockerfile.
 
 ---
 
 ## Files
 
-- **`tools/<slug>/pengine-tool.json`** — tool manifest (id, version, limits, npm). CI reads this.
-- **`tools/<slug>/Dockerfile`** — image build.
-- **`src-tauri/src/modules/tool_engine/tools.json`** — embedded catalog (what the app uses at runtime). Update digests here after publish.
+- **`tools/mcp-tools.json`** — tool registry (all tools, versions, digests, npm). CI and the app read this.
+- **`tools/<slug>/Dockerfile`** — image build context.
+- **`tools/update-upstream.sh`** — bump upstream npm versions (like `npm update`).
+- **`src-tauri/src/modules/tool_engine/tools.json`** — embedded catalog (offline fallback). Update after publish.
 - **`.github/workflows/tools-publish.yml`** — CI workflow.

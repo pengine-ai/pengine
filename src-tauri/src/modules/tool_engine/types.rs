@@ -35,7 +35,7 @@ pub struct VersionEntry {
 }
 
 /// Optional npm package pinned inside a container image (see `tools/<slug>/Dockerfile`).
-/// CI passes these as `docker build` args from `pengine-tool.json` so the manifest stays the
+/// CI passes these as `docker build` args from `mcp-tools.json` so the registry stays the
 /// source of truth for upstream MCP server releases (separate from Pengine’s image `current`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpstreamMcpNpm {

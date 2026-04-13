@@ -9,14 +9,69 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 
 const EMBEDDED_CATALOG: &str = include_str!("tools.json");
 
+/// Remote registry URL — raw GitHub content. The app fetches this at runtime so
+/// users get new tools / version bumps without waiting for a Pengine app update.
+const REMOTE_CATALOG_URL: &str =
+    "https://raw.githubusercontent.com/pengine-ai/pengine/main/tools/mcp-tools.json";
+
+/// How long to wait for the remote catalog before falling back to embedded.
+const REMOTE_CATALOG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Server key prefix for tool-engine entries in `mcp.json`.
 const TE_PREFIX: &str = "te_";
 
 /// Sole MCP root when no shared folders are set yet (standard path in Linux images; no extra image dirs).
 pub const EMPTY_WORKSPACE_CONTAINER_ROOT: &str = "/tmp";
 
-pub fn load_catalog() -> Result<ToolCatalog, String> {
+/// Parse and validate a catalog JSON string. Returns `None` if parsing fails
+/// or schema_version is unsupported.
+fn parse_catalog(json: &str) -> Option<ToolCatalog> {
+    let cat: ToolCatalog = serde_json::from_str(json).ok()?;
+    if cat.schema_version != 1 {
+        return None;
+    }
+    Some(cat)
+}
+
+/// Load the embedded (compile-time) catalog. Always succeeds on a valid build.
+pub fn load_embedded_catalog() -> Result<ToolCatalog, String> {
     serde_json::from_str(EMBEDDED_CATALOG).map_err(|e| format!("parse embedded tools.json: {e}"))
+}
+
+/// Fetch the remote catalog from GitHub, falling back to the embedded catalog
+/// on network errors, timeouts, or parse failures.
+pub async fn load_catalog() -> Result<ToolCatalog, String> {
+    match fetch_remote_catalog().await {
+        Ok(cat) => {
+            log::info!("using remote catalog (revision {})", cat.catalog_revision);
+            Ok(cat)
+        }
+        Err(e) => {
+            log::warn!("remote catalog unavailable ({e}), using embedded fallback");
+            load_embedded_catalog()
+        }
+    }
+}
+
+/// Try to fetch and parse the remote catalog.
+async fn fetch_remote_catalog() -> Result<ToolCatalog, String> {
+    let client = reqwest::Client::builder()
+        .timeout(REMOTE_CATALOG_TIMEOUT)
+        .build()
+        .map_err(|e| format!("http client: {e}"))?;
+
+    let resp = client
+        .get(REMOTE_CATALOG_URL)
+        .send()
+        .await
+        .map_err(|e| format!("fetch: {e}"))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+
+    let body = resp.text().await.map_err(|e| format!("body: {e}"))?;
+    parse_catalog(&body).ok_or_else(|| "invalid or unsupported catalog schema".into())
 }
 
 /// Derive the `mcp.json` server key for a tool ID (e.g. `pengine/file-manager` -> `te_pengine-file-manager`).
@@ -291,7 +346,7 @@ pub fn sync_workspace_mounted_tools_if_installed(
     cfg: &mut McpConfig,
     host_paths: &[String],
 ) -> Result<bool, String> {
-    let catalog = load_catalog()?;
+    let catalog = load_embedded_catalog()?;
     let mut changed = false;
     for entry in &catalog.tools {
         let key = server_key(&entry.id);
@@ -330,7 +385,7 @@ pub async fn install_tool(
     mcp_cfg_lock: &tokio::sync::Mutex<()>,
     log: &LogFn,
 ) -> Result<(), String> {
-    let catalog = load_catalog()?;
+    let catalog = load_catalog().await?;
     let entry = catalog
         .tools
         .iter()
@@ -387,7 +442,7 @@ pub async fn uninstall_tool(
 
     // Remove the container image — prefer the ref from the installed entry.
     let image_ref = installed_image_ref.or_else(|| {
-        load_catalog()
+        load_embedded_catalog()
             .ok()
             .and_then(|cat| cat.tools.iter().find(|t| t.id == tool_id).cloned())
             .and_then(|entry| image_reference(&entry).ok())
@@ -420,7 +475,7 @@ mod tests {
 
     #[test]
     fn catalog_parses_new_schema() {
-        let catalog = load_catalog().unwrap();
+        let catalog = load_embedded_catalog().unwrap();
         assert_eq!(catalog.schema_version, 1);
         assert!(!catalog.tools.is_empty());
         let fm = catalog
@@ -449,7 +504,7 @@ mod tests {
 
     #[test]
     fn placeholder_digest_uses_tagged_image_in_argv() {
-        let catalog = load_catalog().unwrap();
+        let catalog = load_embedded_catalog().unwrap();
         let fm = catalog
             .tools
             .iter()

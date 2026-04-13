@@ -144,7 +144,7 @@ async fn handle_tool_manager(
 }
 
 async fn handle_list_tools(state: &AppState) -> Result<String, String> {
-    let catalog = tool_engine_service::load_catalog()?;
+    let catalog = tool_engine_service::load_catalog().await?;
     let installed = {
         let _cfg_guard = state.mcp_config_mutex.lock().await;
         tool_engine_service::installed_tool_ids(&state.mcp_config_path)
