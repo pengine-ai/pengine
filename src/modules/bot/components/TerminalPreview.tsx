@@ -122,7 +122,7 @@ export function TerminalPreview() {
       </div>
       <div
         ref={scrollRef}
-        className="h-56 space-y-2.5 overflow-y-auto px-3 py-4 font-mono text-xs sm:h-80 sm:space-y-3 sm:px-4 sm:py-5 sm:text-sm"
+        className="h-56 space-y-2.5 overflow-y-auto px-3 py-4 font-mono text-xs sm:h-60 sm:space-y-3 sm:px-4 sm:py-5 sm:text-sm"
       >
         {lines.map((line, i) => (
           <div key={`${line.timestamp}-${i}`} className="flex flex-wrap items-center gap-2">
