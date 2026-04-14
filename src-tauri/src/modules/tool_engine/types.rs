@@ -43,6 +43,13 @@ pub struct UpstreamMcpNpm {
     pub version: String,
 }
 
+/// PyPI package pinned inside a container image (Python MCP servers).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpstreamMcpPypi {
+    pub package: String,
+    pub version: String,
+}
+
 /// One entry in the tool catalog (`tools.json`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolEntry {
@@ -84,6 +91,13 @@ pub struct ToolEntry {
     /// When set, image build (`tools-publish.yml`) installs this npm package at this version.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_mcp_npm: Option<UpstreamMcpNpm>,
+    /// When set, image build installs this PyPI package at this version (Python MCP servers).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_mcp_pypi: Option<UpstreamMcpPypi>,
+    /// When true (default), run the tool container with `--network=none`. Set false for servers
+    /// that need outbound network (e.g. web fetch).
+    #[serde(default = "default_true")]
+    pub network_isolated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

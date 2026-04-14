@@ -81,9 +81,7 @@ jobs:
           push: true
           provenance: false
           sbom: false
-          build-args: |
-            UPSTREAM_MCP_NPM_PACKAGE=${{ steps.cfg.outputs.npm_pkg }}
-            UPSTREAM_MCP_NPM_VERSION=${{ steps.cfg.outputs.npm_ver }}
+          build-args: ${{ steps.cfg.outputs.build_args }}
           tags: ${{ steps.cfg.outputs.image }}:${{ steps.cfg.outputs.version }}-ci-arm64-${{ github.run_id }}
 
       - name: Build and push (linux/amd64)
@@ -95,9 +93,7 @@ jobs:
           push: true
           provenance: false
           sbom: false
-          build-args: |
-            UPSTREAM_MCP_NPM_PACKAGE=${{ steps.cfg.outputs.npm_pkg }}
-            UPSTREAM_MCP_NPM_VERSION=${{ steps.cfg.outputs.npm_ver }}
+          build-args: ${{ steps.cfg.outputs.build_args }}
           tags: ${{ steps.cfg.outputs.image }}:${{ steps.cfg.outputs.version }}-ci-amd64-${{ github.run_id }}
 
       - name: Merge multi-arch manifest
@@ -117,6 +113,7 @@ jobs:
       - name: Smoke test (MCP init handshake)
         env:
           IMAGE_WITH_DIGEST: ${{ steps.cfg.outputs.image }}@${{ steps.merge.outputs.digest }}
+          TOOL_SLUG: ${{ matrix.slug }}
         run: bash .github/scripts/tools-publish/smoke-test-mcp.sh
 
       - name: Summary

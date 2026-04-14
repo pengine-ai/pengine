@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-04-13T00:00:00Z",
-  "catalog_revision": 2,
-  "valid_until": "2026-05-13T00:00:00Z",
+  "generated_at": "2026-04-14T00:00:00Z",
+  "catalog_revision": 3,
+  "valid_until": "2026-05-14T00:00:00Z",
   "minimum_pengine_version": "0.5.0",
   "tools": [
     {
@@ -48,6 +48,200 @@
       ],
       "limits": {
         "cpus": "0.5",
+        "memory": "256m",
+        "timeout_secs": 30
+      }
+    },
+    {
+      "id": "pengine/fetch",
+      "name": "Fetch",
+      "description": "Official MCP fetch server: download URLs and return markdown-friendly content for the model.",
+      "image": "ghcr.io/pengine-ai/pengine-fetch",
+      "current": "0.1.0",
+      "versions": [
+        {
+          "version": "0.1.0",
+          "digest": "sha256:placeholder",
+          "released_at": "2026-04-14T00:00:00Z",
+          "yanked": false,
+          "revoked": false,
+          "security": false
+        }
+      ],
+      "container_read_only_rootfs": true,
+      "mount_read_only": true,
+      "mount_workspace": false,
+      "append_workspace_roots": false,
+      "direct_return": true,
+      "network_isolated": false,
+      "upstream_mcp_pypi": {
+        "package": "mcp-server-fetch",
+        "version": "2025.4.7"
+      },
+      "mcp_server_cmd": [],
+      "commands": [
+        { "name": "fetch", "description": "Fetch a URL and return extracted content (markdown by default)" }
+      ],
+      "limits": {
+        "cpus": "0.5",
+        "memory": "512m",
+        "timeout_secs": 60
+      }
+    },
+    {
+      "id": "pengine/git",
+      "name": "Git",
+      "description": "Official MCP git server: status, diff, log, branches, and commits against repos under your mounted folders (use paths like /app/<folder>).",
+      "image": "ghcr.io/pengine-ai/pengine-git",
+      "current": "0.1.0",
+      "versions": [
+        {
+          "version": "0.1.0",
+          "digest": "sha256:placeholder",
+          "released_at": "2026-04-14T00:00:00Z",
+          "yanked": false,
+          "revoked": false,
+          "security": false
+        }
+      ],
+      "container_read_only_rootfs": false,
+      "mount_read_only": false,
+      "mount_workspace": true,
+      "append_workspace_roots": false,
+      "direct_return": true,
+      "upstream_mcp_pypi": {
+        "package": "mcp-server-git",
+        "version": "2026.1.14"
+      },
+      "mcp_server_cmd": [],
+      "commands": [
+        { "name": "git_status", "description": "Working tree status for a repository" },
+        { "name": "git_diff_unstaged", "description": "Diff unstaged changes" },
+        { "name": "git_diff_staged", "description": "Diff staged changes" },
+        { "name": "git_diff", "description": "Diff against a branch or commit" },
+        { "name": "git_commit", "description": "Create a commit" },
+        { "name": "git_add", "description": "Stage files" },
+        { "name": "git_reset", "description": "Unstage all staged changes" },
+        { "name": "git_log", "description": "Commit history with optional date filters" },
+        { "name": "git_branch", "description": "List branches" },
+        { "name": "git_checkout", "description": "Switch branches" }
+      ],
+      "limits": {
+        "cpus": "0.5",
+        "memory": "512m",
+        "timeout_secs": 60
+      }
+    },
+    {
+      "id": "pengine/sequential-thinking",
+      "name": "Sequential Thinking",
+      "description": "Official MCP sequential-thinking server for structured step-by-step reasoning.",
+      "image": "ghcr.io/pengine-ai/pengine-sequential-thinking",
+      "current": "0.1.0",
+      "versions": [
+        {
+          "version": "0.1.0",
+          "digest": "sha256:placeholder",
+          "released_at": "2026-04-14T00:00:00Z",
+          "yanked": false,
+          "revoked": false,
+          "security": false
+        }
+      ],
+      "container_read_only_rootfs": true,
+      "mount_read_only": true,
+      "mount_workspace": false,
+      "append_workspace_roots": false,
+      "direct_return": false,
+      "upstream_mcp_npm": {
+        "package": "@modelcontextprotocol/server-sequential-thinking",
+        "version": "2025.12.18"
+      },
+      "mcp_server_cmd": [],
+      "commands": [
+        { "name": "sequentialthinking", "description": "Record and refine a sequence of reasoning steps" }
+      ],
+      "limits": {
+        "cpus": "0.25",
+        "memory": "256m",
+        "timeout_secs": 30
+      }
+    },
+    {
+      "id": "pengine/time",
+      "name": "Time",
+      "description": "Official MCP time server: current time and timezone conversions.",
+      "image": "ghcr.io/pengine-ai/pengine-time",
+      "current": "0.1.0",
+      "versions": [
+        {
+          "version": "0.1.0",
+          "digest": "sha256:placeholder",
+          "released_at": "2026-04-14T00:00:00Z",
+          "yanked": false,
+          "revoked": false,
+          "security": false
+        }
+      ],
+      "container_read_only_rootfs": true,
+      "mount_read_only": true,
+      "mount_workspace": false,
+      "append_workspace_roots": false,
+      "direct_return": true,
+      "upstream_mcp_pypi": {
+        "package": "mcp-server-time",
+        "version": "2026.1.26"
+      },
+      "mcp_server_cmd": [],
+      "commands": [
+        { "name": "get_current_time", "description": "Current time in a timezone" },
+        { "name": "convert_time", "description": "Convert a time between timezones" }
+      ],
+      "limits": {
+        "cpus": "0.25",
+        "memory": "256m",
+        "timeout_secs": 30
+      }
+    },
+    {
+      "id": "pengine/memory",
+      "name": "Memory",
+      "description": "Official MCP memory server: knowledge-graph style entities, relations, and observations (in-container persistence).",
+      "image": "ghcr.io/pengine-ai/pengine-memory",
+      "current": "0.1.0",
+      "versions": [
+        {
+          "version": "0.1.0",
+          "digest": "sha256:placeholder",
+          "released_at": "2026-04-14T00:00:00Z",
+          "yanked": false,
+          "revoked": false,
+          "security": false
+        }
+      ],
+      "container_read_only_rootfs": false,
+      "mount_read_only": true,
+      "mount_workspace": false,
+      "append_workspace_roots": false,
+      "direct_return": false,
+      "upstream_mcp_npm": {
+        "package": "@modelcontextprotocol/server-memory",
+        "version": "2026.1.26"
+      },
+      "mcp_server_cmd": [],
+      "commands": [
+        { "name": "create_entities", "description": "Create entities in the knowledge graph" },
+        { "name": "create_relations", "description": "Create relations between entities" },
+        { "name": "add_observations", "description": "Add observations to entities" },
+        { "name": "read_graph", "description": "Read the knowledge graph" },
+        { "name": "search_nodes", "description": "Search nodes in the graph" },
+        { "name": "open_nodes", "description": "Open nodes by name" },
+        { "name": "delete_entities", "description": "Delete entities" },
+        { "name": "delete_observations", "description": "Delete observations" },
+        { "name": "delete_relations", "description": "Delete relations" }
+      ],
+      "limits": {
+        "cpus": "0.25",
         "memory": "256m",
         "timeout_secs": 30
       }

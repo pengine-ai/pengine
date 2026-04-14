@@ -27,10 +27,10 @@ else
       continue
     fi
     if echo "$changed" | grep -q "^tools/mcp-tools.json$"; then
-      old_ver=$(git show HEAD~1:tools/mcp-tools.json 2>/dev/null \
-        | jq -r --arg s "$s" '.tools[] | select(.id | endswith("/" + $s)) | .current // ""' 2>/dev/null || echo "")
-      new_ver=$(jq -r --arg s "$s" '.tools[] | select(.id | endswith("/" + $s)) | .current' "$REGISTRY")
-      if [[ -n "$old_ver" && "$old_ver" != "$new_ver" ]]; then
+      old_blob=$(git show HEAD~1:tools/mcp-tools.json 2>/dev/null \
+        | jq -c --arg s "$s" '.tools[]? | select(.id | endswith("/" + $s))' 2>/dev/null || echo "")
+      new_blob=$(jq -c --arg s "$s" '.tools[] | select(.id | endswith("/" + $s))' "$REGISTRY")
+      if [[ "$old_blob" != "$new_blob" ]]; then
         slugs="$slugs $s"
       fi
     fi

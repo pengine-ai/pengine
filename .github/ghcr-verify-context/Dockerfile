@@ -1,3 +1,0 @@
-# Minimal image to verify Actions can push to ghcr.io/pengine-ai/...
-FROM scratch
-COPY README.md /README.md

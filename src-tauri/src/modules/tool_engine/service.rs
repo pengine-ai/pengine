@@ -3,7 +3,7 @@ use super::types::{ToolCatalog, ToolEntry, VersionEntry};
 use crate::modules::mcp::service as mcp_service;
 use crate::modules::mcp::types::{CustomToolEntry, McpConfig, ServerEntry};
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
@@ -41,9 +41,46 @@ pub fn load_embedded_catalog() -> Result<ToolCatalog, String> {
     serde_json::from_str(EMBEDDED_CATALOG).map_err(|e| format!("parse embedded tools.json: {e}"))
 }
 
-/// Fetch the remote catalog from GitHub, falling back to the embedded catalog
-/// on network errors, timeouts, or parse failures.
+/// Try repo `tools/mcp-tools.json` before the remote catalog (used by `bun run tauri dev` and
+/// any run where the file exists next to the workspace). Release builds from CI point at paths
+/// that do not exist on end-user machines, so this safely no-ops there.
+fn try_load_local_tools_catalog() -> Option<ToolCatalog> {
+    let mut paths: Vec<PathBuf> = Vec::new();
+    paths.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../tools/mcp-tools.json"));
+    if let Ok(mut cwd) = std::env::current_dir() {
+        for _ in 0..8 {
+            paths.push(cwd.join("tools/mcp-tools.json"));
+            if !cwd.pop() {
+                break;
+            }
+        }
+    }
+    for p in paths {
+        if let Ok(json) = std::fs::read_to_string(&p) {
+            if let Some(cat) = parse_catalog(&json) {
+                log::info!("loaded tool catalog from {}", p.display());
+                return Some(cat);
+            }
+            log::warn!(
+                "found {} but it did not parse as catalog schema v1",
+                p.display()
+            );
+        }
+    }
+    None
+}
+
+/// Resolve the tool catalog: prefer repo `tools/mcp-tools.json` when present, then remote,
+/// then embedded fallback.
 pub async fn load_catalog() -> Result<ToolCatalog, String> {
+    if let Some(cat) = try_load_local_tools_catalog() {
+        log::info!(
+            "using local tools/mcp-tools.json (revision {}); remote fetch skipped",
+            cat.catalog_revision
+        );
+        return Ok(cat);
+    }
+
     match fetch_remote_catalog().await {
         Ok(cat) => {
             log::info!("using remote catalog (revision {})", cat.catalog_revision);
@@ -139,10 +176,13 @@ pub fn podman_run_argv_for_tool(
         "run".into(),
         "--rm".into(),
         "-i".into(),
-        "--network=none".into(),
         format!("--cpus={}", entry.limits.cpus),
         format!("--memory={}", entry.limits.memory),
     ];
+
+    if entry.network_isolated {
+        args.insert(3, "--network=none".into());
+    }
 
     if entry.container_read_only_rootfs {
         args.push("--read-only".into());

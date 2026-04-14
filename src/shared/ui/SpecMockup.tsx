@@ -1,6 +1,6 @@
 const items = [
   ["Interface", "Telegram chat on your phone"],
-  ["Runtime", "WASM now, Tauri desktop shell next"],
+  ["Runtime", "Rust + WASM"],
   ["Models", "Ollama local inference by default"],
   ["Tools", "Docker containers become agent abilities"],
   ["Loop", "Plan -> execute -> reflect"],
