@@ -12,6 +12,12 @@ export type CatalogToolCommand = {
   description: string;
 };
 
+export type PrivateFolderConfig = {
+  container_path: string;
+  file_env_var: string;
+  file_extension: string;
+};
+
 export type CatalogTool = {
   id: string;
   name: string;
@@ -19,6 +25,9 @@ export type CatalogTool = {
   description: string;
   installed: boolean;
   commands: CatalogToolCommand[];
+  private_folder?: PrivateFolderConfig | null;
+  /** Resolved host directory (default under app data or user override). */
+  private_host_path?: string | null;
 };
 
 function makeTimeoutSignal(timeoutMs: number): { signal: AbortSignal; cleanup: () => void } {
@@ -102,6 +111,37 @@ export async function installTool(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ tool_id: toolId }),
+      signal,
+    });
+    if (resp.ok) return { ok: true };
+    const raw = await resp.text();
+    let message = `Request failed (HTTP ${resp.status})`;
+    try {
+      const body = JSON.parse(raw) as { error?: string };
+      message = body.error ?? raw.trim();
+    } catch {
+      message = raw.trim() || message;
+    }
+    return { ok: false, error: message };
+  } catch (e) {
+    return { ok: false, error: fetchErrorMessage(e) };
+  } finally {
+    cleanup();
+  }
+}
+
+/** PUT `/v1/toolengine/private-folder` — set host folder for a tool that declares `private_folder`. */
+export async function putToolPrivateFolder(
+  toolId: string,
+  path: string,
+  timeoutMs = 120_000,
+): Promise<{ ok: boolean; error?: string }> {
+  const { signal, cleanup } = makeTimeoutSignal(timeoutMs);
+  try {
+    const resp = await fetch(`${PENGINE_API_BASE}/v1/toolengine/private-folder`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tool_id: toolId, path }),
       signal,
     });
     if (resp.ok) return { ok: true };

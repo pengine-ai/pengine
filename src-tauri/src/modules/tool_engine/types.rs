@@ -50,6 +50,18 @@ pub struct UpstreamMcpPypi {
     pub version: String,
 }
 
+/// Declares that a tool keeps mutable state on disk. The app bind-mounts a host
+/// directory to `container_path` and sets `file_env_var` on the container to
+/// `<container_path>/<bot_id>.<file_extension>` so state is scoped per connected bot.
+/// Host directory defaults to `$APP_DATA/tool-data/<slug>/` and can be overridden by
+/// `PUT /v1/toolengine/private-folder` (`{ "tool_id", "path" }`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrivateFolderConfig {
+    pub container_path: String,
+    pub file_env_var: String,
+    pub file_extension: String,
+}
+
 /// One entry in the tool catalog (`tools.json`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolEntry {
@@ -98,6 +110,10 @@ pub struct ToolEntry {
     /// that need outbound network (e.g. web fetch).
     #[serde(default = "default_true")]
     pub network_isolated: bool,
+    /// When set, the app bind-mounts a host folder into the container and passes a per-bot file
+    /// path via env so the tool can persist state (e.g. the Memory server's knowledge-graph JSON).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub private_folder: Option<PrivateFolderConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

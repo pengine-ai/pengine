@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_at": "2026-04-14T00:00:00Z",
-  "catalog_revision": 3,
+  "catalog_revision": 4,
   "valid_until": "2026-05-14T00:00:00Z",
   "minimum_pengine_version": "0.5.0",
   "tools": [
@@ -206,7 +206,7 @@
     {
       "id": "pengine/memory",
       "name": "Memory",
-      "description": "Official MCP memory server: knowledge-graph style entities, relations, and observations (in-container persistence).",
+      "description": "Official MCP memory server: knowledge-graph style entities, relations, and observations; state file is stored in a dedicated folder (default under app data, or pick your own).",
       "image": "ghcr.io/pengine-ai/pengine-memory",
       "current": "0.1.0",
       "versions": [
@@ -227,6 +227,11 @@
       "upstream_mcp_npm": {
         "package": "@modelcontextprotocol/server-memory",
         "version": "2026.1.26"
+      },
+      "private_folder": {
+        "container_path": "/mcp/data",
+        "file_env_var": "MEMORY_FILE_PATH",
+        "file_extension": "json"
       },
       "mcp_server_cmd": [],
       "commands": [

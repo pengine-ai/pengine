@@ -3,6 +3,7 @@ FROM node:22-alpine
 ARG UPSTREAM_MCP_NPM_PACKAGE=@modelcontextprotocol/server-memory
 ARG UPSTREAM_MCP_NPM_VERSION=2026.1.26
 RUN addgroup -S mcp && adduser -S -G mcp -H mcp
+RUN mkdir -p /mcp/data && chown mcp:mcp /mcp/data
 WORKDIR /mcp
 RUN npm install --omit=dev --prefix /mcp "${UPSTREAM_MCP_NPM_PACKAGE}@${UPSTREAM_MCP_NPM_VERSION}" \
     && npm cache clean --force \

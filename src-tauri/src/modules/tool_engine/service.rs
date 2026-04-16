@@ -1,11 +1,15 @@
 use super::runtime::RuntimeInfo;
-use super::types::{ToolCatalog, ToolEntry, VersionEntry};
+use super::types::{PrivateFolderConfig, ToolCatalog, ToolEntry, VersionEntry};
 use crate::modules::mcp::service as mcp_service;
 use crate::modules::mcp::types::{CustomToolEntry, McpConfig, ServerEntry};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, BufReader};
+
+/// Sentinel used in `<bot_id>.<ext>` when no bot is connected yet. The file gets rewritten to
+/// `<bot_id>.<ext>` on the next sync after connect, so this name is only ever live when unused.
+const BOT_ID_FALLBACK: &str = "default";
 
 const EMBEDDED_CATALOG: &str = include_str!("../../../../tools/mcp-tools.json");
 
@@ -120,6 +124,116 @@ pub fn server_key(tool_id: &str) -> String {
     format!("{TE_PREFIX}{}", tool_id.replace('/', "-"))
 }
 
+/// Default host directory for a catalog tool's `private_folder` (`<mcp.json-parent>/tool-data/<id-with-hyphens>/`).
+pub fn default_private_data_dir(mcp_config_path: &Path, tool_id: &str) -> PathBuf {
+    let base = mcp_config_path.parent().unwrap_or_else(|| Path::new("."));
+    base.join("tool-data").join(tool_id.replace('/', "-"))
+}
+
+/// Resolve the host path for private tool data: explicit `mcp.json` override, else [`default_private_data_dir`].
+pub fn resolve_private_host_path(
+    mcp_config_path: &Path,
+    tool_id: &str,
+    stored: Option<&str>,
+) -> PathBuf {
+    if let Some(s) = stored.map(str::trim).filter(|s| !s.is_empty()) {
+        PathBuf::from(s)
+    } else {
+        default_private_data_dir(mcp_config_path, tool_id)
+    }
+}
+
+fn ensure_private_data_dir(path: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(path)
+        .map_err(|e| format!("create private tool data dir {}: {e}", path.display()))
+}
+
+/// Per-container env entry that points the MCP server at its bot-scoped state file
+/// inside the bind-mounted private folder.
+fn private_folder_container_env(pf: &PrivateFolderConfig, bot_id: &str) -> (String, String) {
+    let root = pf.container_path.trim_end_matches('/');
+    let value = format!("{root}/{bot_id}.{}", pf.file_extension);
+    (pf.file_env_var.clone(), value)
+}
+
+/// Everything the container needs to mount and address the private folder in one bundle.
+pub struct PrivateBind<'a> {
+    pub host_path: &'a Path,
+    pub config: &'a PrivateFolderConfig,
+    pub bot_id: &'a str,
+}
+
+fn catalog_tool_stdio_eq(a: &ServerEntry, b: &ServerEntry) -> bool {
+    match (a, b) {
+        (
+            ServerEntry::Stdio {
+                command: c1,
+                args: a1,
+                env: e1,
+                direct_return: d1,
+                private_host_path: p1,
+            },
+            ServerEntry::Stdio {
+                command: c2,
+                args: a2,
+                env: e2,
+                direct_return: d2,
+                private_host_path: p2,
+            },
+        ) => c1 == c2 && a1 == a2 && e1 == e2 && d1 == d2 && p1 == p2,
+        _ => false,
+    }
+}
+
+/// Rebuild argv for one installed catalog tool from `mcp.json` + catalog entry.
+/// The container env is baked into argv via `-e` flags, so `ServerEntry.env` stays empty
+/// (host-process env does not propagate into the container).
+fn rebuild_installed_catalog_tool_stdio(
+    entry: &ToolEntry,
+    host_paths: &[String],
+    mcp_config_path: &Path,
+    prev: &ServerEntry,
+    bot_id: Option<&str>,
+) -> Result<ServerEntry, String> {
+    let ServerEntry::Stdio {
+        command,
+        direct_return,
+        private_host_path,
+        ..
+    } = prev
+    else {
+        return Err("internal: expected stdio server entry for tool engine catalog tool".into());
+    };
+
+    let pb_buf = if entry.private_folder.is_some() {
+        let pb =
+            resolve_private_host_path(mcp_config_path, &entry.id, private_host_path.as_deref());
+        ensure_private_data_dir(&pb)?;
+        Some(pb)
+    } else {
+        None
+    };
+    let bid = bot_id.unwrap_or(BOT_ID_FALLBACK);
+    let private_bind: Option<PrivateBind> = match (&pb_buf, &entry.private_folder) {
+        (Some(pb), Some(pf)) => Some(PrivateBind {
+            host_path: pb.as_path(),
+            config: pf,
+            bot_id: bid,
+        }),
+        _ => None,
+    };
+
+    let args = podman_run_argv_for_tool(entry, host_paths, private_bind.as_ref())?;
+
+    Ok(ServerEntry::Stdio {
+        command: command.clone(),
+        args,
+        env: HashMap::new(),
+        direct_return: *direct_return,
+        private_host_path: private_host_path.clone(),
+    })
+}
+
 fn sanitize_mount_label(name: &str) -> String {
     let s: String = name
         .chars()
@@ -166,6 +280,7 @@ pub fn workspace_app_bind_pairs(host_paths: &[String]) -> Vec<(String, String)> 
 pub fn podman_run_argv_for_tool(
     entry: &ToolEntry,
     host_paths: &[String],
+    private_bind: Option<&PrivateBind<'_>>,
 ) -> Result<Vec<String>, String> {
     if entry.append_workspace_roots && !entry.mount_workspace {
         return Err("catalog: append_workspace_roots requires mount_workspace".into());
@@ -203,6 +318,21 @@ pub fn podman_run_argv_for_tool(
                 .iter()
                 .map(|(host, cpath)| format!("-v={host}:{cpath}:{suffix}")),
         );
+    }
+
+    if let Some(pb) = private_bind {
+        let host_s = pb.host_path.to_str().ok_or_else(|| {
+            format!(
+                "private data path must be valid UTF-8: {}",
+                pb.host_path.display()
+            )
+        })?;
+        args.push(format!(
+            "-v={host_s}:{}:rw",
+            pb.config.container_path.trim_end_matches('/')
+        ));
+        let (k, v) = private_folder_container_env(pb.config, pb.bot_id);
+        args.push(format!("--env={k}={v}"));
     }
 
     args.push(image_ref);
@@ -389,37 +519,30 @@ pub fn installed_tool_ids(mcp_config_path: &Path) -> Vec<String> {
 ///
 /// Pass the catalog from [`load_catalog`] (or tests) so callers can fetch **before** holding
 /// `mcp_config_mutex`, avoiding network I/O under that lock.
+///
+/// `mcp_config_path` and `bot_id` refresh `private_folder` bind mounts and per-bot env paths.
 pub fn sync_workspace_mounted_tools_for_catalog(
     cfg: &mut McpConfig,
     host_paths: &[String],
     catalog: &ToolCatalog,
+    mcp_config_path: &Path,
+    bot_id: Option<String>,
 ) -> Result<bool, String> {
+    let bid = bot_id.as_deref();
     let mut changed = false;
     for entry in &catalog.tools {
         let key = server_key(&entry.id);
-        let Some(ServerEntry::Stdio {
-            command,
-            args,
-            env,
-            direct_return,
-        }) = cfg.servers.get(&key)
-        else {
+        let Some(prev) = cfg.servers.get(&key) else {
             continue;
         };
 
-        let new_args = podman_run_argv_for_tool(entry, host_paths)?;
-        if args == &new_args {
-            continue;
+        let new_entry =
+            rebuild_installed_catalog_tool_stdio(entry, host_paths, mcp_config_path, prev, bid)?;
+
+        if !catalog_tool_stdio_eq(prev, &new_entry) {
+            cfg.servers.insert(key, new_entry);
+            changed = true;
         }
-
-        let new_entry = ServerEntry::Stdio {
-            command: command.clone(),
-            args: new_args,
-            env: env.clone(),
-            direct_return: *direct_return,
-        };
-        cfg.servers.insert(key, new_entry);
-        changed = true;
     }
     Ok(changed)
 }
@@ -444,13 +567,31 @@ pub async fn install_tool(
     let _cfg_guard = mcp_cfg_lock.lock().await;
     let mut cfg = mcp_service::load_or_init_config(mcp_config_path)?;
     let host_paths = mcp_service::filesystem_allowed_paths(&cfg);
-    let args = podman_run_argv_for_tool(entry, &host_paths)?;
+
+    let pb_buf = if entry.private_folder.is_some() {
+        let pb = resolve_private_host_path(mcp_config_path, tool_id, None);
+        ensure_private_data_dir(&pb)?;
+        Some(pb)
+    } else {
+        None
+    };
+    let private_bind: Option<PrivateBind> = match (&pb_buf, &entry.private_folder) {
+        (Some(pb), Some(pf)) => Some(PrivateBind {
+            host_path: pb.as_path(),
+            config: pf,
+            bot_id: BOT_ID_FALLBACK,
+        }),
+        _ => None,
+    };
+
+    let args = podman_run_argv_for_tool(entry, &host_paths, private_bind.as_ref())?;
 
     let server_entry = ServerEntry::Stdio {
         command: runtime.binary.clone(),
         args,
         env: HashMap::new(),
         direct_return: entry.direct_return,
+        private_host_path: None,
     };
 
     cfg.servers.insert(server_key(tool_id), server_entry);
@@ -603,6 +744,7 @@ pub async fn add_custom_tool(
         args,
         env: HashMap::new(),
         direct_return: entry.direct_return,
+        private_host_path: None,
     };
 
     cfg.servers
@@ -650,6 +792,7 @@ pub fn sync_custom_tools_if_installed(cfg: &mut McpConfig, host_paths: &[String]
             args,
             env,
             direct_return,
+            private_host_path,
         }) = cfg.servers.get(&key)
         else {
             continue;
@@ -665,6 +808,7 @@ pub fn sync_custom_tools_if_installed(cfg: &mut McpConfig, host_paths: &[String]
             args: new_args,
             env: env.clone(),
             direct_return: *direct_return,
+            private_host_path: private_host_path.clone(),
         };
         cfg.servers.insert(key, new_entry);
         changed = true;
@@ -707,6 +851,16 @@ mod tests {
             .expect("file-manager catalog pins upstream MCP npm");
         assert!(u.package.contains("server-filesystem"));
         assert!(!u.version.is_empty());
+        let mem = catalog
+            .tools
+            .iter()
+            .find(|t| t.id == "pengine/memory")
+            .expect("memory in embedded catalog");
+        let mp = mem
+            .private_folder
+            .as_ref()
+            .expect("memory declares private_folder");
+        assert_eq!(mp.file_env_var, "MEMORY_FILE_PATH");
     }
 
     #[test]
@@ -731,7 +885,7 @@ mod tests {
             .find(|v| v.version == fm.current)
             .unwrap();
         assert_eq!(ver.digest, "sha256:placeholder");
-        let argv = podman_run_argv_for_tool(fm, &[]).expect("argv");
+        let argv = podman_run_argv_for_tool(fm, &[], None).expect("argv");
         let tagged = format!("{}:{}", fm.image, fm.current);
         let image_ref = argv
             .iter()
@@ -740,6 +894,45 @@ mod tests {
         assert!(
             !image_ref.contains('@'),
             "placeholder must not use @digest: {image_ref}"
+        );
+    }
+
+    #[test]
+    fn memory_catalog_has_private_folder_and_argv_includes_bind_and_env() {
+        let catalog = load_embedded_catalog().unwrap();
+        let mem = catalog
+            .tools
+            .iter()
+            .find(|t| t.id == "pengine/memory")
+            .expect("memory in catalog");
+        let pf = mem
+            .private_folder
+            .as_ref()
+            .expect("memory declares private_folder");
+        assert_eq!(pf.container_path, "/mcp/data");
+        assert_eq!(pf.file_env_var, "MEMORY_FILE_PATH");
+
+        let tmp = std::env::temp_dir().join("pengine-mem-test-data");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let pb = PrivateBind {
+            host_path: tmp.as_path(),
+            config: pf,
+            bot_id: "12345",
+        };
+        let argv = podman_run_argv_for_tool(mem, &[], Some(&pb)).expect("argv");
+
+        let want_mount = format!("-v={}:/mcp/data:rw", tmp.to_str().expect("utf8 tmp path"));
+        assert!(
+            argv.iter().any(|a| a == &want_mount),
+            "missing mount: argv={argv:?}"
+        );
+
+        // Container env must be passed as `-e` argv — not host env, which podman does not forward.
+        let want_env = "--env=MEMORY_FILE_PATH=/mcp/data/12345.json".to_string();
+        assert!(
+            argv.iter().any(|a| a == &want_env),
+            "missing -e flag: argv={argv:?}"
         );
     }
 }

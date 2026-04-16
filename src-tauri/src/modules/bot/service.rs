@@ -122,6 +122,12 @@ async fn text_handler(bot: Bot, msg: Message, state: AppState) -> ResponseResult
 
     match result {
         Ok(turn) => {
+            if turn.suppress_telegram_reply {
+                state
+                    .emit_log("reply", "[diary line saved; no Telegram reply]")
+                    .await;
+                return Ok(());
+            }
             let reply = if turn.text.trim().is_empty() {
                 "(no reply)".to_string()
             } else {

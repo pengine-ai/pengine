@@ -33,6 +33,10 @@ pub enum ServerEntry {
         /// sending them back to the model for summarisation.
         #[serde(default)]
         direct_return: bool,
+        /// For catalog tools that declare `private_folder`: the host directory currently mounted
+        /// into the container. Defaults to `$APP_DATA/tool-data/<slug>/`; user overrides land here.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        private_host_path: Option<String>,
     },
 }
 

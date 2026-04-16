@@ -158,6 +158,7 @@ pub async fn connect_one_server(
             args,
             env,
             direct_return,
+            ..
         } => match McpClient::connect(
             server_key.to_string(),
             command.clone(),
@@ -224,11 +225,21 @@ pub async fn rebuild_registry_into_state(
         };
 
         let paths = filesystem_allowed_paths(&cfg);
+        let bot_id = state
+            .connection
+            .lock()
+            .await
+            .as_ref()
+            .map(|c| c.bot_id.clone());
         let mut ws_changed = false;
         match &catalog_result {
             Ok(cat) => {
                 match crate::modules::tool_engine::service::sync_workspace_mounted_tools_for_catalog(
-                    &mut cfg, &paths, cat,
+                    &mut cfg,
+                    &paths,
+                    cat,
+                    &state.mcp_config_path,
+                    bot_id,
                 ) {
                     Ok(changed) => ws_changed |= changed,
                     Err(e) => {

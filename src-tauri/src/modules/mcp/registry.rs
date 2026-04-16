@@ -181,6 +181,12 @@ impl ToolRegistry {
         self.cached_tool_names.is_empty()
     }
 
+    /// Read-only access to the registered providers. Used by capability detectors
+    /// (e.g. `memory::MemoryProvider::detect`) that pick a server by its tool shape.
+    pub fn providers(&self) -> &[Provider] {
+        &self.providers
+    }
+
     pub async fn call_tool(&self, name: &str, args: Value) -> Result<(String, bool), String> {
         let (provider, tool, direct) = self.resolve_tool(name)?;
         let args = match &provider {

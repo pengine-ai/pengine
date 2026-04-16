@@ -104,6 +104,10 @@ pub async fn start_server(state: AppState) {
             "/v1/toolengine/uninstall",
             post(handle_toolengine_uninstall),
         )
+        .route(
+            "/v1/toolengine/private-folder",
+            put(handle_toolengine_private_folder_put),
+        )
         .route("/v1/toolengine/custom", get(handle_toolengine_custom_list))
         .route("/v1/toolengine/custom", post(handle_toolengine_custom_add))
         .route(
@@ -379,11 +383,21 @@ async fn handle_mcp_filesystem_put(
         mcp_service::set_filesystem_allowed_paths(&mut cfg, &paths);
 
         let mut note = None::<String>;
+        let bot_id = state
+            .connection
+            .lock()
+            .await
+            .as_ref()
+            .map(|c| c.bot_id.clone());
         match &catalog_result {
             Ok(cat) => {
-                if let Err(e) =
-                    te_service::sync_workspace_mounted_tools_for_catalog(&mut cfg, &paths, cat)
-                {
+                if let Err(e) = te_service::sync_workspace_mounted_tools_for_catalog(
+                    &mut cfg,
+                    &paths,
+                    cat,
+                    &state.mcp_config_path,
+                    bot_id,
+                ) {
                     note = Some(e);
                 }
             }
@@ -621,10 +635,25 @@ async fn handle_toolengine_catalog(
 
     let installed_ids = te_service::installed_tool_ids(&state.mcp_config_path);
 
+    let cfg_snap = state
+        .mcp_config_path
+        .exists()
+        .then(|| mcp_service::read_config(&state.mcp_config_path).ok())
+        .flatten();
+
     let tools: Vec<serde_json::Value> = catalog
         .tools
         .iter()
         .map(|t| {
+            let stored_pf = cfg_snap.as_ref().and_then(|c| {
+                let k = te_service::server_key(&t.id);
+                match c.servers.get(&k)? {
+                    crate::modules::mcp::types::ServerEntry::Stdio {
+                        private_host_path, ..
+                    } => private_host_path.as_deref(),
+                    _ => None,
+                }
+            });
             let commands: Vec<serde_json::Value> = t
                 .commands
                 .iter()
@@ -635,6 +664,18 @@ async fn handle_toolengine_catalog(
                     })
                 })
                 .collect();
+            let private_folder_json = t.private_folder.as_ref().map(|pf| {
+                serde_json::json!({
+                    "container_path": pf.container_path,
+                    "file_env_var": pf.file_env_var,
+                    "file_extension": pf.file_extension,
+                })
+            });
+            let private_host_resolved: Option<String> = t.private_folder.as_ref().map(|_| {
+                te_service::resolve_private_host_path(&state.mcp_config_path, &t.id, stored_pf)
+                    .to_string_lossy()
+                    .into_owned()
+            });
             serde_json::json!({
                 "id": t.id,
                 "name": t.name,
@@ -642,6 +683,8 @@ async fn handle_toolengine_catalog(
                 "description": t.description,
                 "installed": installed_ids.contains(&t.id),
                 "commands": commands,
+                "private_folder": private_folder_json,
+                "private_host_path": private_host_resolved,
             })
         })
         .collect();
@@ -657,6 +700,12 @@ async fn handle_toolengine_installed(State(state): State<AppState>) -> Json<serd
 #[derive(Deserialize)]
 struct ToolEngineActionBody {
     tool_id: String,
+}
+
+#[derive(Deserialize)]
+struct PutToolPrivateFolderBody {
+    tool_id: String,
+    path: String,
 }
 
 async fn handle_toolengine_install(
@@ -717,6 +766,146 @@ async fn handle_toolengine_install(
             bg.emit_log(
                 "mcp",
                 &format!("ERROR: MCP registry rebuild failed after tool install: {e}"),
+            )
+            .await;
+        }
+    });
+
+    Ok((StatusCode::OK, Json(serde_json::json!({ "ok": true }))))
+}
+
+async fn handle_toolengine_private_folder_put(
+    State(state): State<AppState>,
+    Json(body): Json<PutToolPrivateFolderBody>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ErrorResponse>)> {
+    let tool_id = body.tool_id.trim().to_string();
+    let path = body.path.trim().to_string();
+    if tool_id.is_empty() || path.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "tool_id and path are required".into(),
+            }),
+        ));
+    }
+
+    let catalog = te_service::load_catalog().await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse { error: e }),
+        )
+    })?;
+
+    let entry = catalog
+        .tools
+        .iter()
+        .find(|t| t.id == tool_id)
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("unknown tool '{tool_id}'"),
+                }),
+            )
+        })?;
+
+    if entry.private_folder.is_none() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "this catalog tool does not declare private_folder".into(),
+            }),
+        ));
+    }
+
+    std::fs::create_dir_all(&path).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!("cannot create directory: {e}"),
+            }),
+        )
+    })?;
+
+    let bot_id = state
+        .connection
+        .lock()
+        .await
+        .as_ref()
+        .map(|c| c.bot_id.clone());
+
+    {
+        let _guard = state.mcp_config_mutex.lock().await;
+        let mut cfg = mcp_service::load_or_init_config(&state.mcp_config_path).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse { error: e }),
+            )
+        })?;
+
+        let key = te_service::server_key(&tool_id);
+        {
+            let Some(server_ent) = cfg.servers.get_mut(&key) else {
+                return Err((
+                    StatusCode::NOT_FOUND,
+                    Json(ErrorResponse {
+                        error: format!("tool '{tool_id}' is not installed"),
+                    }),
+                ));
+            };
+            match server_ent {
+                crate::modules::mcp::types::ServerEntry::Stdio {
+                    private_host_path, ..
+                } => {
+                    *private_host_path = Some(path.clone());
+                }
+                _ => {
+                    return Err((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse {
+                            error: "tool server entry is not stdio".into(),
+                        }),
+                    ));
+                }
+            }
+        }
+
+        let host_paths = mcp_service::filesystem_allowed_paths(&cfg);
+        te_service::sync_workspace_mounted_tools_for_catalog(
+            &mut cfg,
+            &host_paths,
+            &catalog,
+            &state.mcp_config_path,
+            bot_id,
+        )
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse { error: e }),
+            )
+        })?;
+
+        mcp_service::save_config(&state.mcp_config_path, &cfg).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse { error: e }),
+            )
+        })?;
+    }
+
+    state
+        .emit_log(
+            "toolengine",
+            &format!("private data folder for {tool_id} set to {path}"),
+        )
+        .await;
+
+    let bg = state.clone();
+    tokio::spawn(async move {
+        if let Err(e) = mcp_service::rebuild_registry_into_state(&bg).await {
+            bg.emit_log(
+                "mcp",
+                &format!("ERROR: MCP registry rebuild failed after private-folder update: {e}"),
             )
             .await;
         }

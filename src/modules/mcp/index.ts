@@ -18,6 +18,8 @@ export type ServerEntryStdio = {
   args: string[];
   env: Record<string, string>;
   direct_return: boolean;
+  /** Host dir for Tool Engine tools that declare `private_folder` in the catalog (e.g. Memory). */
+  private_host_path?: string | null;
 };
 
 export type ServerEntryNative = {
