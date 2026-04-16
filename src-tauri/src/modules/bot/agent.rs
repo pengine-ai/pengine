@@ -264,7 +264,7 @@ async fn handle_diary_start(state: &AppState) -> Result<TurnResult, String> {
     }
 
     let now = Utc::now();
-    let entity_name = memory::session_entity_name(now);
+    let entity_name = memory::diary_entity_name(now);
     let description = format!(
         "Diary recording opened at {} UTC (user lines only; no assistant replies).",
         now.format("%Y-%m-%d %H:%M:%S")
@@ -309,25 +309,27 @@ async fn handle_diary_start(state: &AppState) -> Result<TurnResult, String> {
 }
 
 async fn handle_diary_end(state: &AppState) -> Result<TurnResult, String> {
-    let taken = state.memory_session.write().await.take();
-    let Some(session) = taken else {
-        return Ok(TurnResult {
-            text: "No diary recording is active. Send \"record\" to start.".into(),
-            source: ReplySource::Model,
-            suppress_telegram_reply: false,
-        });
+    let session = {
+        let mut guard = state.memory_session.write().await;
+        match guard.as_ref() {
+            None => {
+                return Ok(TurnResult {
+                    text: "No diary recording is active. Send \"record\" to start.".into(),
+                    source: ReplySource::Model,
+                    suppress_telegram_reply: false,
+                });
+            }
+            Some(s) if !s.diary_only => {
+                return Ok(TurnResult {
+                    text: "Not in diary mode — you're in a chat memory session. Say \"close session\" or \"over and out\" to end that."
+                        .into(),
+                    source: ReplySource::Model,
+                    suppress_telegram_reply: false,
+                });
+            }
+            _ => guard.take().unwrap(),
+        }
     };
-
-    if !session.diary_only {
-        // Put chat session back — user said "record end" while in captain's log mode.
-        *state.memory_session.write().await = Some(session);
-        return Ok(TurnResult {
-            text: "Not in diary mode — you're in a chat memory session. Say \"close session\" or \"over and out\" to end that."
-                .into(),
-            source: ReplySource::Model,
-            suppress_telegram_reply: false,
-        });
-    }
 
     let memory = MemoryProvider::detect(&*state.mcp.read().await);
     if let Some(memory) = memory {
@@ -367,9 +369,9 @@ async fn handle_diary_end(state: &AppState) -> Result<TurnResult, String> {
 async fn handle_diary_line(state: &AppState, user_message: &str) -> Result<TurnResult, String> {
     let Some(session) = state.memory_session.read().await.clone() else {
         return Ok(TurnResult {
-            text: String::new(),
+            text: "Diary session ended; please start a new session with \"record\".".into(),
             source: ReplySource::Model,
-            suppress_telegram_reply: true,
+            suppress_telegram_reply: false,
         });
     };
     let Some(mem) = MemoryProvider::detect(&*state.mcp.read().await) else {

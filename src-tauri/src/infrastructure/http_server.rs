@@ -13,6 +13,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use socket2::{Domain, Socket, Type};
 use std::convert::Infallible;
+use std::io::ErrorKind;
 use std::time::Duration;
 use tokio_stream::{Stream, StreamExt};
 use tower_http::cors::{Any, CorsLayer};
@@ -928,8 +929,13 @@ async fn handle_toolengine_private_folder_put(
                     private_host_path, ..
                 } => {
                     if let Err(e) = tokio::fs::create_dir_all(&path).await {
+                        let status = match e.kind() {
+                            ErrorKind::PermissionDenied => StatusCode::FORBIDDEN,
+                            ErrorKind::AlreadyExists => StatusCode::CONFLICT,
+                            _ => StatusCode::INTERNAL_SERVER_ERROR,
+                        };
                         return Err((
-                            StatusCode::BAD_REQUEST,
+                            status,
                             Json(ErrorResponse {
                                 error: format!("cannot create directory: {e}"),
                             }),

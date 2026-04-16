@@ -1,8 +1,8 @@
 //! Generic, backend-agnostic memory capability.
 //!
 //! The agent talks to `MemoryProvider` without knowing which MCP server is behind it.
-//! Detection is by **tool shape** (what commands the server exposes), not by catalog id,
-//! so any memory MCP server that speaks a known shape is picked up automatically.
+//! Detection prefers **tool shape** plus JSON `inputSchema` checks for the Knowledge Graph memory
+//! tools (or the official catalog server key `te_pengine-memory`).
 //!
 //! ## Session policy lives here, not in the agent
 //!
@@ -20,9 +20,12 @@
 //! The agent, session keywords, and entity-naming scheme do not change.
 
 use crate::modules::mcp::registry::{Provider, ToolRegistry};
+use crate::modules::mcp::types::ToolDef;
 use chrono::{DateTime, Utc};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::collections::HashSet;
+use unicode_general_category::{get_general_category, GeneralCategory};
+use unicode_normalization::UnicodeNormalization;
 
 /// Exact (case-insensitive, trimmed, trailing punctuation stripped) phrases that open a
 /// recording session. Stable across backends.
@@ -51,17 +54,105 @@ pub const DIARY_START_PHRASES: &[&str] = &["record"];
 /// Stop diary-only recording without necessarily using a full session end phrase.
 pub const DIARY_END_PHRASES: &[&str] = &["record end"];
 
-/// Starfleet sign-off: `<rank> <name...> out`. Matches e.g. `Commander Worf out`,
-/// `Captain Picard out`. Rank must be present so casual phrases like "logging out"
-/// never trigger.
+/// Starfleet sign-off: `<rank> <name…> out` with **3–4** tokens only (e.g. `Commander Worf out`,
+/// `Captain Jean Luc out`). Middle name tokens must be alphabetic — no digits or punctuation —
+/// so stray chatter does not match.
 fn is_starfleet_signoff(normalized: &str) -> bool {
     let toks: Vec<&str> = normalized.split_whitespace().collect();
-    if toks.len() < 3 {
+    if toks.len() < 3 || toks.len() > 4 {
         return false;
     }
     let first = toks.first().copied().unwrap_or("");
     let last = toks.last().copied().unwrap_or("");
-    matches!(first, "commander" | "captain") && last == "out"
+    if !matches!(first, "commander" | "captain") || last != "out" {
+        return false;
+    }
+    toks[1..toks.len() - 1]
+        .iter()
+        .all(|t| !t.is_empty() && t.chars().all(|c| c.is_alphabetic()))
+}
+
+/// Catalog `mcp.json` key for [`crate::modules::tool_engine::service::server_key`] `"pengine/memory"`.
+const PENGINE_MEMORY_SERVER_KEY: &str = "te_pengine-memory";
+
+fn normalize_curly_quotes_and_nfkc(msg: &str) -> String {
+    let s: String = msg.chars().nfkc().collect();
+    s.chars()
+        .map(|c| match c {
+            '\u{2018}' | '\u{2019}' => '\'',
+            '\u{201C}' | '\u{201D}' => '"',
+            c => c,
+        })
+        .collect()
+}
+
+fn is_unicode_or_ascii_trailing_junk(c: char) -> bool {
+    c.is_whitespace()
+        || c.is_ascii_punctuation()
+        || matches!(
+            c,
+            '\u{2018}'
+                | '\u{2019}'
+                | '\u{201C}'
+                | '\u{201D}'
+                | '\u{2026}'
+                | '\u{3002}'
+                | '\u{FF01}'
+                | '\u{FF0C}'
+                | '\u{FF0E}'
+                | '\u{FF1A}'
+                | '\u{FF1B}'
+                | '\u{FF1F}'
+        )
+        || matches!(
+            get_general_category(c),
+            GeneralCategory::DashPunctuation
+                | GeneralCategory::OpenPunctuation
+                | GeneralCategory::ClosePunctuation
+                | GeneralCategory::ConnectorPunctuation
+                | GeneralCategory::OtherPunctuation
+                | GeneralCategory::InitialPunctuation
+                | GeneralCategory::FinalPunctuation
+        )
+}
+
+fn trim_session_message_end(s: &str) -> &str {
+    s.trim_end_matches(is_unicode_or_ascii_trailing_junk)
+}
+
+/// `properties.<array>.items.properties` contains every key in `item_keys` (Knowledge Graph memory tools).
+fn schema_array_items_have_keys(schema: &Value, array_prop: &str, item_keys: &[&str]) -> bool {
+    let Some(props) = schema.get("properties").and_then(|p| p.as_object()) else {
+        return false;
+    };
+    let Some(arr) = props.get(array_prop) else {
+        return false;
+    };
+    let Some(item_props) = arr
+        .get("items")
+        .and_then(|i| i.get("properties"))
+        .and_then(|p| p.as_object())
+    else {
+        return false;
+    };
+    item_keys.iter().all(|k| item_props.contains_key(*k))
+}
+
+fn kg_create_entities_schema_ok(schema: &Value) -> bool {
+    schema_array_items_have_keys(schema, "entities", &["name", "entityType", "observations"])
+}
+
+fn kg_add_observations_schema_ok(schema: &Value) -> bool {
+    schema_array_items_have_keys(schema, "observations", &["entityName", "contents"])
+}
+
+fn knowledge_graph_memory_schemas_match(tools: &[ToolDef]) -> bool {
+    let create = tools.iter().find(|t| t.name == "create_entities");
+    let add_obs = tools.iter().find(|t| t.name == "add_observations");
+    let (Some(c), Some(a)) = (create, add_obs) else {
+        return false;
+    };
+    kg_create_entities_schema_ok(&c.input_schema) && kg_add_observations_schema_ok(&a.input_schema)
 }
 
 /// Abstract command a user message can request of the memory subsystem.
@@ -77,14 +168,14 @@ pub enum SessionCommand {
     DiaryEnd,
 }
 
-/// Match a user message against the session keyword lists. Case-insensitive,
-/// whitespace-trimmed, trailing `.!?,;` stripped. Only exact matches count — casual
-/// substrings like "I want to quit my job" do **not** end the session.
+/// Match a user message against the session keyword lists. Applies Unicode NFKC, maps curly
+/// quotes to ASCII, full Unicode-savvy trailing punctuation trim, then Unicode lowercase. Only
+/// exact matches count — casual substrings like "I want to quit my job" do **not** end the session.
 pub fn detect_session_command(msg: &str) -> Option<SessionCommand> {
-    let normalized = msg
-        .trim()
-        .trim_end_matches(['.', '!', '?', ',', ';'])
-        .to_ascii_lowercase();
+    let normalized = normalize_curly_quotes_and_nfkc(msg);
+    let normalized = normalized.trim();
+    let normalized = trim_session_message_end(normalized);
+    let normalized = normalized.to_lowercase();
     // More specific phrases first (`record end` vs `record`).
     if DIARY_END_PHRASES.iter().any(|p| normalized == *p) {
         return Some(SessionCommand::DiaryEnd);
@@ -110,6 +201,11 @@ pub fn session_entity_name(at: DateTime<Utc>) -> String {
     format!("session-{}", at.format("%Y%m%dT%H%M%SZ"))
 }
 
+/// Build a diary entity name: `diary-YYYYMMDDThhmmssZ`.
+pub fn diary_entity_name(at: DateTime<Utc>) -> String {
+    format!("diary-{}", at.format("%Y%m%dT%H%M%SZ"))
+}
+
 /// Which MCP tool shape backs this provider. One variant per supported memory style.
 /// The agent never inspects this — it's private to the provider impl.
 enum Backend {
@@ -127,12 +223,30 @@ pub struct MemoryProvider {
 }
 
 impl MemoryProvider {
-    /// Find a memory-capable server in the registry. Picks the first match. Returns
-    /// `None` if no connected MCP server exposes a known memory tool shape.
+    /// Find a memory-capable server in the registry.
+    ///
+    /// **Tie-break:** providers are scanned in registry iteration order; the **first** server
+    /// that passes validation is selected. Callers cannot set preference today.
+    ///
+    /// A server is accepted when it advertises `create_entities` and `add_observations` **and**
+    /// either (a) both tools’ JSON `inputSchema`s match the Knowledge Graph memory shape, or
+    /// (b) the server key is the official catalog entry (`te_pengine-memory`).
     pub fn detect(reg: &ToolRegistry) -> Option<Self> {
         for p in reg.providers() {
-            let tools: HashSet<String> = p.tools().into_iter().map(|t| t.name).collect();
-            if tools.contains("create_entities") && tools.contains("add_observations") {
+            let tools_vec = p.tools();
+            let names: HashSet<String> = tools_vec.iter().map(|t| t.name.clone()).collect();
+            if !names.contains("create_entities") || !names.contains("add_observations") {
+                continue;
+            }
+            let schema_ok = knowledge_graph_memory_schemas_match(&tools_vec);
+            let catalog_key = p.server_name() == PENGINE_MEMORY_SERVER_KEY;
+            if schema_ok || catalog_key {
+                log::info!(
+                    "memory: selected MCP provider `{}` (knowledge_graph schema_ok={} catalog_key={})",
+                    p.server_name(),
+                    schema_ok,
+                    catalog_key
+                );
                 return Some(Self {
                     backend: Backend::KnowledgeGraph,
                     provider: p.clone(),
@@ -158,7 +272,21 @@ impl MemoryProvider {
                         "observations": [description],
                     }]
                 });
-                self.provider.call_tool("create_entities", args).await?;
+                match self.provider.call_tool("create_entities", args).await {
+                    Ok(_) => {}
+                    Err(e) => {
+                        let el = e.to_lowercase();
+                        if el.contains("already exists")
+                            || el.contains("already exist")
+                            || el.contains("duplicate")
+                            || el.contains("entity already")
+                            || el.contains("already known")
+                        {
+                            return Ok(());
+                        }
+                        return Err(e);
+                    }
+                }
             }
         }
         Ok(())
@@ -252,6 +380,14 @@ mod tests {
             detect_session_command("commander data out"),
             Some(SessionCommand::End)
         );
+        assert_eq!(
+            detect_session_command("Captain Jean Luc out"),
+            Some(SessionCommand::End)
+        );
+        // Too many tokens — don't fire.
+        assert_eq!(detect_session_command("Captain Jean Luc Picard out"), None);
+        // Middle token with digit — don't fire.
+        assert_eq!(detect_session_command("Captain Picard 2 out"), None);
         // No rank — don't fire.
         assert_eq!(detect_session_command("Kirk out"), None);
     }
@@ -264,6 +400,14 @@ mod tests {
         );
         assert_eq!(
             detect_session_command("captains log"),
+            Some(SessionCommand::Start)
+        );
+        assert_eq!(
+            detect_session_command("Captain\u{2019}s log"),
+            Some(SessionCommand::Start)
+        );
+        assert_eq!(
+            detect_session_command("captain\u{2019}s log\u{2026}"),
             Some(SessionCommand::Start)
         );
     }
@@ -282,5 +426,28 @@ mod tests {
         );
         assert!(a < b);
         assert!(a.starts_with("session-"));
+    }
+
+    #[test]
+    fn diary_entity_name_has_diary_prefix() {
+        let ts = chrono::DateTime::parse_from_rfc3339("2026-04-17T09:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let name = diary_entity_name(ts);
+        assert!(name.starts_with("diary-"));
+        assert!(!name.starts_with("session-"));
+    }
+
+    #[test]
+    fn cjk_trailing_punctuation_stripped() {
+        // Chinese period (U+3002) and fullwidth exclamation (U+FF01)
+        assert_eq!(
+            detect_session_command("record\u{3002}"),
+            Some(SessionCommand::DiaryStart)
+        );
+        assert_eq!(
+            detect_session_command("quit\u{FF01}"),
+            Some(SessionCommand::End)
+        );
     }
 }
