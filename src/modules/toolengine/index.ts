@@ -26,7 +26,6 @@ export type CatalogTool = {
   installed: boolean;
   commands: CatalogToolCommand[];
   private_folder?: PrivateFolderConfig | null;
-  /** Resolved host directory (default under app data or user override). */
   private_host_path?: string | null;
 };
 
@@ -46,8 +45,6 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** Tauri starts the loopback API in a spawned task; the webview may load first. Brief retries avoid a false "offline" flash. */
-/** Same error extraction as the former inline blocks on failed toolengine HTTP calls. */
 async function parseApiError(resp: Response): Promise<string> {
   const raw = await resp.text();
   let message = `Request failed (HTTP ${resp.status})`;
@@ -84,7 +81,6 @@ async function fetchOkWithRetry(
   return null;
 }
 
-/** GET `/v1/toolengine/runtime` — container runtime detection status. */
 export async function fetchRuntimeStatus(timeoutMs = 3000): Promise<RuntimeStatus | null> {
   const resp = await fetchOkWithRetry(
     `${PENGINE_API_BASE}/v1/toolengine/runtime`,
@@ -99,7 +95,6 @@ export async function fetchRuntimeStatus(timeoutMs = 3000): Promise<RuntimeStatu
   }
 }
 
-/** GET `/v1/toolengine/catalog` — full tool catalog with installed flags. */
 export async function fetchToolCatalog(timeoutMs = 5000): Promise<CatalogTool[] | null> {
   const resp = await fetchOkWithRetry(
     `${PENGINE_API_BASE}/v1/toolengine/catalog`,
@@ -115,10 +110,8 @@ export async function fetchToolCatalog(timeoutMs = 5000): Promise<CatalogTool[] 
   }
 }
 
-/** POST `/v1/toolengine/install` — pull + verify a whitelisted container image. */
 export async function installTool(
   toolId: string,
-  /** Large image pulls on slow links can exceed a few minutes. */
   timeoutMs = 900_000,
 ): Promise<{ ok: boolean; error?: string }> {
   const { signal, cleanup } = makeTimeoutSignal(timeoutMs);
@@ -138,7 +131,6 @@ export async function installTool(
   }
 }
 
-/** PUT `/v1/toolengine/private-folder` — set host folder for a tool that declares `private_folder`. */
 export async function putToolPrivateFolder(
   toolId: string,
   path: string,
@@ -161,7 +153,6 @@ export async function putToolPrivateFolder(
   }
 }
 
-/** POST `/v1/toolengine/uninstall` — remove a container image. */
 export async function uninstallTool(
   toolId: string,
   timeoutMs = 120_000,

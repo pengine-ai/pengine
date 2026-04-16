@@ -2969,6 +2969,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
  "teloxide",
+ "tempfile",
  "tokio",
  "tokio-stream",
  "tower-http",

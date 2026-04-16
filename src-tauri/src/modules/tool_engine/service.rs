@@ -9,14 +9,12 @@ use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
-/// Sentinel used in `<bot_id>.<ext>` when no bot is connected yet. The file gets rewritten to
-/// `<bot_id>.<ext>` on the next sync after connect, so this name is only ever live when unused.
+/// Placeholder bot id for private-folder paths until a real session id is synced.
 const BOT_ID_FALLBACK: &str = "default";
 
 const EMBEDDED_CATALOG: &str = include_str!("../../../../tools/mcp-tools.json");
 
-/// Remote registry URL — raw GitHub content. The app fetches this at runtime so
-/// users get new tools / version bumps without waiting for a Pengine app update.
+/// Runtime-fetched catalog (GitHub raw) so tool list updates without an app release.
 const REMOTE_CATALOG_URL: &str =
     "https://raw.githubusercontent.com/pengine-ai/pengine/main/tools/mcp-tools.json";
 
@@ -29,7 +27,7 @@ const TE_PREFIX: &str = "te_";
 /// Server key prefix for custom (developer-added) tool entries.
 const TE_CUSTOM_PREFIX: &str = "te_custom_";
 
-/// Sole MCP root when no shared folders are set yet (standard path in Linux images; no extra image dirs).
+/// In-image workspace stub when no host folders are mounted yet.
 pub const EMPTY_WORKSPACE_CONTAINER_ROOT: &str = "/tmp";
 
 /// Parse and validate a catalog JSON string. Returns `None` if parsing fails
@@ -57,17 +55,30 @@ pub fn load_embedded_catalog() -> Result<ToolCatalog, String> {
         .map_err(|e| format!("parse embedded mcp-tools.json: {e}"))
 }
 
-/// Try repo `tools/mcp-tools.json` before the remote catalog (used by `bun run tauri dev` and
-/// any run where the file exists next to the workspace). Release builds from CI point at paths
-/// that do not exist on end-user machines, so this safely no-ops there.
+/// Local `tools/mcp-tools.json` next to the crate or executable; with `debug_assertions` or
+/// `LOCAL_TOOLS_CATALOG=1`, also walks up to 8 parents from `current_dir` (e.g. `tauri dev`).
 fn try_load_local_tools_catalog() -> Option<ToolCatalog> {
     let mut paths: Vec<PathBuf> = Vec::new();
     paths.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../tools/mcp-tools.json"));
-    if let Ok(mut cwd) = std::env::current_dir() {
-        for _ in 0..8 {
-            paths.push(cwd.join("tools/mcp-tools.json"));
-            if !cwd.pop() {
-                break;
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            paths.push(dir.join("tools/mcp-tools.json"));
+        }
+    }
+    let ancestor_walk = cfg!(debug_assertions)
+        || std::env::var("LOCAL_TOOLS_CATALOG")
+            .map(|v| {
+                let v = v.trim();
+                v.eq_ignore_ascii_case("true") || v == "1"
+            })
+            .unwrap_or(false);
+    if ancestor_walk {
+        if let Ok(mut cwd) = std::env::current_dir() {
+            for _ in 0..8 {
+                paths.push(cwd.join("tools/mcp-tools.json"));
+                if !cwd.pop() {
+                    break;
+                }
             }
         }
     }
@@ -106,8 +117,7 @@ fn try_load_local_tools_catalog() -> Option<ToolCatalog> {
     None
 }
 
-/// Resolve the tool catalog: prefer repo `tools/mcp-tools.json` when present, then remote,
-/// then embedded fallback.
+/// Local file, then remote URL, then embedded `mcp-tools.json`.
 pub async fn load_catalog() -> Result<ToolCatalog, String> {
     if let Some(cat) = try_load_local_tools_catalog() {
         log::info!(
@@ -225,7 +235,7 @@ fn rebuild_installed_catalog_tool_stdio(
     mcp_config_path: &Path,
     prev: &ServerEntry,
     bot_id: Option<&str>,
-) -> Result<ServerEntry, String> {
+) -> Result<Option<ServerEntry>, String> {
     let ServerEntry::Stdio {
         command,
         direct_return,
@@ -233,7 +243,7 @@ fn rebuild_installed_catalog_tool_stdio(
         ..
     } = prev
     else {
-        return Err("internal: expected stdio server entry for tool engine catalog tool".into());
+        return Ok(None);
     };
 
     let pb_buf = if entry.private_folder.is_some() {
@@ -256,13 +266,13 @@ fn rebuild_installed_catalog_tool_stdio(
 
     let args = podman_run_argv_for_tool(entry, host_paths, private_bind.as_ref())?;
 
-    Ok(ServerEntry::Stdio {
+    Ok(Some(ServerEntry::Stdio {
         command: command.clone(),
         args,
         env: HashMap::new(),
         direct_return: *direct_return,
         private_host_path: private_host_path.clone(),
-    })
+    }))
 }
 
 fn sanitize_mount_label(name: &str) -> String {
@@ -335,7 +345,6 @@ pub fn podman_run_argv_for_tool(
         args.push("--read-only".into());
     }
 
-    // Compute the host→container layout once and reuse it for both bind mounts and root args.
     let bind_pairs = if entry.mount_workspace {
         workspace_app_bind_pairs(host_paths)
     } else {
@@ -411,10 +420,7 @@ fn resolve_current_digest(entry: &ToolEntry) -> Result<Option<String>, String> {
     Ok(Some(ver.digest.clone()))
 }
 
-/// The OCI image reference for a tool entry.
-///
-/// - **Production** (real digest): `ghcr.io/pengine-ai/pengine-file-manager@sha256:abc123…`
-/// - **Dev** (placeholder digest): `ghcr.io/pengine-ai/pengine-file-manager:0.1.0` (tagged)
+/// `image@digest` when pinned, else `image:current_version` (dev / placeholder digest).
 fn image_reference(entry: &ToolEntry) -> Result<String, String> {
     match resolve_current_digest(entry)? {
         Some(digest) => Ok(format!("{}@{}", entry.image, digest)),
@@ -436,9 +442,7 @@ async fn image_present(runtime: &RuntimeInfo, image: &str) -> bool {
 /// A callback for streaming log lines during long-running operations.
 pub type LogFn = Box<dyn Fn(&str) + Send + Sync>;
 
-/// Ensure the tool image is available locally. Tries to pull from the registry first;
-/// if the image is already present (e.g. from a local `podman build`), uses it directly.
-/// All log lines are prefixed with `[tool_id]` so the frontend can filter by tool.
+/// Pull if missing; accept a local image when the digest is not pinned. Logs are prefixed with `[tool_id]`.
 async fn ensure_tool_image(
     runtime: &RuntimeInfo,
     entry: &ToolEntry,
@@ -461,9 +465,6 @@ async fn ensure_tool_image(
     match run_streaming_tagged(cmd, log, &tag).await {
         Ok(()) => {}
         Err(e) => {
-            // If using a tag (dev mode, no pinned digest), the pull failure is expected
-            // when the image hasn't been published yet. Check if it appeared locally
-            // (e.g. concurrent build, or tag resolves to a local image).
             if !pinned && image_present(runtime, &image_ref).await {
                 log(&format!("{tag} pull failed but image found locally"));
                 return Ok(());
@@ -477,7 +478,6 @@ async fn ensure_tool_image(
         }
     }
 
-    // Verify image is now present after pull.
     if !image_present(runtime, &image_ref).await {
         return Err(format!(
             "pull completed but `{}` is not visible to `{}`",
@@ -545,13 +545,8 @@ pub fn installed_tool_ids(mcp_config_path: &Path) -> Vec<String> {
         .collect()
 }
 
-/// Rewrite every **installed** catalog tool that uses `mount_workspace` so argv matches `host_paths`
-/// (empty list → in-image stub root only). Returns whether `mcp.json` should be saved.
-///
-/// Pass the catalog from [`load_catalog`] (or tests) so callers can fetch **before** holding
-/// `mcp_config_mutex`, avoiding network I/O under that lock.
-///
-/// `mcp_config_path` and `bot_id` refresh `private_folder` bind mounts and per-bot env paths.
+/// Refresh installed catalog stdio argv for `host_paths` / private-folder env. Returns whether to save `mcp.json`.
+/// Callers should pass a catalog from [`load_catalog`] before taking `mcp_config_mutex` to avoid I/O under the lock.
 pub fn sync_workspace_mounted_tools_for_catalog(
     cfg: &mut McpConfig,
     host_paths: &[String],
@@ -567,8 +562,15 @@ pub fn sync_workspace_mounted_tools_for_catalog(
             continue;
         };
 
-        let new_entry =
-            rebuild_installed_catalog_tool_stdio(entry, host_paths, mcp_config_path, prev, bid)?;
+        let Some(new_entry) =
+            rebuild_installed_catalog_tool_stdio(entry, host_paths, mcp_config_path, prev, bid)?
+        else {
+            log::warn!(
+                "sync_workspace_mounted_tools_for_catalog: skip server {key} (tool {}): mcp.json entry is not stdio; expected te_ catalog stdio",
+                entry.id
+            );
+            continue;
+        };
 
         if !catalog_tool_stdio_eq(prev, &new_entry) {
             cfg.servers.insert(key, new_entry);
@@ -578,7 +580,7 @@ pub fn sync_workspace_mounted_tools_for_catalog(
     Ok(changed)
 }
 
-/// Pull a whitelisted container image by digest and register it as an MCP stdio server in `mcp.json`.
+/// Pull (if needed) and append a catalog tool as an MCP stdio server in `mcp.json`.
 pub async fn install_tool(
     tool_id: &str,
     runtime: &RuntimeInfo,
@@ -631,10 +633,7 @@ pub async fn install_tool(
     Ok(())
 }
 
-/// Install every catalog tool that is not already installed (same scope as [`installed_tool_ids`]).
-///
-/// Runs [`install_tool`] for each missing id (pull + `mcp.json` update per tool). Does **not** rebuild
-/// the MCP registry; callers should run a single registry rebuild after this returns.
+/// [`install_tool`] for each id not in [`installed_tool_ids`]. Does not rebuild the MCP registry.
 pub async fn install_all_catalog_tools(
     runtime: &RuntimeInfo,
     mcp_config_path: &Path,
@@ -692,24 +691,19 @@ pub async fn install_all_catalog_tools(
     Ok(msg)
 }
 
-/// Remove an MCP Tool Engine entry from `mcp.json` and remove the container image.
+/// Drop the server entry from `mcp.json` and `rmi` the image ref stored in that argv.
 pub async fn uninstall_tool(
     tool_id: &str,
     runtime: &RuntimeInfo,
     mcp_config_path: &Path,
     mcp_cfg_lock: &tokio::sync::Mutex<()>,
 ) -> Result<(), String> {
-    // Read the installed image ref from mcp.json before removing the entry, so we
-    // remove the image that was actually pulled — not whatever the catalog currently
-    // resolves to (which may have been updated since install).
     let key = server_key(tool_id);
     let mut installed_image_ref: Option<String> = None;
     if mcp_config_path.exists() {
         let _cfg_guard = mcp_cfg_lock.lock().await;
         let mut cfg = mcp_service::read_config(mcp_config_path)?;
         if let Some(ServerEntry::Stdio { args, .. }) = cfg.servers.get(&key) {
-            // In the podman run argv the image ref is the first non-flag token
-            // after "run" (flags start with `-`; "run" itself is skipped).
             installed_image_ref = args
                 .iter()
                 .skip_while(|a| *a == "run")
@@ -720,7 +714,6 @@ pub async fn uninstall_tool(
         mcp_service::save_config(mcp_config_path, &cfg)?;
     }
 
-    // Remove the container image — prefer the ref from the installed entry.
     let image_ref = match installed_image_ref {
         Some(r) => Some(r),
         None => load_catalog()
@@ -739,10 +732,7 @@ pub async fn uninstall_tool(
     Ok(())
 }
 
-/// Uninstall every installed Tool Engine catalog tool (same scope as [`installed_tool_ids`]).
-///
-/// Does **not** rebuild the MCP registry; callers should run a single registry rebuild after this
-/// returns successfully (including partial success when some tools were removed).
+/// [`uninstall_tool`] for each [`installed_tool_ids`] entry. Does not rebuild the MCP registry.
 pub async fn uninstall_all_catalog_tools(
     runtime: &RuntimeInfo,
     mcp_config_path: &Path,
@@ -783,8 +773,6 @@ pub async fn uninstall_all_catalog_tools(
     }
     Ok(msg)
 }
-
-// ── Custom tools (developer-added Docker images, local only) ──────────
 
 /// Server key for a custom tool entry in `mcp.json`.
 fn custom_server_key(key: &str) -> String {
@@ -839,8 +827,7 @@ pub fn list_custom_tools(mcp_config_path: &Path) -> Vec<CustomToolEntry> {
         .unwrap_or_default()
 }
 
-/// Add a custom Docker image as an MCP tool. Pulls the image, registers it in `mcp.json`,
-/// and stores the entry in `custom_tools` so the dashboard can list it.
+/// Pull, append `custom_tools`, and register a stdio server in `mcp.json`.
 pub async fn add_custom_tool(
     entry: CustomToolEntry,
     runtime: &RuntimeInfo,
@@ -850,14 +837,12 @@ pub async fn add_custom_tool(
 ) -> Result<(), String> {
     let tag = format!("[custom/{}]", entry.key);
 
-    // Pull the image (no digest pinning for custom tools — developer controls the tag).
     log(&format!("{tag} pulling {}…", entry.image));
     let mut cmd = tokio::process::Command::new(&runtime.binary);
     cmd.args(["pull", &entry.image]);
     match run_streaming_tagged(cmd, log, &tag).await {
         Ok(()) => log(&format!("{tag} image pulled")),
         Err(e) => {
-            // Check if the image is already present locally (e.g. local build).
             if image_present(runtime, &entry.image).await {
                 log(&format!("{tag} pull failed but image found locally"));
             } else {
@@ -870,7 +855,6 @@ pub async fn add_custom_tool(
     let mut cfg = mcp_service::load_or_init_config(mcp_config_path)?;
     let host_paths = mcp_service::filesystem_allowed_paths(&cfg);
 
-    // Prevent duplicate keys.
     if cfg.custom_tools.iter().any(|t| t.key == entry.key) {
         return Err(format!("custom tool '{}' already exists", entry.key));
     }
@@ -910,7 +894,6 @@ pub async fn remove_custom_tool(
     cfg.servers.remove(&custom_server_key(key));
     mcp_service::save_config(mcp_config_path, &cfg)?;
 
-    // Best-effort image removal.
     let _ = tokio::process::Command::new(&runtime.binary)
         .args(["rmi", &removed.image])
         .output()
@@ -956,6 +939,7 @@ pub fn sync_custom_tools_if_installed(cfg: &mut McpConfig, host_paths: &[String]
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn workspace_app_layout() {
@@ -1049,23 +1033,23 @@ mod tests {
         assert_eq!(pf.container_path, "/mcp/data");
         assert_eq!(pf.file_env_var, "MEMORY_FILE_PATH");
 
-        let tmp = std::env::temp_dir().join("pengine-mem-test-data");
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = tempdir().expect("tempdir");
         let pb = PrivateBind {
-            host_path: tmp.as_path(),
+            host_path: tmp.path(),
             config: pf,
             bot_id: "12345",
         };
         let argv = podman_run_argv_for_tool(mem, &[], Some(&pb)).expect("argv");
 
-        let want_mount = format!("-v={}:/mcp/data:rw", tmp.to_str().expect("utf8 tmp path"));
+        let want_mount = format!(
+            "-v={}:/mcp/data:rw",
+            tmp.path().to_str().expect("utf8 tmp path")
+        );
         assert!(
             argv.iter().any(|a| a == &want_mount),
             "missing mount: argv={argv:?}"
         );
 
-        // Container env must be passed as `-e` argv — not host env, which podman does not forward.
         let want_env = "--env=MEMORY_FILE_PATH=/mcp/data/12345.json".to_string();
         assert!(
             argv.iter().any(|a| a == &want_env),
