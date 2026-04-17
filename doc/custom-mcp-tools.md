@@ -121,6 +121,8 @@ Content-Type: application/json
 | `append_workspace_roots` | If true, append container paths (`/app/...`) to the argv (for servers that expect roots as trailing args). |
 | `direct_return` | If true, tool results go straight to the user without a second model pass. |
 
+**Bundled catalog (`tools/mcp-tools.json`):** the Fetch entry uses `ignore_robots_txt` (default `false`) so robots.txt is honored unless you opt in. Setting it to `true` appends `--ignore-robots-txt` for that tool. The `robots_ignore_allowlist` field is reserved for future per-host behavior and is informational today.
+
 Set **`workspace_roots`** (dashboard: File Manager / filesystem folders, or **`PUT /v1/mcp/filesystem`**) before relying on mounts.
 
 **Remove:**

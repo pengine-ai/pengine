@@ -768,6 +768,8 @@ async fn handle_toolengine_catalog(
                 "commands": commands,
                 "private_folder": private_folder_json,
                 "private_host_path": private_host_resolved,
+                "ignore_robots_txt": t.ignore_robots_txt,
+                "robots_ignore_allowlist": t.robots_ignore_allowlist,
             })
         })
         .collect();
@@ -1298,8 +1300,18 @@ async fn handle_skills_delete(
     State(state): State<AppState>,
     Path(slug): Path<String>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ErrorResponse>)> {
-    skills_service::delete_custom_skill(&state.store_path, &slug)
-        .map_err(|e| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })))?;
+    skills_service::delete_custom_skill(&state.store_path, &slug).map_err(|e| {
+        if e.contains("custom skill '") && e.contains("' not found") {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "skill not found".into(),
+                }),
+            )
+        } else {
+            (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e }))
+        }
+    })?;
     state
         .emit_log("skills", &format!("custom skill '{slug}' removed"))
         .await;
@@ -1337,6 +1349,17 @@ async fn handle_skills_set_enabled(
     Path(slug): Path<String>,
     Json(body): Json<SetSkillEnabledBody>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ErrorResponse>)> {
+    let known = skills_service::list_skills(&state.store_path)
+        .iter()
+        .any(|s| s.slug == slug);
+    if !known {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "skill not found".into(),
+            }),
+        ));
+    }
     skills_service::set_skill_enabled(&state.store_path, &slug, body.enabled)
         .map_err(|e| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })))?;
     state

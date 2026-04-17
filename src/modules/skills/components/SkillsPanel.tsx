@@ -167,7 +167,16 @@ export function SkillsPanel() {
           </button>
           <button
             type="button"
-            onClick={() => setShowAdd((v) => !v)}
+            onClick={() => {
+              setShowAdd((v) => {
+                if (v) {
+                  setAddError(null);
+                  setNewSlug("");
+                  setNewMarkdown(TEMPLATE);
+                }
+                return !v;
+              });
+            }}
             className="rounded-lg border border-emerald-300/20 bg-emerald-300/10 px-3 py-1 font-mono text-[11px] text-emerald-300 transition hover:bg-emerald-300/20"
           >
             {showAdd ? "Cancel" : "Add custom skill"}

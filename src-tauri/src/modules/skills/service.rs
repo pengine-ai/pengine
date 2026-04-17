@@ -57,9 +57,16 @@ fn read_disabled_set(store_path: &Path) -> HashSet<String> {
     let Ok(raw) = std::fs::read_to_string(&path) else {
         return HashSet::new();
     };
-    serde_json::from_str::<Vec<String>>(&raw)
-        .map(|v| v.into_iter().collect())
-        .unwrap_or_default()
+    match serde_json::from_str::<Vec<String>>(&raw) {
+        Ok(v) => v.into_iter().collect(),
+        Err(e) => {
+            log::warn!(
+                "invalid JSON in {} — treating as no disabled skills: {e}",
+                path.display()
+            );
+            HashSet::new()
+        }
+    }
 }
 
 fn write_disabled_set(store_path: &Path, set: &HashSet<String>) -> Result<(), String> {
@@ -86,21 +93,11 @@ pub fn set_skill_enabled(store_path: &Path, slug: &str, enabled: bool) -> Result
 
 /// Per-skill body cap in the system-prompt hint. Keeps the prompt short so local
 /// models re-read it cheaply on each turn. Skills needing more detail should
-/// front-load the critical URL/recipe in the first ~1600 chars (weather: wttr fast path + Open-Meteo fallback).
-const SKILL_HINT_BODY_CAP: usize = 1600;
+/// front-load the critical URL/recipe in the first ~1600 chars; use `mandatory.md` for rules that must not truncate away.
+pub const SKILL_HINT_BODY_CAP: usize = 1600;
 
-/// Injected when `weather` is enabled. Duplicates the README “fast path” so models still see it if the skill body truncates.
-const WEATHER_SKILL_MANDATORY_HINT: &str = "\n\n**MANDATORY for skill:weather:** \
-**One fetch first:** `https://wttr.in/PLACE?T&m` (spaces → `+`, e.g. `Breitenau+am+Hochlantsch`). \
-If the body is a normal multi-day forecast, **answer and stop** — do not call Open-Meteo in the same run. \
-**Open-Meteo** only if wttr fails or raw JSON is needed: \
-(1) `https://geocoding-api.open-meteo.com/v1/search?name=…&count=10`; \
-(2) if `results` is missing or empty, **one** retry with shorter `name` + `countryCode` \
-(e.g. `https://geocoding-api.open-meteo.com/v1/search?name=Breitenau&countryCode=AT&count=10` for “Breitenau am Hochlantsch”) \
-and pick the row whose `admin3`/`admin2`/`admin1` matches the user phrase; \
-(3) `https://api.open-meteo.com/v1/forecast?latitude=…&longitude=…&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max,weathercode&forecast_days=7&timezone=auto`. \
-Never claim the place was not found after a single geocode on compound EU names. \
-Reply per **How to answer**: plain language; no coordinates or WMO codes unless the user asked for technical detail.";
+/// Hard cap for the full skills fragment (intro + every enabled skill body + mandatory snippets).
+pub const MAX_TOTAL_SKILL_HINT_BYTES: usize = SKILL_HINT_BODY_CAP * 8;
 
 const SKILL_HINT_INTRO: &str =
     "\n\nAvailable skills. Follow each skill's recipe exactly — it tells you \
@@ -131,11 +128,23 @@ pub fn skills_prompt_hint(store_path: &Path) -> String {
             name = s.name,
             desc = s.description,
         ));
-    }
-    if skills.iter().any(|s| s.slug == "weather") {
-        out.push_str(WEATHER_SKILL_MANDATORY_HINT);
+        if let Some(m) = &s.mandatory_hint {
+            let m = m.trim();
+            if !m.is_empty() {
+                out.push_str("\n\n");
+                out.push_str(m);
+            }
+        }
     }
     out
+}
+
+/// If the skills hint exceeds `max` bytes, truncate with the same rules as per-skill bodies.
+pub fn limit_skills_hint_bytes(s: String, max: usize) -> (String, bool) {
+    if s.len() <= max {
+        return (s, false);
+    }
+    (truncate_for_prompt(&s, max), true)
 }
 
 /// Truncate on a char boundary and append an ellipsis marker if we cut.
@@ -212,7 +221,14 @@ fn read_dir_skills(dir: &Path, origin: SkillOrigin) -> Vec<Skill> {
             },
         };
         match parse_skill(&slug, &raw, origin) {
-            Ok(s) => skills.push(s),
+            Ok(mut s) => {
+                let mandatory_path = path.join("mandatory.md");
+                s.mandatory_hint = std::fs::read_to_string(&mandatory_path)
+                    .ok()
+                    .map(|t| t.trim().to_string())
+                    .filter(|t| !t.is_empty());
+                skills.push(s);
+            }
             Err(e) => log::warn!("skipping skill {}: {e}", readme.display()),
         }
     }
@@ -251,6 +267,7 @@ pub fn parse_skill(slug: &str, raw: &str, origin: SkillOrigin) -> Result<Skill, 
         license: fields.get("license").cloned(),
         requires: fields.get_list("requires"),
         origin,
+        mandatory_hint: None,
         enabled: true,
         body: body.trim_start_matches(['\n', '\r']).to_string(),
     })
@@ -449,19 +466,29 @@ fn extract_skill_md(zip_bytes: &[u8]) -> Result<String, String> {
     let mut archive =
         ZipArchive::new(Cursor::new(zip_bytes)).map_err(|e| format!("invalid zip archive: {e}"))?;
 
-    for i in 0..archive.len() {
+    let entry_count = archive.len();
+    for i in 0..entry_count {
         let mut file = archive
             .by_index(i)
-            .map_err(|e| format!("zip entry {i}: {e}"))?;
+            .map_err(|e| format!("zip open entry index {i} (of {entry_count}): {e}"))?;
         let name = file.name().to_string();
         let basename = name.rsplit('/').next().unwrap_or(&name);
         if basename.eq_ignore_ascii_case("SKILL.md") {
+            let ctx = format!(
+                "SKILL.md (zip index {i}, path {name:?}, compression {:?}, encrypted {})",
+                file.compression(),
+                file.encrypted()
+            );
             if file.size() > MAX_README_BYTES as u64 {
-                return Err(format!("SKILL.md exceeds {MAX_README_BYTES} byte limit"));
+                return Err(format!("{ctx}: exceeds {MAX_README_BYTES} byte limit"));
             }
             let mut buf = String::new();
-            file.read_to_string(&mut buf)
-                .map_err(|e| format!("read SKILL.md: {e}"))?;
+            file.read_to_string(&mut buf).map_err(|e| {
+                format!(
+                    "{ctx}: read/decompress failed — {e}. \
+This build only supports deflate/store zip entries; re-export the archive or enable the matching `zip` crate feature."
+                )
+            })?;
             return Ok(buf);
         }
     }
@@ -554,20 +581,25 @@ mod tests {
     }
 
     #[test]
-    fn weather_skill_appends_mandatory_wttr_then_geocode_hint() {
+    fn weather_skill_appends_mandatory_from_mandatory_md() {
         let tmp = tempdir().unwrap();
         let fake_store = tmp.path().join("connection.json");
         let weather_md = "---\nname: weather\ndescription: test\ntags: []\n---\n\n# x\n";
         write_custom_skill(&fake_store, "weather", weather_md).unwrap();
+        let mandatory = "**MANDATORY for skill:weather:** use wttr.in; Open-Meteo retry with countryCode; see How to answer.\n";
+        std::fs::write(
+            custom_skills_dir(&fake_store)
+                .join("weather")
+                .join("mandatory.md"),
+            mandatory,
+        )
+        .unwrap();
         let hint = skills_prompt_hint(&fake_store);
         assert!(
             hint.contains("MANDATORY for skill:weather"),
             "expected mandatory block in:\n{hint}"
         );
-        assert!(
-            hint.contains("wttr.in"),
-            "expected wttr fast path in:\n{hint}"
-        );
+        assert!(hint.contains("wttr.in"), "expected wttr in:\n{hint}");
         assert!(hint.contains("countryCode"), "hint={hint}");
         assert!(
             hint.contains("How to answer"),

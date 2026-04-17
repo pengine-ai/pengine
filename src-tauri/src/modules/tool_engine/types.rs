@@ -78,6 +78,12 @@ pub struct ToolEntry {
     /// Extra argv after the image (before auto-appended root paths). Often empty when the image ENTRYPOINT runs MCP.
     #[serde(default)]
     pub mcp_server_cmd: Vec<String>,
+    /// When true, append `--ignore-robots-txt` after `mcp_server_cmd` (Fetch MCP). Default false — robots.txt is honored unless opted in here or via `mcp_server_cmd`.
+    #[serde(default)]
+    pub ignore_robots_txt: bool,
+    /// Reserved for future host-scoped robots / fetch policy (not enforced by the container today). Documented in the catalog for visibility.
+    #[serde(default)]
+    pub robots_ignore_allowlist: Vec<String>,
     /// When true, add `--read-only` to the container run (rootfs).
     #[serde(default = "default_true")]
     pub container_read_only_rootfs: bool,

@@ -20,14 +20,16 @@ They stay cheap on tokens because the content is hand-written for the task, not 
 
 ## Folder layout
 
-```
+```text
 tools/skills/              # bundled with the app (read-only examples)
   weather/
     README.md
+    mandatory.md           # optional; extra rules appended to the agent hint (not shown in UI)
 
 $APP_DATA/skills/          # user-editable; ClawHub installs land here too
   <slug>/
     README.md
+    mandatory.md           # optional
 ```
 
 One folder per skill. One `README.md` per folder. That's it.

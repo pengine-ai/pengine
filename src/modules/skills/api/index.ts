@@ -19,7 +19,7 @@ async function parseApiError(resp: Response): Promise<string> {
   const raw = await resp.text();
   try {
     const body = JSON.parse(raw) as { error?: string };
-    return body.error ?? raw.trim() ?? `HTTP ${resp.status}`;
+    return body.error?.trim() || raw.trim() || `HTTP ${resp.status}`;
   } catch {
     return raw.trim() || `HTTP ${resp.status}`;
   }

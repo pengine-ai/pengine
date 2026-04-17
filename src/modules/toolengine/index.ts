@@ -27,6 +27,10 @@ export type CatalogTool = {
   commands: CatalogToolCommand[];
   private_folder?: PrivateFolderConfig | null;
   private_host_path?: string | null;
+  /** When true, the runtime adds `--ignore-robots-txt` for this catalog tool (Fetch). Default false in catalog. */
+  ignore_robots_txt?: boolean;
+  /** Reserved for future per-host policy; informational in the UI today. */
+  robots_ignore_allowlist?: string[];
 };
 
 function makeTimeoutSignal(timeoutMs: number): { signal: AbortSignal; cleanup: () => void } {
@@ -50,7 +54,7 @@ async function parseApiError(resp: Response): Promise<string> {
   let message = `Request failed (HTTP ${resp.status})`;
   try {
     const body = JSON.parse(raw) as { error?: string };
-    message = body.error ?? raw.trim();
+    message = body.error?.trim() || raw.trim();
   } catch {
     message = raw.trim() || message;
   }

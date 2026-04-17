@@ -377,6 +377,9 @@ pub fn podman_run_argv_for_tool(
 
     args.push(image_ref);
     args.extend(entry.mcp_server_cmd.iter().cloned());
+    if entry.ignore_robots_txt {
+        args.push("--ignore-robots-txt".into());
+    }
 
     if entry.append_workspace_roots {
         if bind_pairs.is_empty() {

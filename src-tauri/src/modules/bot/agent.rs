@@ -339,7 +339,21 @@ async fn run_model_turn(state: &AppState, user_message: &str) -> Result<TurnResu
         } else {
             String::new()
         };
-        let skills_hint = skills::skills_prompt_hint(&state.store_path);
+        let skills_raw = skills::skills_prompt_hint(&state.store_path);
+        let (skills_hint, skills_truncated) =
+            skills::limit_skills_hint_bytes(skills_raw, skills::MAX_TOTAL_SKILL_HINT_BYTES);
+        if skills_truncated {
+            state
+                .emit_log(
+                    "run",
+                    &format!(
+                        "skills hint truncated to {} bytes (cap {})",
+                        skills_hint.len(),
+                        skills::MAX_TOTAL_SKILL_HINT_BYTES
+                    ),
+                )
+                .await;
+        }
         format!(
             "Helpful assistant with tools. Call a tool ONLY when you need external data. \
              After tool results, answer immediately. Be concise.{fs_hint}{mem_hint}{skills_hint}"

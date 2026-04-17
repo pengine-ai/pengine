@@ -281,6 +281,17 @@ export function ToolEnginePanel() {
                   <p className="mt-1 text-[11px] leading-snug text-(--mid) sm:text-xs">
                     {tool.description}
                   </p>
+                  {tool.id === "pengine/fetch" && (
+                    <p className="mt-1 font-mono text-[10px] leading-snug text-(--mid)">
+                      robots.txt:{" "}
+                      {tool.ignore_robots_txt
+                        ? "ignored for this install (opt-in)"
+                        : "enforced — set catalog ignore_robots_txt or mcp_server_cmd only if you accept bypassing robots for all fetched URLs"}
+                      {tool.robots_ignore_allowlist && tool.robots_ignore_allowlist.length > 0
+                        ? ` · allowlist (informational): ${tool.robots_ignore_allowlist.join(", ")}`
+                        : ""}
+                    </p>
+                  )}
                 </div>
 
                 <button

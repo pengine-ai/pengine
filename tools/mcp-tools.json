@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_at": "2026-04-14T00:00:00Z",
-  "catalog_revision": 5,
+  "catalog_revision": 6,
   "valid_until": "2026-05-14T00:00:00Z",
   "minimum_pengine_version": "0.5.0",
   "tools": [
@@ -55,7 +55,7 @@
     {
       "id": "pengine/fetch",
       "name": "Fetch",
-      "description": "Official MCP fetch server: download URLs and return markdown-friendly content for the model. Runs with --ignore-robots-txt so public APIs (e.g. Open-Meteo) are not blocked for autonomous tool calls.",
+      "description": "Official MCP fetch server: fetches URLs and returns markdown-friendly content. By default the server respects robots.txt. To opt in for this install, set catalog field ignore_robots_txt to true (appends --ignore-robots-txt) or add that flag under mcp_server_cmd in advanced config — only if you accept bypassing robots for all fetched hosts. The robots_ignore_allowlist field is reserved for future per-host policy and is currently informational.",
       "image": "ghcr.io/pengine-ai/pengine-fetch",
       "current": "0.1.0",
       "versions": [
@@ -78,7 +78,9 @@
         "package": "mcp-server-fetch",
         "version": "2025.4.7"
       },
-      "mcp_server_cmd": ["--ignore-robots-txt"],
+      "mcp_server_cmd": [],
+      "ignore_robots_txt": false,
+      "robots_ignore_allowlist": [],
       "commands": [
         { "name": "fetch", "description": "Fetch a URL and return extracted content (markdown by default)" }
       ],

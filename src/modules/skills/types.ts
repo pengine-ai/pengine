@@ -20,6 +20,6 @@ export type ClawHubSkill = {
   slug: string;
   displayName: string;
   summary: string;
-  version?: string | null;
+  version?: string;
   updatedAt?: number;
 };

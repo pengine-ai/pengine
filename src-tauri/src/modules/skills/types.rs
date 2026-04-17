@@ -1,11 +1,12 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum SkillOrigin {
     /// Shipped with the app under `tools/skills/`. Read-only from the app.
     Bundled,
     /// Lives under `$APP_DATA/skills/`. Editable by the user.
+    #[default]
     Custom,
 }
 
@@ -29,7 +30,11 @@ pub struct Skill {
     pub license: Option<String>,
     #[serde(default)]
     pub requires: Vec<String>,
+    #[serde(default)]
     pub origin: SkillOrigin,
+    /// Optional extra rules from `mandatory.md` next to README (server-only; not serialized to clients).
+    #[serde(skip)]
+    pub mandatory_hint: Option<String>,
     /// Whether the agent should see this skill. Controlled per-slug in the UI.
     #[serde(default = "default_true")]
     pub enabled: bool,
