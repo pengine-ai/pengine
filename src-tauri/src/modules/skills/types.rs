@@ -10,7 +10,7 @@ pub enum SkillOrigin {
     Custom,
 }
 
-/// A skill is a folder with a `README.md` whose YAML frontmatter declares the
+/// A skill is a folder with a `SKILL.md` whose YAML frontmatter declares the
 /// fields below. The markdown body after the frontmatter is passed to the agent
 /// as context — see `doc/skills.md`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,7 +32,7 @@ pub struct Skill {
     pub requires: Vec<String>,
     #[serde(default)]
     pub origin: SkillOrigin,
-    /// Optional extra rules from `mandatory.md` next to README (server-only; not serialized to clients).
+    /// Optional extra rules from `mandatory.md` next to `SKILL.md` (server-only; not serialized to clients).
     #[serde(skip)]
     pub mandatory_hint: Option<String>,
     /// Whether the agent should see this skill. Controlled per-slug in the UI.

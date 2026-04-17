@@ -12,7 +12,10 @@ use chrono::Utc;
 use serde_json::json;
 use std::time::{Duration, Instant};
 
-const MAX_STEPS: usize = 3;
+/// Tool rounds + at least one completion-only step. Research flows (sitemap + several
+/// `fetch` calls) otherwise exhaust the loop and fall through to summarize, which
+/// used to drop URLs and paraphrase loosely.
+const MAX_STEPS: usize = 6;
 
 /// After tool results (agent step ≥1), cap completion tokens. The model should
 /// put the user-visible answer in `<pengine_reply>` (see system prompt); this
@@ -24,6 +27,17 @@ const POST_TOOL_TEMPERATURE: f32 = 0.35;
 /// Fallback summarize pass when the tool loop exits without a user-visible reply.
 const SUMMARY_NUM_PREDICT: u32 = 768;
 const SUMMARY_TEMPERATURE: f32 = 0.3;
+
+const SUMMARY_SYSTEM_PROMPT: &str = "You synthesize tool results for the user. Rules:\n\
+\n\
+1) Use ONLY the text in the user message's Data section (tool outputs). Do not add facts, legal claims, or country-specific rules that are not clearly supported there.\n\
+2) If the Data is insufficient, say so briefly and list what is missing — do not invent answers.\n\
+3) Language: match the user's question where possible.\n\
+4) After the substantive answer, add a final section **Quellen** with a bullet list of every relevant full URL:\n\
+   - Copy URLs exactly as they appear in the Data (fetch bodies, HTML links, or Location lines).\n\
+   - If the Data shows only page text without URLs, write one bullet per tool block naming the fetch target if it appears in the `--- fetch ---` headers or quoted links in the excerpt.\n\
+   - Never omit **Quellen** when the Data came from web fetches.\n\
+5) Keep the body concise but do not drop **Quellen** to save space.";
 
 fn chat_options_for_agent_step(step: usize, user_wants_think: bool) -> ChatOptions {
     if step == 0 {
@@ -728,7 +742,7 @@ async fn run_model_turn(
         }
 
         let summary_messages = json!([
-            { "role": "system", "content": "Answer using ONLY the data below. Be concise." },
+            { "role": "system", "content": SUMMARY_SYSTEM_PROMPT },
             { "role": "user", "content": format!("{user_message}\n\nData:\n{data}") }
         ]);
 

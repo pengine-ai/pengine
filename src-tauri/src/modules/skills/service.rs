@@ -20,8 +20,8 @@ const CLAWHUB_OPENCLAW_PREFIX: &str = "https://clawhub.ai/openclaw";
 const CLAWHUB_TIMEOUT: Duration = Duration::from_secs(10);
 const CLAWHUB_OPENCLAW_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Max README size we are willing to fetch/write (skills are small by design).
-const MAX_README_BYTES: usize = 256 * 1024;
+/// Max SKILL.md size we are willing to fetch/write (skills are small by design).
+const MAX_SKILL_MD_BYTES: usize = 256 * 1024;
 /// Max zip size to accept from ClawHub before extracting.
 const MAX_ZIP_BYTES: usize = 1024 * 1024;
 
@@ -103,7 +103,7 @@ pub fn set_skill_enabled(store_path: &Path, slug: &str, enabled: bool) -> Result
 
 /// Per-skill body cap in the system-prompt hint. Keeps the prompt short so local
 /// models re-read it cheaply on each turn. Skills needing more detail should
-/// front-load the critical URL/recipe in the first ~1000 chars; use `mandatory.md` for rules that must not truncate away.
+/// front-load the critical URL/recipe in the first ~1000 chars; use `mandatory.md` beside `SKILL.md` for rules that must not truncate away.
 pub const SKILL_HINT_BODY_CAP: usize = 1000;
 
 /// Hard cap for the full skills fragment (intro + every enabled skill body + mandatory snippets).
@@ -218,13 +218,9 @@ fn read_dir_skills(dir: &Path, origin: SkillOrigin) -> Vec<Skill> {
         if slug.starts_with('.') {
             continue;
         }
-        let readme = path.join("README.md");
-        let raw = match std::fs::read_to_string(&readme) {
-            Ok(s) => s,
-            Err(_) => match std::fs::read_to_string(path.join("SKILL.md")) {
-                Ok(s) => s,
-                Err(_) => continue,
-            },
+        let skill_md = path.join("SKILL.md");
+        let Ok(raw) = std::fs::read_to_string(&skill_md) else {
+            continue;
         };
         match parse_skill(&slug, &raw, origin) {
             Ok(mut s) => {
@@ -235,13 +231,13 @@ fn read_dir_skills(dir: &Path, origin: SkillOrigin) -> Vec<Skill> {
                     .filter(|t| !t.is_empty());
                 skills.push(s);
             }
-            Err(e) => log::warn!("skipping skill {}: {e}", readme.display()),
+            Err(e) => log::warn!("skipping skill {}: {e}", skill_md.display()),
         }
     }
     skills
 }
 
-/// Parse a skill README. Frontmatter is the `---`-delimited YAML-ish block at the top.
+/// Parse a skill’s `SKILL.md`. Frontmatter is the `---`-delimited YAML-ish block at the top.
 /// The parser is deliberately tiny — scalars, quoted strings, and inline `[a, b]` arrays only.
 pub fn parse_skill(slug: &str, raw: &str, origin: SkillOrigin) -> Result<Skill, String> {
     let (fm, body) = split_frontmatter(raw).ok_or("missing frontmatter block")?;
@@ -371,11 +367,14 @@ fn validate_slug(slug: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Create or overwrite a custom skill from its full README markdown.
+/// Create or overwrite a custom skill from its full `SKILL.md` markdown.
 pub fn write_custom_skill(store_path: &Path, slug: &str, markdown: &str) -> Result<Skill, String> {
     validate_slug(slug)?;
-    if markdown.len() > MAX_README_BYTES {
-        return Err(format!("README exceeds {} byte limit", MAX_README_BYTES));
+    if markdown.len() > MAX_SKILL_MD_BYTES {
+        return Err(format!(
+            "SKILL.md exceeds {} byte limit",
+            MAX_SKILL_MD_BYTES
+        ));
     }
 
     let skill = parse_skill(slug, markdown, SkillOrigin::Custom)
@@ -383,7 +382,7 @@ pub fn write_custom_skill(store_path: &Path, slug: &str, markdown: &str) -> Resu
 
     let dir = custom_skills_dir(store_path).join(slug);
     std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
-    let path = dir.join("README.md");
+    let path = dir.join("SKILL.md");
     std::fs::write(&path, markdown).map_err(|e| format!("write {}: {e}", path.display()))?;
     Ok(skill)
 }
@@ -693,7 +692,7 @@ pub async fn search_clawhub_plugins(
 }
 
 /// Install a ClawHub skill by downloading its zip, extracting `SKILL.md`,
-/// and writing it under `$APP_DATA/skills/<slug>/README.md`.
+/// and writing it under `$APP_DATA/skills/<slug>/SKILL.md`.
 pub async fn install_clawhub_skill(store_path: &Path, slug: &str) -> Result<Skill, String> {
     validate_slug(slug)?;
     let client = build_clawhub_client()?;
@@ -739,8 +738,8 @@ fn extract_skill_md(zip_bytes: &[u8]) -> Result<String, String> {
                 file.compression(),
                 file.encrypted()
             );
-            if file.size() > MAX_README_BYTES as u64 {
-                return Err(format!("{ctx}: exceeds {MAX_README_BYTES} byte limit"));
+            if file.size() > MAX_SKILL_MD_BYTES as u64 {
+                return Err(format!("{ctx}: exceeds {MAX_SKILL_MD_BYTES} byte limit"));
             }
             let mut buf = String::new();
             file.read_to_string(&mut buf).map_err(|e| {

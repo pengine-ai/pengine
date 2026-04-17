@@ -29,6 +29,31 @@ curl -s "https://example.com/api/..."
 - ...
 `;
 
+function yamlString(value: string): string {
+  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
+
+function toInlineYamlArray(values: string[]): string {
+  if (values.length === 0) return "[]";
+  return `[${values.map(yamlString).join(", ")}]`;
+}
+
+function composeSkillMarkdown(skill: Skill): string {
+  const lines: string[] = [
+    "---",
+    `name: ${yamlString(skill.name)}`,
+    `description: ${yamlString(skill.description)}`,
+    `tags: ${toInlineYamlArray(skill.tags)}`,
+    `requires: ${toInlineYamlArray(skill.requires)}`,
+  ];
+  if (skill.author?.trim()) lines.push(`author: ${yamlString(skill.author.trim())}`);
+  if (skill.version?.trim()) lines.push(`version: ${yamlString(skill.version.trim())}`);
+  if (skill.source?.trim()) lines.push(`source: ${yamlString(skill.source.trim())}`);
+  if (skill.license?.trim()) lines.push(`license: ${yamlString(skill.license.trim())}`);
+  lines.push("---", "", skill.body.trim());
+  return `${lines.join("\n")}\n`;
+}
+
 export function SkillsPanel() {
   const [skills, setSkills] = useState<Skill[] | null>(null);
   const [customDir, setCustomDir] = useState<string>("");
@@ -40,6 +65,7 @@ export function SkillsPanel() {
   const [showAdd, setShowAdd] = useState(false);
   const [newSlug, setNewSlug] = useState("");
   const [newMarkdown, setNewMarkdown] = useState(TEMPLATE);
+  const [editingSlug, setEditingSlug] = useState<string | null>(null);
   const [addBusy, setAddBusy] = useState(false);
   const [addError, setAddError] = useState<string | null>(null);
 
@@ -70,15 +96,22 @@ export function SkillsPanel() {
   }, [load]);
 
   const handleAdd = async () => {
+    const trimmedSlug = newSlug.trim();
+    const isEditing = editingSlug !== null;
     setAddBusy(true);
     setAddError(null);
-    const result = await addSkill(newSlug.trim(), newMarkdown);
+    const result = await addSkill(trimmedSlug, newMarkdown);
     setAddBusy(false);
     if (result.ok) {
-      setNotice(`Skill '${result.skill?.slug}' saved`);
+      setNotice(
+        isEditing
+          ? `Skill '${result.skill?.slug ?? trimmedSlug}' updated`
+          : `Skill '${result.skill?.slug ?? trimmedSlug}' saved`,
+      );
       setShowAdd(false);
       setNewSlug("");
       setNewMarkdown(TEMPLATE);
+      setEditingSlug(null);
       void load();
     } else {
       setAddError(result.error ?? "Could not save skill");
@@ -116,6 +149,14 @@ export function SkillsPanel() {
     setShowBrowse(true);
   };
 
+  const handleEdit = (skill: Skill) => {
+    setShowAdd(true);
+    setAddError(null);
+    setEditingSlug(skill.slug);
+    setNewSlug(skill.slug);
+    setNewMarkdown(composeSkillMarkdown(skill));
+  };
+
   return (
     <div className="panel p-4 sm:p-6">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -134,6 +175,7 @@ export function SkillsPanel() {
               setShowAdd((v) => {
                 if (v) {
                   setAddError(null);
+                  setEditingSlug(null);
                   setNewSlug("");
                   setNewMarkdown(TEMPLATE);
                 }
@@ -171,10 +213,11 @@ export function SkillsPanel() {
             value={newSlug}
             onChange={(e) => setNewSlug(e.target.value)}
             placeholder="my-skill"
+            disabled={editingSlug !== null}
             className="mt-1 w-full rounded-lg border border-white/10 bg-black/20 px-2 py-1 font-mono text-xs text-white outline-none focus:border-emerald-300/40"
           />
           <label className="mt-3 block font-mono text-[10px] uppercase tracking-[0.14em] text-(--mid)">
-            README.md
+            SKILL.md
           </label>
           <textarea
             value={newMarkdown}
@@ -195,7 +238,7 @@ export function SkillsPanel() {
               disabled={addBusy || !newSlug.trim()}
               className="rounded-lg border border-emerald-300/20 bg-emerald-300/10 px-3 py-1 font-mono text-[11px] text-emerald-300 transition hover:bg-emerald-300/20 disabled:opacity-40"
             >
-              {addBusy ? "Saving…" : "Save skill"}
+              {addBusy ? "Saving…" : editingSlug ? "Save changes" : "Save skill"}
             </button>
           </div>
         </div>
@@ -278,13 +321,22 @@ export function SkillsPanel() {
                     />
                   </button>
                   {skill.origin === "custom" && (
-                    <button
-                      type="button"
-                      onClick={() => void handleDelete(skill.slug)}
-                      className="rounded-lg border border-rose-300/20 bg-transparent px-3 py-1 font-mono text-[11px] text-rose-300/70 transition hover:bg-rose-300/10 hover:text-rose-200"
-                    >
-                      Delete
-                    </button>
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => handleEdit(skill)}
+                        className="rounded-lg border border-white/15 bg-white/5 px-3 py-1 font-mono text-[11px] text-white/80 transition hover:bg-white/10"
+                      >
+                        Edit
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleDelete(skill.slug)}
+                        className="rounded-lg border border-rose-300/20 bg-transparent px-3 py-1 font-mono text-[11px] text-rose-300/70 transition hover:bg-rose-300/10 hover:text-rose-200"
+                      >
+                        Delete
+                      </button>
+                    </>
                   )}
                 </div>
               </div>
@@ -301,7 +353,7 @@ export function SkillsPanel() {
                   <Accordion.Header>
                     <Accordion.Trigger className="group flex w-full items-center justify-between gap-3 px-3 py-2 text-left">
                       <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-(--mid)">
-                        README
+                        SKILL.md body
                       </p>
                       <span className="shrink-0 font-mono text-xs text-(--mid) transition group-data-[state=open]:rotate-45">
                         +
