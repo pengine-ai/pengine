@@ -1,14 +1,8 @@
 import * as Accordion from "@radix-ui/react-accordion";
 import { useCallback, useEffect, useRef, useState } from "react";
-import {
-  addSkill,
-  deleteSkill,
-  fetchSkills,
-  installClawHubSkill,
-  searchClawHub,
-  setSkillEnabled,
-} from "../api";
-import type { ClawHubSkill, Skill } from "../types";
+import { addSkill, deleteSkill, fetchSkills, setSkillEnabled } from "../api";
+import type { Skill } from "../types";
+import { ClawHubBrowse } from "./ClawHubBrowse";
 
 const TEMPLATE = `---
 name: my-skill
@@ -50,11 +44,7 @@ export function SkillsPanel() {
   const [addError, setAddError] = useState<string | null>(null);
 
   const [showBrowse, setShowBrowse] = useState(false);
-  const [query, setQuery] = useState("");
-  const [results, setResults] = useState<ClawHubSkill[] | null>(null);
-  const [browseError, setBrowseError] = useState<string | null>(null);
-  const [browseLoading, setBrowseLoading] = useState(false);
-  const [installingSlug, setInstallingSlug] = useState<string | null>(null);
+  const [browseKey, setBrowseKey] = useState(0);
 
   const cancelledRef = useRef(false);
 
@@ -121,36 +111,9 @@ export function SkillsPanel() {
     }
   };
 
-  const runSearch = async (q: string) => {
-    setBrowseLoading(true);
-    setBrowseError(null);
-    const result = await searchClawHub(q);
-    setBrowseLoading(false);
-    if (result.results) {
-      setResults(result.results);
-    } else {
-      setBrowseError(result.error ?? "ClawHub is unreachable");
-    }
-  };
-
   const openBrowse = () => {
+    setBrowseKey((k) => k + 1);
     setShowBrowse(true);
-    setResults(null);
-    setBrowseError(null);
-    setQuery("");
-  };
-
-  const handleInstall = async (entry: ClawHubSkill) => {
-    setInstallingSlug(entry.slug);
-    const result = await installClawHubSkill(entry.slug);
-    setInstallingSlug(null);
-    if (result.ok) {
-      setNotice(`Installed '${result.skill?.slug}' from ClawHub`);
-      setShowBrowse(false);
-      void load();
-    } else {
-      setBrowseError(result.error ?? "Install failed");
-    }
   };
 
   return (
@@ -239,76 +202,15 @@ export function SkillsPanel() {
       )}
 
       {showBrowse && (
-        <div className="mt-4 rounded-xl border border-white/10 bg-white/5 p-3">
-          <div className="flex items-center justify-between">
-            <p className="font-mono text-[11px] text-white/80">Search ClawHub</p>
-            <button
-              type="button"
-              onClick={() => setShowBrowse(false)}
-              className="font-mono text-[11px] text-white/40 hover:text-white/70"
-            >
-              Close
-            </button>
-          </div>
-
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              void runSearch(query);
-            }}
-            className="mt-2 flex gap-2"
-          >
-            <input
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="weather, markdown, github…"
-              className="flex-1 rounded-lg border border-white/10 bg-black/20 px-2 py-1 font-mono text-xs text-white outline-none focus:border-emerald-300/40"
-            />
-            <button
-              type="submit"
-              disabled={browseLoading || !query.trim()}
-              className="rounded-lg border border-white/15 bg-white/10 px-3 py-1 font-mono text-[11px] text-white/90 transition hover:bg-white/20 disabled:opacity-40"
-            >
-              {browseLoading ? "Searching…" : "Search"}
-            </button>
-          </form>
-
-          {browseError && (
-            <p className="mt-3 font-mono text-[11px] text-rose-300" role="alert">
-              {browseError}
-            </p>
-          )}
-          {results && results.length === 0 && !browseLoading && (
-            <p className="mt-3 subtle-copy">No matches.</p>
-          )}
-          {results && results.length > 0 && (
-            <div className="mt-3 grid gap-2">
-              {results.map((entry) => (
-                <div
-                  key={entry.slug}
-                  className="flex items-start justify-between gap-3 rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2"
-                >
-                  <div className="min-w-0">
-                    <p className="truncate text-sm font-semibold text-white">{entry.displayName}</p>
-                    <p className="mt-0.5 font-mono text-[10px] text-(--mid)">
-                      {entry.slug}
-                      {entry.version ? ` · v${entry.version}` : ""}
-                    </p>
-                    <p className="mt-1 text-[11px] leading-snug text-(--mid)">{entry.summary}</p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => void handleInstall(entry)}
-                    disabled={installingSlug !== null}
-                    className="shrink-0 rounded-lg border border-emerald-300/20 bg-emerald-300/10 px-3 py-1 font-mono text-[11px] text-emerald-300 transition hover:bg-emerald-300/20 disabled:opacity-40"
-                  >
-                    {installingSlug === entry.slug ? "Installing…" : "Install"}
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
+        <ClawHubBrowse
+          key={browseKey}
+          onClose={() => setShowBrowse(false)}
+          onAfterSkillInstall={(slug) => {
+            setNotice(`Installed '${slug}' from ClawHub`);
+            setShowBrowse(false);
+            void load();
+          }}
+        />
       )}
 
       {loading && skills === null && (

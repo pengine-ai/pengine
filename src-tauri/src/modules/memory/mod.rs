@@ -17,11 +17,11 @@
 
 use crate::modules::mcp::registry::{Provider, ToolRegistry};
 use crate::modules::mcp::types::ToolDef;
+use crate::shared::keywords::{normalize_exact, KeywordGroup, MatchMode};
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 
-/// Phrases that open a full-transcript session (user + assistant each turn).
-pub const SESSION_START_PHRASES: &[&str] = &[
+const SESSION_START_EN: &[&str] = &[
     "remember this session",
     "save this session",
     "captain's log",
@@ -29,8 +29,7 @@ pub const SESSION_START_PHRASES: &[&str] = &[
     "begin log",
 ];
 
-/// Phrases that end any active recording (session or diary).
-pub const SESSION_END_PHRASES: &[&str] = &[
+const SESSION_END_EN: &[&str] = &[
     "close session",
     "leave session",
     "over and out",
@@ -39,11 +38,64 @@ pub const SESSION_END_PHRASES: &[&str] = &[
     "end log",
 ];
 
-/// Start diary-only recording (user lines only).
-pub const DIARY_START_PHRASES: &[&str] = &["record"];
+const DIARY_START_EN: &[&str] = &["record"];
+const DIARY_END_EN: &[&str] = &["record end"];
 
-/// Stop diary-only recording.
-pub const DIARY_END_PHRASES: &[&str] = &["record end"];
+/// Opens a full-transcript session (user + assistant each turn).
+pub const SESSION_START: KeywordGroup = KeywordGroup {
+    id: "memory.session_start",
+    description: "Open a full-transcript memory session.",
+    mode: MatchMode::Exact,
+    phrases_by_lang: &[
+        ("en", SESSION_START_EN),
+        ("de", &[]),
+        ("fr", &[]),
+        ("es", &[]),
+        ("ja", &[]),
+    ],
+};
+
+/// Ends any active recording (session or diary).
+pub const SESSION_END: KeywordGroup = KeywordGroup {
+    id: "memory.session_end",
+    description: "Close any active memory recording.",
+    mode: MatchMode::Exact,
+    phrases_by_lang: &[
+        ("en", SESSION_END_EN),
+        ("de", &[]),
+        ("fr", &[]),
+        ("es", &[]),
+        ("ja", &[]),
+    ],
+};
+
+/// Starts diary-only recording (user lines only).
+pub const DIARY_START: KeywordGroup = KeywordGroup {
+    id: "memory.diary_start",
+    description: "Start diary-only recording (user lines only).",
+    mode: MatchMode::Exact,
+    phrases_by_lang: &[
+        ("en", DIARY_START_EN),
+        ("de", &[]),
+        ("fr", &[]),
+        ("es", &[]),
+        ("ja", &[]),
+    ],
+};
+
+/// Stops diary-only recording.
+pub const DIARY_END: KeywordGroup = KeywordGroup {
+    id: "memory.diary_end",
+    description: "Stop diary-only recording.",
+    mode: MatchMode::Exact,
+    phrases_by_lang: &[
+        ("en", DIARY_END_EN),
+        ("de", &[]),
+        ("fr", &[]),
+        ("es", &[]),
+        ("ja", &[]),
+    ],
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionCommand {
@@ -51,23 +103,6 @@ pub enum SessionCommand {
     End,
     DiaryStart,
     DiaryEnd,
-}
-
-/// Normalize a message for keyword matching: map curly quotes to ASCII, strip trailing
-/// non-alphanumeric chars, lowercase. All keywords are ASCII so this is sufficient.
-fn normalize(msg: &str) -> String {
-    let mapped: String = msg
-        .chars()
-        .map(|c| match c {
-            '\u{2018}' | '\u{2019}' => '\'',
-            '\u{201C}' | '\u{201D}' => '"',
-            c => c,
-        })
-        .collect();
-    mapped
-        .trim()
-        .trim_end_matches(|c: char| !c.is_alphanumeric())
-        .to_lowercase()
 }
 
 /// `<rank> <name> out` with 3–4 tokens. Rank must be present.
@@ -83,22 +118,21 @@ fn is_starfleet_signoff(s: &str) -> bool {
             .all(|t| !t.is_empty() && t.chars().all(|c| c.is_alphabetic()))
 }
 
-/// Match a user message against keyword lists. Only exact (full-message) matches count.
+/// Match a user message against keyword groups. Only exact (full-message) matches count.
 pub fn detect_session_command(msg: &str) -> Option<SessionCommand> {
-    let n = normalize(msg);
-    if DIARY_END_PHRASES.iter().any(|p| n == *p) {
+    if DIARY_END.matches(msg) {
         return Some(SessionCommand::DiaryEnd);
     }
-    if DIARY_START_PHRASES.iter().any(|p| n == *p) {
+    if DIARY_START.matches(msg) {
         return Some(SessionCommand::DiaryStart);
     }
-    if SESSION_START_PHRASES.iter().any(|p| n == *p) {
+    if SESSION_START.matches(msg) {
         return Some(SessionCommand::Start);
     }
-    if SESSION_END_PHRASES.iter().any(|p| n == *p) {
+    if SESSION_END.matches(msg) {
         return Some(SessionCommand::End);
     }
-    if is_starfleet_signoff(&n) {
+    if is_starfleet_signoff(&normalize_exact(msg)) {
         return Some(SessionCommand::End);
     }
     None
@@ -223,7 +257,7 @@ mod tests {
 
     #[test]
     fn start_phrases_match_exactly_ignoring_case_and_punctuation() {
-        for p in SESSION_START_PHRASES {
+        for p in SESSION_START.all_phrases() {
             assert_eq!(detect_session_command(p), Some(SessionCommand::Start));
             assert_eq!(
                 detect_session_command(&p.to_uppercase()),
@@ -238,7 +272,7 @@ mod tests {
 
     #[test]
     fn end_phrases_match_exactly() {
-        for p in SESSION_END_PHRASES {
+        for p in SESSION_END.all_phrases() {
             assert_eq!(detect_session_command(p), Some(SessionCommand::End));
         }
     }

@@ -1,30 +1,84 @@
 use crate::modules::memory::{self, MemoryProvider, SessionCommand};
-use crate::modules::ollama::service as ollama;
+use crate::modules::ollama::keywords::THINK_ON;
+use crate::modules::ollama::service::{self as ollama, ChatOptions};
 use crate::modules::skills::service as skills;
 use crate::modules::tool_engine::service::workspace_app_bind_pairs;
 use crate::shared::state::{AppState, MemorySession};
+use crate::shared::text::{compact_tool_output, truncate_for_model};
 use chrono::Utc;
 use serde_json::json;
 use std::time::{Duration, Instant};
 
 const MAX_STEPS: usize = 3;
 
+/// Cap on tool output fed back to the model. Raw fetch bodies can be 5–10 kB
+/// of HTML; the model only needs the first screen to answer, and larger
+/// feedback balloons the step-1 prompt. Direct replies (answers routed
+/// straight to the user) are NOT truncated.
+const TOOL_OUTPUT_CHAR_CAP: usize = 4000;
+
+/// Source of a think-mode decision for this turn, mainly for observability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ThinkSource {
+    SlashOn,
+    SlashOff,
+    Keyword,
+    Default,
+}
+
+impl ThinkSource {
+    fn enabled(self) -> bool {
+        matches!(self, Self::SlashOn | Self::Keyword)
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::SlashOn => "on (/think)",
+            Self::SlashOff => "off (/nothink)",
+            Self::Keyword => "on (keyword)",
+            Self::Default => "off (default)",
+        }
+    }
+}
+
+/// Strip a leading `/think` or `/nothink` slash command from `msg`. Returns
+/// the override flag (if any) and the remaining message, borrowed from the
+/// input. The command is only recognized when followed by whitespace or
+/// end-of-input so `/thinker` and similar don't match.
+fn parse_think_override(msg: &str) -> (Option<bool>, &str) {
+    let trimmed = msg.trim_start();
+    for (prefix, value) in [("/nothink", false), ("/think", true)] {
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            let at_boundary = rest.chars().next().is_none_or(char::is_whitespace);
+            if at_boundary {
+                return (Some(value), rest.trim_start());
+            }
+        }
+    }
+    (None, msg)
+}
+
+/// Decide whether to enable Ollama thinking mode for this turn. Precedence:
+/// explicit slash command wins; else the multilingual `THINK_ON` keyword
+/// group; else off.
+fn decide_think(override_flag: Option<bool>, cleaned_msg: &str) -> ThinkSource {
+    match override_flag {
+        Some(true) => ThinkSource::SlashOn,
+        Some(false) => ThinkSource::SlashOff,
+        None if THINK_ON.matches(cleaned_msg) => ThinkSource::Keyword,
+        None => ThinkSource::Default,
+    }
+}
+
 fn memory_hint(session_active: Option<&str>, diary_active: bool) -> String {
     let status = match session_active {
-        Some(name) if diary_active => {
-            format!(" Diary recording ACTIVE (`{name}`); your replies are NOT saved.")
+        Some(name) if diary_active => format!(" Diary ACTIVE (`{name}`)."),
+        Some(name) => {
+            format!(" Session ACTIVE (`{name}`); host saves each turn — no write tools.")
         }
-        Some(name) => format!(
-            " Chat session ACTIVE (`{name}`); host records each turn — do NOT call memory write tools."
-        ),
         None => String::new(),
     };
-    format!(
-        "\nMemory MCP server connected. Host controls recording via keywords \
-(\"captain's log\" / \"record\" to start; \"close session\" / \"over and out\" / \
-\"Commander <name> out\" to stop). Use read tools (`read_graph`, `search_nodes`, \
-`open_nodes`) when prior context helps.{status}"
-    )
+    format!("\nMemory server ready. Use read tools for prior context.{status}")
 }
 
 fn tool_call_arguments(call: &serde_json::Value) -> serde_json::Value {
@@ -43,6 +97,17 @@ fn fmt_duration(d: Duration) -> String {
         format!("{}ms", d.as_millis())
     } else {
         format!("{:.1}s", d.as_secs_f64())
+    }
+}
+
+fn fmt_tokens(prompt: Option<u64>, eval: Option<u64>) -> String {
+    match (prompt, eval) {
+        (None, None) => String::new(),
+        (p, e) => {
+            let p = p.map(|n| n.to_string()).unwrap_or_else(|| "?".into());
+            let e = e.map(|n| n.to_string()).unwrap_or_else(|| "?".into());
+            format!(" (in:{p} out:{e})")
+        }
     }
 }
 
@@ -79,6 +144,8 @@ impl TurnResult {
 // ── Public entry point ─────────────────────────────────────────────
 
 pub async fn run_turn(state: &AppState, user_message: &str) -> Result<TurnResult, String> {
+    let (think_override, user_message) = parse_think_override(user_message);
+
     if let Some(cmd) = memory::detect_session_command(user_message) {
         return match cmd {
             SessionCommand::Start => handle_recording_start(state, false).await,
@@ -94,7 +161,12 @@ pub async fn run_turn(state: &AppState, user_message: &str) -> Result<TurnResult
         }
     }
 
-    let result = run_model_turn(state, user_message).await?;
+    let think = decide_think(think_override, user_message);
+    state
+        .emit_log("run", &format!("think:{}", think.label()))
+        .await;
+
+    let result = run_model_turn(state, user_message, think.enabled()).await?;
     spawn_memory_save(state, user_message, &result.text).await;
     Ok(result)
 }
@@ -300,7 +372,68 @@ async fn spawn_append(state: &AppState, mem: &MemoryProvider, entity: &str, cont
 
 // ── Model turn with tool loop ──────────────────────────────────────
 
-async fn run_model_turn(state: &AppState, user_message: &str) -> Result<TurnResult, String> {
+/// Assemble the static assistant preamble plus fs/memory/skills fragments.
+/// The order is stable turn-to-turn so Ollama can reuse its KV-cache prefix.
+async fn build_system_prompt(state: &AppState, has_tools: bool, has_memory: bool) -> String {
+    if !has_tools {
+        return "Answer concisely.".to_string();
+    }
+
+    let fs_hint = {
+        let paths = state.cached_filesystem_paths.read().await.clone();
+        if paths.is_empty() {
+            String::new()
+        } else {
+            let mounts = workspace_app_bind_pairs(&paths)
+                .iter()
+                .map(|(_, cpath)| cpath.clone())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("\nFile tools: use /app/… paths only. Mounts: {mounts}.")
+        }
+    };
+
+    let mem_hint = if has_memory {
+        let snap = state.memory_session.read().await;
+        memory_hint(
+            snap.as_ref().map(|s| s.entity_name.as_str()),
+            snap.as_ref().is_some_and(|s| s.diary_only),
+        )
+    } else {
+        String::new()
+    };
+
+    let skills_raw = skills::skills_prompt_hint(&state.store_path);
+    let (skills_hint, skills_truncated) =
+        skills::limit_skills_hint_bytes(skills_raw, skills::MAX_TOTAL_SKILL_HINT_BYTES);
+    if skills_truncated {
+        state
+            .emit_log(
+                "run",
+                &format!(
+                    "skills hint truncated to {} bytes (cap {})",
+                    skills_hint.len(),
+                    skills::MAX_TOTAL_SKILL_HINT_BYTES
+                ),
+            )
+            .await;
+    }
+
+    format!(
+        "Assistant with tools. Call a tool only for external data; otherwise answer directly. \
+         After tool results, answer immediately. Be concise.{fs_hint}{mem_hint}{skills_hint}"
+    )
+}
+
+async fn run_model_turn(
+    state: &AppState,
+    user_message: &str,
+    think: bool,
+) -> Result<TurnResult, String> {
+    let chat_opts = ChatOptions {
+        think: Some(think),
+        ..ChatOptions::default()
+    };
     let model = match state.preferred_ollama_model.read().await.clone() {
         Some(m) => m,
         None => ollama::active_model().await?,
@@ -315,53 +448,11 @@ async fn run_model_turn(state: &AppState, user_message: &str) -> Result<TurnResu
         )
     };
 
-    let mem_snapshot = state.memory_session.read().await.clone();
+    let system = build_system_prompt(state, has_tools, has_memory).await;
 
-    let system = if has_tools {
-        let fs_hint = {
-            let paths = state.cached_filesystem_paths.read().await.clone();
-            if paths.is_empty() {
-                String::new()
-            } else {
-                let mounts: String = workspace_app_bind_pairs(&paths)
-                    .iter()
-                    .map(|(host, cpath)| format!("{cpath} ← {host}"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!("\nFile tools use container paths under /app/. Mounts: {mounts}. Use /app/… paths only.")
-            }
-        };
-        let mem_hint = if has_memory {
-            memory_hint(
-                mem_snapshot.as_ref().map(|s| s.entity_name.as_str()),
-                mem_snapshot.as_ref().is_some_and(|s| s.diary_only),
-            )
-        } else {
-            String::new()
-        };
-        let skills_raw = skills::skills_prompt_hint(&state.store_path);
-        let (skills_hint, skills_truncated) =
-            skills::limit_skills_hint_bytes(skills_raw, skills::MAX_TOTAL_SKILL_HINT_BYTES);
-        if skills_truncated {
-            state
-                .emit_log(
-                    "run",
-                    &format!(
-                        "skills hint truncated to {} bytes (cap {})",
-                        skills_hint.len(),
-                        skills::MAX_TOTAL_SKILL_HINT_BYTES
-                    ),
-                )
-                .await;
-        }
-        format!(
-            "Helpful assistant with tools. Call a tool ONLY when you need external data. \
-             After tool results, answer immediately. Be concise.{fs_hint}{mem_hint}{skills_hint}"
-        )
-    } else {
-        "Answer concisely.".to_string()
-    };
-
+    // Order matters for Ollama KV-cache reuse across turns: system message
+    // first, user second. Changing fragment order would invalidate the cached
+    // prefix between turns even when the content is identical.
     let mut messages = json!([
         { "role": "system", "content": system },
         { "role": "user", "content": user_message }
@@ -378,7 +469,9 @@ async fn run_model_turn(state: &AppState, user_message: &str) -> Result<TurnResu
         } else {
             &empty_tools
         };
-        let result = ollama::chat_with_tools(&model, &messages, effective_tools).await?;
+        let result =
+            ollama::chat_with_tools(&model, &messages, effective_tools, &chat_opts).await?;
+        let tokens = fmt_tokens(result.prompt_tokens, result.eval_tokens);
         let msg = result.message;
 
         if !result.tools_sent && tools_supported {
@@ -390,33 +483,29 @@ async fn run_model_turn(state: &AppState, user_message: &str) -> Result<TurnResu
         state
             .emit_log(
                 "time",
-                &format!("model step {step} {}", fmt_duration(t0.elapsed())),
+                &format!("model step {step} {}{tokens}", fmt_duration(t0.elapsed())),
             )
             .await;
-
-        if let Some(arr) = messages.as_array_mut() {
-            arr.push(msg.clone());
-        }
 
         let tool_calls = msg
             .get("tool_calls")
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();
+        let content = msg
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+
+        if let Some(arr) = messages.as_array_mut() {
+            arr.push(msg);
+        }
 
         if tool_calls.is_empty() {
-            let text = msg
-                .get("content")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .trim()
-                .to_string();
-            if !text.is_empty() {
-                return Ok(TurnResult {
-                    text,
-                    source: ReplySource::Model,
-                    suppress_telegram_reply: false,
-                });
+            if !content.is_empty() {
+                return Ok(TurnResult::reply(content));
             }
             if tool_results.is_empty() {
                 return Ok(TurnResult::reply(""));
@@ -488,10 +577,12 @@ async fn run_model_turn(state: &AppState, user_message: &str) -> Result<TurnResu
             if is_direct {
                 direct_replies.push(text.clone());
             }
+            let compacted = compact_tool_output(&text);
+            let for_model = truncate_for_model(&compacted, TOOL_OUTPUT_CHAR_CAP);
             if let Some(arr) = messages.as_array_mut() {
-                arr.push(json!({ "role": "tool", "name": name, "content": &text }));
+                arr.push(json!({ "role": "tool", "name": name, "content": &for_model }));
             }
-            tool_results.push((name.clone(), text));
+            tool_results.push((name.clone(), for_model));
         }
         state
             .emit_log(
@@ -522,9 +613,14 @@ async fn run_model_turn(state: &AppState, user_message: &str) -> Result<TurnResu
         ]);
 
         let t0 = Instant::now();
-        let result = ollama::chat_with_tools(&model, &summary_messages, &json!([])).await?;
+        let result =
+            ollama::chat_with_tools(&model, &summary_messages, &json!([]), &chat_opts).await?;
+        let tokens = fmt_tokens(result.prompt_tokens, result.eval_tokens);
         state
-            .emit_log("time", &format!("summarize {}", fmt_duration(t0.elapsed())))
+            .emit_log(
+                "time",
+                &format!("summarize {}{tokens}", fmt_duration(t0.elapsed())),
+            )
             .await;
 
         let text = result
@@ -552,4 +648,49 @@ async fn run_model_turn(state: &AppState, user_message: &str) -> Result<TurnResu
     Err(format!(
         "agent exceeded {MAX_STEPS} steps without finishing"
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn think_prefix_parsed_and_stripped() {
+        assert_eq!(
+            parse_think_override("/think solve this"),
+            (Some(true), "solve this")
+        );
+        assert_eq!(parse_think_override("  /nothink  hi"), (Some(false), "hi"));
+        assert_eq!(parse_think_override("/think"), (Some(true), ""));
+    }
+
+    #[test]
+    fn think_prefix_ignored_when_not_a_word_boundary() {
+        assert_eq!(parse_think_override("/thinker"), (None, "/thinker"));
+    }
+
+    #[test]
+    fn decide_think_precedence() {
+        assert_eq!(decide_think(Some(true), "anything"), ThinkSource::SlashOn);
+        assert_eq!(
+            decide_think(Some(false), "think hard please"),
+            ThinkSource::SlashOff
+        );
+        assert_eq!(
+            decide_think(None, "think hard about this"),
+            ThinkSource::Keyword
+        );
+        assert_eq!(
+            decide_think(None, "what is the weather"),
+            ThinkSource::Default
+        );
+    }
+
+    #[test]
+    fn think_source_enabled_maps_correctly() {
+        assert!(ThinkSource::SlashOn.enabled());
+        assert!(ThinkSource::Keyword.enabled());
+        assert!(!ThinkSource::SlashOff.enabled());
+        assert!(!ThinkSource::Default.enabled());
+    }
 }

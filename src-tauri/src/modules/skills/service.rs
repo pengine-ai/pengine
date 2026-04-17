@@ -1,14 +1,24 @@
-use super::types::{ClawHubSearchResponse, ClawHubSkill, Skill, SkillOrigin};
-use std::collections::HashSet;
+use super::types::{
+    ClawHubPluginsPage, ClawHubPluginsResponse, ClawHubSearchResponse, ClawHubSkill, Skill,
+    SkillOrigin,
+};
+use futures::future::join_all;
+use regex::Regex;
+use std::collections::{HashMap, HashSet};
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::Duration;
+use tokio::time::timeout;
 use zip::ZipArchive;
 
 const CLAWHUB_SEARCH_URL: &str = "https://clawhub.ai/api/search";
+const CLAWHUB_PLUGINS_LIST_URL: &str = "https://clawhub.ai/api/v1/plugins";
 const CLAWHUB_DOWNLOAD_URL: &str = "https://clawhub.ai/api/v1/download";
+const CLAWHUB_OPENCLAW_PREFIX: &str = "https://clawhub.ai/openclaw";
 
 const CLAWHUB_TIMEOUT: Duration = Duration::from_secs(10);
+const CLAWHUB_OPENCLAW_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Max README size we are willing to fetch/write (skills are small by design).
 const MAX_README_BYTES: usize = 256 * 1024;
@@ -93,19 +103,15 @@ pub fn set_skill_enabled(store_path: &Path, slug: &str, enabled: bool) -> Result
 
 /// Per-skill body cap in the system-prompt hint. Keeps the prompt short so local
 /// models re-read it cheaply on each turn. Skills needing more detail should
-/// front-load the critical URL/recipe in the first ~1600 chars; use `mandatory.md` for rules that must not truncate away.
-pub const SKILL_HINT_BODY_CAP: usize = 1600;
+/// front-load the critical URL/recipe in the first ~1000 chars; use `mandatory.md` for rules that must not truncate away.
+pub const SKILL_HINT_BODY_CAP: usize = 1000;
 
 /// Hard cap for the full skills fragment (intro + every enabled skill body + mandatory snippets).
 pub const MAX_TOTAL_SKILL_HINT_BYTES: usize = SKILL_HINT_BODY_CAP * 8;
 
-const SKILL_HINT_INTRO: &str =
-    "\n\nAvailable skills. Follow each skill's recipe exactly — it tells you \
-WHICH URL to fetch and HOW MANY calls to make. Stop once you can answer; do not \
-hop to unrelated hosts or invent alternate pages. If a skill orders retries on \
-the same documented API (e.g. shorter geocode query + countryCode), do those \
-steps — they are part of the recipe, not forbidden probing. \
-Never claim you lack access — the fetch tool is available.";
+const SKILL_HINT_INTRO: &str = "\n\nSkills: follow each recipe exactly — \
+it lists WHICH URL and HOW MANY calls. Stop when you can answer; \
+don't probe alternate hosts. The fetch tool is available.";
 
 /// Build a system-prompt fragment describing the enabled skills so the agent
 /// knows when/how to invoke fetch tools for each. Returns `""` if there are
@@ -407,16 +413,224 @@ fn build_clawhub_client() -> Result<reqwest::Client, String> {
         .map_err(|e| format!("http client: {e}"))
 }
 
-/// Search the ClawHub registry. An empty `query` returns an empty list; the
-/// registry has no "list all" endpoint.
-pub async fn search_clawhub(query: &str) -> Result<Vec<ClawHubSkill>, String> {
+static SKILL_STATS_RE: OnceLock<Regex> = OnceLock::new();
+static OWNER_HANDLE_RE: OnceLock<Regex> = OnceLock::new();
+static SEMVER_RE: OnceLock<Regex> = OnceLock::new();
+
+fn skill_stats_re() -> &'static Regex {
+    SKILL_STATS_RE
+        .get_or_init(|| Regex::new(r"stats:\$R\[\d+\]=\{([^}]+)\}").expect("skill stats regex"))
+}
+
+fn owner_handle_re() -> &'static Regex {
+    OWNER_HANDLE_RE.get_or_init(|| Regex::new(r#"handle:\"([^\"]+)\""#).expect("handle regex"))
+}
+
+fn semver_re() -> &'static Regex {
+    SEMVER_RE.get_or_init(|| Regex::new(r#"version:\"(\d+\.\d+\.\d+)\""#).expect("semver regex"))
+}
+
+#[derive(Debug, Clone, Default)]
+struct ParsedOpenclawSkillPage {
+    owner_handle: Option<String>,
+    downloads: Option<u64>,
+    stars: Option<u64>,
+    installs_current: Option<u64>,
+    installs_all_time: Option<u64>,
+    version_count: Option<u64>,
+    comments_count: Option<u64>,
+    version_semver: Option<String>,
+    is_highlighted: bool,
+    is_official: bool,
+}
+
+fn parse_stats_blob(blob: &str, out: &mut ParsedOpenclawSkillPage) {
+    for part in blob.split(',') {
+        let Some((k, v)) = part.split_once(':') else {
+            continue;
+        };
+        let Ok(n) = v.trim().parse::<u64>() else {
+            continue;
+        };
+        match k.trim() {
+            "downloads" => out.downloads = Some(n),
+            "stars" => out.stars = Some(n),
+            "installsCurrent" => out.installs_current = Some(n),
+            "installsAllTime" => out.installs_all_time = Some(n),
+            "versions" => out.version_count = Some(n),
+            "comments" => out.comments_count = Some(n),
+            _ => {}
+        }
+    }
+}
+
+fn extract_owner_before_skill(html: &str) -> Option<String> {
+    let idx = html.find("skill:$R")?;
+    let prefix = &html[..idx];
+    owner_handle_re()
+        .captures_iter(prefix)
+        .last()
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str().to_string())
+}
+
+fn parse_openclaw_skill_html(html: &str) -> ParsedOpenclawSkillPage {
+    let mut out = ParsedOpenclawSkillPage::default();
+    if let Some(cap) = skill_stats_re().captures(html) {
+        if let Some(m) = cap.get(1) {
+            parse_stats_blob(m.as_str(), &mut out);
+        }
+    }
+    out.owner_handle = extract_owner_before_skill(html);
+    if let Some(c) = semver_re().captures(html) {
+        if let Some(m) = c.get(1) {
+            out.version_semver = Some(m.as_str().to_string());
+        }
+    }
+    out.is_highlighted = html.contains("highlighted:$R");
+    out.is_official = html.contains("official:$R");
+    out
+}
+
+fn merge_openclaw_parsed(skill: &mut ClawHubSkill, p: &ParsedOpenclawSkillPage) {
+    if let Some(ref h) = p.owner_handle {
+        skill.owner_handle = Some(h.clone());
+    }
+    skill.downloads = p.downloads.or(skill.downloads);
+    skill.stars = p.stars.or(skill.stars);
+    skill.installs_current = p.installs_current.or(skill.installs_current);
+    skill.installs_all_time = p.installs_all_time.or(skill.installs_all_time);
+    skill.version_count = p.version_count.or(skill.version_count);
+    skill.comments_count = p.comments_count.or(skill.comments_count);
+    if let Some(ref v) = p.version_semver {
+        skill.version = Some(v.clone());
+    }
+    // Only set when the OpenClaw page embeds the badge; omitting the block is not "not highlighted".
+    if p.is_highlighted {
+        skill.is_highlighted = Some(true);
+    }
+    if p.is_official {
+        skill.is_official = Some(true);
+    }
+}
+
+async fn fetch_openclaw_skill_html(client: &reqwest::Client, slug: &str) -> Option<String> {
+    let url = format!("{CLAWHUB_OPENCLAW_PREFIX}/{slug}");
+    let Ok(Ok(resp)) = timeout(CLAWHUB_OPENCLAW_FETCH_TIMEOUT, client.get(&url).send()).await
+    else {
+        return None;
+    };
+    if !resp.status().is_success() {
+        return None;
+    }
+    resp.text().await.ok()
+}
+
+async fn enrich_clawhub_skills_from_openclaw(
+    client: &reqwest::Client,
+    skills: &mut [ClawHubSkill],
+) {
+    let futs: Vec<_> = skills
+        .iter()
+        .map(|s| s.slug.clone())
+        .map(|slug| {
+            let client = client.clone();
+            async move {
+                let html = fetch_openclaw_skill_html(&client, &slug).await?;
+                let parsed = parse_openclaw_skill_html(&html);
+                Some((slug, parsed))
+            }
+        })
+        .collect();
+    let pairs: HashMap<String, ParsedOpenclawSkillPage> =
+        join_all(futs).await.into_iter().flatten().collect();
+    for sk in skills.iter_mut() {
+        if let Some(p) = pairs.get(&sk.slug) {
+            merge_openclaw_parsed(sk, p);
+        }
+    }
+}
+
+/// Options forwarded as query parameters to `GET /api/search` on ClawHub.
+#[derive(Debug, Clone)]
+pub struct ClawHubSearchOptions {
+    pub highlighted: bool,
+    pub non_suspicious: bool,
+    pub staff_picks: bool,
+    pub clean_only: bool,
+    pub sort: Option<String>,
+    pub limit: Option<u32>,
+    pub tag: Option<String>,
+    /// When true, fetch each skill’s public `/openclaw/{slug}` HTML for author + stats (slower).
+    pub enrich: bool,
+}
+
+impl Default for ClawHubSearchOptions {
+    fn default() -> Self {
+        Self {
+            highlighted: true,
+            non_suspicious: true,
+            staff_picks: false,
+            clean_only: false,
+            sort: None,
+            limit: None,
+            tag: None,
+            enrich: true,
+        }
+    }
+}
+
+/// Search the ClawHub skill registry.
+///
+/// ClawHub returns an empty list for empty `q`, including with `staffPicks=true`.
+/// For staff-picks browsing with no query, we seed with a broad single-letter
+/// query so staff picks are still discoverable.
+pub async fn search_clawhub(
+    query: &str,
+    opts: &ClawHubSearchOptions,
+) -> Result<Vec<ClawHubSkill>, String> {
     let q = query.trim();
-    if q.is_empty() {
+    let effective_q = if q.is_empty() && opts.staff_picks {
+        "a"
+    } else {
+        q
+    };
+    if effective_q.is_empty() {
         return Ok(Vec::new());
     }
     let client = build_clawhub_client()?;
-    let url = reqwest::Url::parse_with_params(CLAWHUB_SEARCH_URL, &[("q", q)])
-        .map_err(|e| format!("build ClawHub search URL: {e}"))?;
+    let mut url = reqwest::Url::parse(CLAWHUB_SEARCH_URL)
+        .map_err(|e| format!("parse ClawHub search URL: {e}"))?;
+    {
+        let lim = opts.limit.unwrap_or(30).clamp(1, 500);
+        let mut pairs = url.query_pairs_mut();
+        pairs.append_pair("q", effective_q);
+        pairs.append_pair("limit", &lim.to_string());
+        if let Some(ref s) = opts.sort {
+            let s = s.trim();
+            if !s.is_empty() {
+                pairs.append_pair("sort", s);
+            }
+        }
+        if opts.highlighted {
+            pairs.append_pair("highlighted", "true");
+        }
+        if opts.non_suspicious {
+            pairs.append_pair("nonSuspicious", "true");
+        }
+        if opts.staff_picks {
+            pairs.append_pair("staffPicks", "true");
+        }
+        if opts.clean_only {
+            pairs.append_pair("cleanOnly", "true");
+        }
+        if let Some(ref t) = opts.tag {
+            let t = t.trim();
+            if !t.is_empty() {
+                pairs.append_pair("tag", t);
+            }
+        }
+    }
     let resp = client
         .get(url)
         .send()
@@ -425,11 +639,57 @@ pub async fn search_clawhub(query: &str) -> Result<Vec<ClawHubSkill>, String> {
     if !resp.status().is_success() {
         return Err(format!("ClawHub returned HTTP {}", resp.status()));
     }
-    let body = resp
+    let mut body = resp
         .json::<ClawHubSearchResponse>()
         .await
         .map_err(|e| format!("parse ClawHub search: {e}"))?;
+    if opts.enrich && !body.results.is_empty() {
+        enrich_clawhub_skills_from_openclaw(&client, &mut body.results).await;
+    }
     Ok(body.results)
+}
+
+/// Search ClawHub **plugins** (OpenClaw packages). Distinct from skills; install is not supported here.
+/// Empty `query` lists the full catalog (paginate with `cursor` from the previous page).
+pub async fn search_clawhub_plugins(
+    query: &str,
+    limit: Option<u32>,
+    cursor: Option<&str>,
+) -> Result<ClawHubPluginsPage, String> {
+    let client = build_clawhub_client()?;
+    let lim = limit.unwrap_or(30).clamp(1, 500);
+    let mut url = reqwest::Url::parse(CLAWHUB_PLUGINS_LIST_URL)
+        .map_err(|e| format!("parse ClawHub plugins URL: {e}"))?;
+    {
+        let q = query.trim();
+        let mut pairs = url.query_pairs_mut();
+        if !q.is_empty() {
+            pairs.append_pair("search", q);
+        }
+        pairs.append_pair("limit", &lim.to_string());
+        if let Some(c) = cursor {
+            let c = c.trim();
+            if !c.is_empty() {
+                pairs.append_pair("cursor", c);
+            }
+        }
+    }
+    let resp = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("search ClawHub plugins: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("ClawHub plugins returned HTTP {}", resp.status()));
+    }
+    let body = resp
+        .json::<ClawHubPluginsResponse>()
+        .await
+        .map_err(|e| format!("parse ClawHub plugins: {e}"))?;
+    Ok(ClawHubPluginsPage {
+        items: body.items,
+        next_cursor: body.next_cursor.filter(|s| !s.trim().is_empty()),
+    })
 }
 
 /// Install a ClawHub skill by downloading its zip, extracting `SKILL.md`,

@@ -1,4 +1,5 @@
 use crate::modules::ollama::constants::{OLLAMA_CHAT_URL, OLLAMA_PS_URL, OLLAMA_TAGS_URL};
+use crate::shared::text::strip_think;
 use std::sync::OnceLock;
 
 static HTTP: OnceLock<reqwest::Client> = OnceLock::new();
@@ -108,6 +109,38 @@ pub struct ChatResult {
     /// `true` when this request included a non-empty `tools` payload; `false` for plain chat
     /// (including transparent fallback when the model rejects tools).
     pub tools_sent: bool,
+    /// Ollama `prompt_eval_count` — tokens in the prompt. `None` if the field is missing.
+    pub prompt_tokens: Option<u64>,
+    /// Ollama `eval_count` — tokens produced by the model. `None` if the field is missing.
+    pub eval_tokens: Option<u64>,
+}
+
+/// Per-request model controls. Extend here as we add knobs (`num_predict`,
+/// `num_ctx`, `keep_alive`, …); keep the surface of `chat_with_tools` stable.
+#[derive(Debug, Clone, Copy)]
+pub struct ChatOptions {
+    /// Ollama `think` flag. `Some(true)` enables reasoning mode (qwen3 et al.),
+    /// `Some(false)` disables it, `None` omits the field so the model's own
+    /// default applies.
+    pub think: Option<bool>,
+    /// Ollama `options.num_ctx`. Controls the KV-cache window. Default 2048 is
+    /// smaller than our turn-1 prompt (~6k tokens) which forces a silent
+    /// recompute; setting this explicitly lets Ollama reuse the cached prefix
+    /// across turns.
+    pub num_ctx: u32,
+    /// Ollama `keep_alive`. How long the model stays resident after a request.
+    /// `"30m"` avoids cold-start reloads between user messages.
+    pub keep_alive: &'static str,
+}
+
+impl Default for ChatOptions {
+    fn default() -> Self {
+        Self {
+            think: None,
+            num_ctx: 8192,
+            keep_alive: "30m",
+        }
+    }
 }
 
 /// Tool-aware chat for the agent loop. Sends a full message history plus a
@@ -121,14 +154,11 @@ pub async fn chat_with_tools(
     model: &str,
     messages: &serde_json::Value,
     tools: &serde_json::Value,
+    options: &ChatOptions,
 ) -> Result<ChatResult, String> {
     let has_tools = tools.as_array().is_some_and(|a| !a.is_empty());
 
-    let mut payload = serde_json::json!({
-        "model": model,
-        "messages": messages,
-        "stream": false,
-    });
+    let mut payload = build_payload(model, messages, options);
     if has_tools {
         payload["tools"] = tools.clone();
     }
@@ -138,27 +168,52 @@ pub async fn chat_with_tools(
     if !status.is_success() {
         let err_text = body["error"].as_str().unwrap_or("");
         if has_tools && err_text.contains("does not support tools") {
-            let plain = serde_json::json!({
-                "model": model,
-                "messages": messages,
-                "stream": false,
-            });
+            let plain = build_payload(model, messages, options);
             let (st, b) = post_chat(&plain).await?;
             if !st.is_success() {
                 return Err(format!("ollama chat HTTP {st}: {b}"));
             }
-            return Ok(ChatResult {
-                message: extract_message(&b)?,
-                tools_sent: false,
-            });
+            return build_chat_result(&b, false);
         }
         return Err(format!("ollama chat HTTP {status}: {body}"));
     }
 
+    build_chat_result(&body, has_tools)
+}
+
+fn build_chat_result(body: &serde_json::Value, tools_sent: bool) -> Result<ChatResult, String> {
+    let (prompt_tokens, eval_tokens) = extract_token_counts(body);
     Ok(ChatResult {
-        message: extract_message(&body)?,
-        tools_sent: has_tools,
+        message: extract_message(body)?,
+        tools_sent,
+        prompt_tokens,
+        eval_tokens,
     })
+}
+
+fn build_payload(
+    model: &str,
+    messages: &serde_json::Value,
+    options: &ChatOptions,
+) -> serde_json::Value {
+    let mut payload = serde_json::json!({
+        "model": model,
+        "messages": messages,
+        "stream": false,
+        "keep_alive": options.keep_alive,
+        "options": { "num_ctx": options.num_ctx },
+    });
+    if let Some(think) = options.think {
+        payload["think"] = serde_json::Value::Bool(think);
+    }
+    payload
+}
+
+fn extract_token_counts(body: &serde_json::Value) -> (Option<u64>, Option<u64>) {
+    (
+        body.get("prompt_eval_count").and_then(|v| v.as_u64()),
+        body.get("eval_count").and_then(|v| v.as_u64()),
+    )
 }
 
 async fn post_chat(
@@ -177,7 +232,20 @@ async fn post_chat(
 }
 
 fn extract_message(body: &serde_json::Value) -> Result<serde_json::Value, String> {
-    body.get("message")
+    let mut msg = body
+        .get("message")
         .cloned()
-        .ok_or_else(|| format!("ollama protocol error: missing `message` in response: {body}"))
+        .ok_or_else(|| format!("ollama protocol error: missing `message` in response: {body}"))?;
+
+    // qwen3 and similar emit `<think>…</think>` inside `content` even when
+    // `think: false` is requested. Strip once, here, so no downstream caller
+    // has to remember to clean it — neither the Telegram reply nor the
+    // messages history passed to the next step should contain reasoning.
+    if let Some(content) = msg.get("content").and_then(|v| v.as_str()) {
+        let cleaned = strip_think(content);
+        if let Some(obj) = msg.as_object_mut() {
+            obj.insert("content".to_string(), serde_json::Value::String(cleaned));
+        }
+    }
+    Ok(msg)
 }
