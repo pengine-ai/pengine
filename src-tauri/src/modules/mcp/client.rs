@@ -102,19 +102,25 @@ fn parse_tools(server_name: &str, result: &Value) -> Vec<ToolDef> {
     arr.iter()
         .filter_map(|t| {
             let name = t.get("name")?.as_str()?.to_string();
-            Some(ToolDef {
-                server_name: server_name.to_string(),
-                name,
-                description: t
-                    .get("description")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string()),
-                input_schema: t
-                    .get("inputSchema")
-                    .or_else(|| t.get("input_schema"))
-                    .cloned()
-                    .unwrap_or_else(|| json!({"type": "object"})),
-                direct_return: false,
+            Some({
+                let mut def = ToolDef {
+                    server_name: server_name.to_string(),
+                    name,
+                    description: t
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    input_schema: t
+                        .get("inputSchema")
+                        .or_else(|| t.get("input_schema"))
+                        .cloned()
+                        .unwrap_or_else(|| json!({"type": "object"})),
+                    direct_return: false,
+                    category: None,
+                    risk: super::types::ToolRisk::Low,
+                };
+                super::tool_metadata::apply(&mut def);
+                def
             })
         })
         .collect()

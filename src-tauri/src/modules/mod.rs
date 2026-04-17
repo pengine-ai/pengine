@@ -1,4 +1,5 @@
 pub mod bot;
+pub mod keywords;
 pub mod mcp;
 pub mod memory;
 pub mod ollama;

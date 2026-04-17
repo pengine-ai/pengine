@@ -84,6 +84,7 @@ pub fn run() {
             commands::get_connection_status,
             commands::disconnect_bot,
             commands::pick_mcp_filesystem_folder,
+            commands::list_keyword_groups,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

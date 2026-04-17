@@ -39,22 +39,28 @@ impl NativeProvider {
 pub fn dice_named(server_key: &str) -> NativeProvider {
     NativeProvider {
         server_name: server_key.to_string(),
-        tools: vec![ToolDef {
-            server_name: server_key.to_string(),
-            name: "roll_dice".to_string(),
-            description: Some(
-                "Roll a die with the given number of sides and return the result.".to_string(),
-            ),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "sides": {
-                        "type": "integer",
-                        "description": "Number of sides (default 6, max 1 000 000)"
+        tools: vec![{
+            let mut t = ToolDef {
+                server_name: server_key.to_string(),
+                name: "roll_dice".to_string(),
+                description: Some(
+                    "Roll a die with the given number of sides and return the result.".to_string(),
+                ),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "sides": {
+                            "type": "integer",
+                            "description": "Number of sides (default 6, max 1 000 000)"
+                        }
                     }
-                }
-            }),
-            direct_return: true,
+                }),
+                direct_return: true,
+                category: None,
+                risk: super::types::ToolRisk::Low,
+            };
+            super::tool_metadata::apply(&mut t);
+            t
         }],
         kind: NativeKind::Dice,
     }
@@ -80,37 +86,43 @@ fn handle_dice(_tool_name: &str, args: &Value) -> Result<String, String> {
 pub fn tool_manager_named(server_key: &str, state: AppState) -> NativeProvider {
     NativeProvider {
         server_name: server_key.to_string(),
-        tools: vec![ToolDef {
-            server_name: server_key.to_string(),
-            name: "manage_tools".to_string(),
-            description: Some(
-                "Manage container-based tools from the catalog. All catalog tools (e.g. File Manager) \
-                 are user-managed and can be freely installed or uninstalled on request. \
-                 Use action 'list' to see all available catalog tools and their install status. \
-                 Use action 'install' with a tool_id to install one tool. \
-                 Use action 'install_all' (no tool_id) to install every catalog tool not yet installed — \
-                 prefer this when the user asks to install all tools. Never use 'uninstall_all' for that. \
-                 Use action 'uninstall' with a tool_id to remove one installed tool. \
-                 Use action 'uninstall_all' (no tool_id) only when the user asks to remove every catalog tool. \
-                 Always call this tool when the user asks to install, uninstall, or list tools."
-                    .to_string(),
-            ),
-            input_schema: json!({
-                "type": "object",
-                "required": ["action"],
-                "properties": {
-                    "action": {
-                        "type": "string",
-                        "enum": ["list", "install", "install_all", "uninstall", "uninstall_all"],
-                        "description": "The operation: 'list'; 'install' / 'uninstall' for one tool; 'install_all' / 'uninstall_all' for every catalog tool at once"
-                    },
-                    "tool_id": {
-                        "type": "string",
-                        "description": "Required for install and uninstall only. Omit for list, install_all, and uninstall_all. Use the exact id from the 'list' output (e.g. 'pengine/file-manager')."
+        tools: vec![{
+            let mut t = ToolDef {
+                server_name: server_key.to_string(),
+                name: "manage_tools".to_string(),
+                description: Some(
+                    "Manage container-based tools from the catalog. All catalog tools (e.g. File Manager) \
+                     are user-managed and can be freely installed or uninstalled on request. \
+                     Use action 'list' to see all available catalog tools and their install status. \
+                     Use action 'install' with a tool_id to install one tool. \
+                     Use action 'install_all' (no tool_id) to install every catalog tool not yet installed — \
+                     prefer this when the user asks to install all tools. Never use 'uninstall_all' for that. \
+                     Use action 'uninstall' with a tool_id to remove one installed tool. \
+                     Use action 'uninstall_all' (no tool_id) only when the user asks to remove every catalog tool. \
+                     Always call this tool when the user asks to install, uninstall, or list tools."
+                        .to_string(),
+                ),
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["action"],
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["list", "install", "install_all", "uninstall", "uninstall_all"],
+                            "description": "The operation: 'list'; 'install' / 'uninstall' for one tool; 'install_all' / 'uninstall_all' for every catalog tool at once"
+                        },
+                        "tool_id": {
+                            "type": "string",
+                            "description": "Required for install and uninstall only. Omit for list, install_all, and uninstall_all. Use the exact id from the 'list' output (e.g. 'pengine/file-manager')."
+                        }
                     }
-                }
-            }),
-            direct_return: false,
+                }),
+                direct_return: false,
+                category: None,
+                risk: super::types::ToolRisk::Low,
+            };
+            super::tool_metadata::apply(&mut t);
+            t
         }],
         kind: NativeKind::ToolManager(state),
     }

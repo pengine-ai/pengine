@@ -2,7 +2,7 @@
 
 Skills are lightweight context templates the agent can read before making a request. They are **secondary** to MCP tools — MCP servers run in containers and offer real capabilities, while skills are just markdown that tells the agent *how to call a public endpoint and what the response will look like*.
 
-Think **OpenAPI-lite in a README.md**.
+Think **OpenAPI-lite in a SKILL.md**.
 
 ---
 
@@ -23,16 +23,16 @@ They stay cheap on tokens because the content is hand-written for the task, not 
 ```text
 tools/skills/              # bundled with the app (read-only examples)
   weather/
-    README.md
+    SKILL.md
     mandatory.md           # optional; extra rules appended to the agent hint (not shown in UI)
 
 $APP_DATA/skills/          # user-editable; ClawHub installs land here too
   <slug>/
-    README.md
+    SKILL.md
     mandatory.md           # optional
 ```
 
-One folder per skill. One `README.md` per folder. That's it.
+One folder per skill. One `SKILL.md` per folder. That's it.
 
 - **Bundled** skills ship with the app and can't be edited in-place. Copy them to your custom dir to tweak.
 - **Custom** skills are yours. Edit freely.
@@ -43,7 +43,7 @@ On macOS the custom dir resolves to `~/Library/Application Support/pengine/skill
 
 ## Skill file format
 
-Each `README.md` starts with a YAML frontmatter block:
+Each `SKILL.md` starts with a YAML frontmatter block:
 
 ```markdown
 ---
@@ -83,7 +83,7 @@ A good skill body has three sections:
 2. **Response schema** — a trimmed JSON example + a field-level cheatsheet.
 3. **When to use** — 1–3 bullets about which question this skill answers.
 
-See `tools/skills/weather/README.md` for a worked example.
+See `tools/skills/weather/SKILL.md` for a worked example.
 
 ---
 
@@ -93,16 +93,16 @@ See `tools/skills/weather/README.md` for a worked example.
 
 1. Open the **Skills** panel on the Dashboard.
 2. Click **Add custom skill**.
-3. Provide a slug and the full README markdown. The app writes it to `$APP_DATA/skills/<slug>/README.md`.
+3. Provide a slug and the full skill markdown. The app writes it to `$APP_DATA/skills/<slug>/SKILL.md`.
 
 ### By hand
 
-Drop a folder into `$APP_DATA/skills/`. The Dashboard picks it up on reload.
+Drop a folder into `$APP_DATA/skills/` with a `SKILL.md` inside. The Dashboard picks it up on reload. (Legacy folders with only `README.md` are ignored — rename to `SKILL.md`.)
 
 ### From ClawHub
 
 1. Click **Browse ClawHub** in the Skills panel.
-2. Pick a skill and hit **Install**. The app fetches the README from ClawHub and writes it to your custom dir.
+2. Pick a skill and hit **Install**. The app fetches `SKILL.md` from ClawHub and writes it to your custom dir.
 
 > ClawHub is the community registry. Skills there are plain markdown with the same frontmatter shape as local ones — no special magic.
 
@@ -110,7 +110,7 @@ Drop a folder into `$APP_DATA/skills/`. The Dashboard picks it up on reload.
 
 ## Editing a skill
 
-Open the file at `$APP_DATA/skills/<slug>/README.md` in any editor. Changes are picked up on the next dashboard refresh. There is no compile step.
+Open the file at `$APP_DATA/skills/<slug>/SKILL.md` in any editor. Changes are picked up on the next dashboard refresh. There is no compile step.
 
 To tweak a **bundled** skill, click **Fork to custom** in the panel (or copy the folder manually). Edits to `tools/skills/` inside the app bundle will not persist across reinstalls.
 
@@ -139,6 +139,6 @@ Reach for a skill first if the task is "call this URL, return this JSON". Reach 
 
 ## Wiring into the agent
 
-The agent receives the `description` of every skill as part of its system context, plus the full body of any skill whose `name` appears in the user message. This keeps the prompt small: a user asking about weather pulls in only `weather`'s README, not every skill in the catalog.
+The agent receives the `description` of every skill as part of its system context, plus the full body of any skill whose `name` appears in the user message. This keeps the prompt small: a user asking about weather pulls in only `weather`'s `SKILL.md`, not every skill in the catalog.
 
 *(Injection is handled by `src-tauri/src/modules/skills/service.rs`; see the code for the exact selection rule.)*

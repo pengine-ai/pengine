@@ -3,7 +3,7 @@ use crate::modules::bot::{repository, service as bot_service};
 use crate::modules::mcp::service as mcp_service;
 use crate::modules::ollama::service as ollama_service;
 use crate::modules::skills::service as skills_service;
-use crate::modules::skills::types::{ClawHubSkill, Skill};
+use crate::modules::skills::types::{ClawHubPluginSummary, ClawHubSkill, Skill};
 use crate::modules::tool_engine::{runtime as te_runtime, service as te_service};
 use crate::shared::state::{AppState, ConnectionData};
 use axum::extract::Query;
@@ -122,6 +122,10 @@ pub async fn start_server(state: AppState) {
         .route("/v1/skills", post(handle_skills_add))
         .route("/v1/skills/{slug}", delete(handle_skills_delete))
         .route("/v1/skills/{slug}/enabled", put(handle_skills_set_enabled))
+        .route(
+            "/v1/skills/clawhub/plugins",
+            get(handle_skills_clawhub_plugins_search),
+        )
         .route("/v1/skills/clawhub", get(handle_skills_clawhub_search))
         .route(
             "/v1/skills/clawhub/install",
@@ -1261,9 +1265,44 @@ pub struct ClawHubSearchResponseDto {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ClawHubSearchQuery {
     #[serde(default)]
     pub q: Option<String>,
+    #[serde(default = "default_true_serde")]
+    pub highlighted: bool,
+    #[serde(default = "default_true_serde")]
+    pub non_suspicious: bool,
+    #[serde(default)]
+    pub staff_picks: bool,
+    #[serde(default)]
+    pub clean_only: bool,
+    #[serde(default)]
+    pub sort: Option<String>,
+    #[serde(default)]
+    pub limit: Option<u32>,
+    #[serde(default)]
+    pub tag: Option<String>,
+    #[serde(default = "default_true_serde")]
+    pub enrich: bool,
+}
+
+#[derive(Deserialize)]
+pub struct ClawHubPluginsQuery {
+    #[serde(default)]
+    pub q: Option<String>,
+    #[serde(default)]
+    pub limit: Option<u32>,
+    #[serde(default)]
+    pub cursor: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClawHubPluginsListDto {
+    pub items: Vec<ClawHubPluginSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1322,10 +1361,33 @@ async fn handle_skills_clawhub_search(
     Query(params): Query<ClawHubSearchQuery>,
 ) -> Result<Json<ClawHubSearchResponseDto>, (StatusCode, Json<ErrorResponse>)> {
     let q = params.q.unwrap_or_default();
-    let results = skills_service::search_clawhub(&q)
+    let opts = skills_service::ClawHubSearchOptions {
+        highlighted: params.highlighted,
+        non_suspicious: params.non_suspicious,
+        staff_picks: params.staff_picks,
+        clean_only: params.clean_only,
+        sort: params.sort,
+        limit: params.limit,
+        tag: params.tag,
+        enrich: params.enrich,
+    };
+    let results = skills_service::search_clawhub(&q, &opts)
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, Json(ErrorResponse { error: e })))?;
     Ok(Json(ClawHubSearchResponseDto { results }))
+}
+
+async fn handle_skills_clawhub_plugins_search(
+    Query(params): Query<ClawHubPluginsQuery>,
+) -> Result<Json<ClawHubPluginsListDto>, (StatusCode, Json<ErrorResponse>)> {
+    let q = params.q.unwrap_or_default();
+    let page = skills_service::search_clawhub_plugins(&q, params.limit, params.cursor.as_deref())
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, Json(ErrorResponse { error: e })))?;
+    Ok(Json(ClawHubPluginsListDto {
+        items: page.items,
+        next_cursor: page.next_cursor,
+    }))
 }
 
 async fn handle_skills_clawhub_install(

@@ -1,10 +1,18 @@
 use crate::modules::bot::agent;
 use crate::shared::state::AppState;
+use crate::shared::text::split_by_chars;
 use std::sync::Arc;
 use teloxide::prelude::*;
-use teloxide::types::{ChatAction, Me};
+use teloxide::types::{ChatAction, ChatId, Me};
 use teloxide::utils::command::BotCommands;
 use tokio::sync::Notify;
+
+/// Telegram's per-message hard limit is 4096 **UTF-16 code units**, not Unicode
+/// scalars: one emoji outside the BMP counts as 2 code units. `split_by_chars`
+/// counts Rust `char`s, so we halve the budget to stay safe even for messages
+/// that are entirely supplementary characters. 2000 * 2 = 4000 UTF-16 units
+/// leaves headroom under the 4096 limit.
+const TELEGRAM_CHUNK_BUDGET: usize = 2000;
 
 pub async fn verify_token(token: &str) -> Result<Me, String> {
     let bot = Bot::new(token);
@@ -138,7 +146,7 @@ async fn text_handler(bot: Bot, msg: Message, state: AppState) -> ResponseResult
                 agent::ReplySource::Model => "model",
             };
             state.emit_log("reply", &format!("[{tag}] {reply}")).await;
-            bot.send_message(msg.chat.id, &reply).await?;
+            send_reply(&bot, msg.chat.id, &reply, &state).await;
         }
         Err(e) => {
             state.emit_log("run", &format!("agent error: {e}")).await;
@@ -147,6 +155,25 @@ async fn text_handler(bot: Bot, msg: Message, state: AppState) -> ResponseResult
     }
 
     Ok(())
+}
+
+/// Send `text` to `chat_id`, splitting into Telegram-sized chunks if needed.
+/// Send failures are logged (not propagated) so one bad chunk doesn't abort
+/// the handler and leave the user with no reply at all.
+async fn send_reply(bot: &Bot, chat_id: ChatId, text: &str, state: &AppState) {
+    let chunks = split_by_chars(text, TELEGRAM_CHUNK_BUDGET);
+    let total = chunks.len();
+    for (i, chunk) in chunks.iter().enumerate() {
+        if let Err(e) = bot.send_message(chat_id, chunk).await {
+            state
+                .emit_log(
+                    "run",
+                    &format!("telegram send failed (chunk {}/{}): {e}", i + 1, total),
+                )
+                .await;
+            return;
+        }
+    }
 }
 
 async fn send_inference_unavailable(bot: &Bot, msg: &Message, state: &AppState) {

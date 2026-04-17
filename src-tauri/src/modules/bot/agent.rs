@@ -1,30 +1,152 @@
 use crate::modules::memory::{self, MemoryProvider, SessionCommand};
-use crate::modules::ollama::service as ollama;
+use crate::modules::ollama::keywords::THINK_ON;
+use crate::modules::ollama::service::{self as ollama, ChatOptions};
 use crate::modules::skills::service as skills;
 use crate::modules::tool_engine::service::workspace_app_bind_pairs;
 use crate::shared::state::{AppState, MemorySession};
+use crate::shared::text::{
+    compact_tool_output, truncate_for_model, PENGINE_OUTPUT_CONTRACT_LEAD,
+    PENGINE_POST_TOOL_REMINDER,
+};
 use chrono::Utc;
 use serde_json::json;
 use std::time::{Duration, Instant};
 
-const MAX_STEPS: usize = 3;
+/// Tool rounds + at least one completion-only step. Research flows (sitemap + several
+/// `fetch` calls) otherwise exhaust the loop and fall through to summarize, which
+/// used to drop URLs and paraphrase loosely.
+const MAX_STEPS: usize = 6;
+
+/// After tool results (agent step ≥1), cap completion tokens. The model should
+/// put the user-visible answer in `<pengine_reply>` (see system prompt); this
+/// cap bounds wall time if it drafts a long `<pengine_plan>`. ~1024 fits a
+/// concise multilingual answer in most cases.
+const POST_TOOL_NUM_PREDICT: u32 = 1024;
+const POST_TOOL_TEMPERATURE: f32 = 0.35;
+
+/// Fallback summarize pass when the tool loop exits without a user-visible reply.
+const SUMMARY_NUM_PREDICT: u32 = 768;
+const SUMMARY_TEMPERATURE: f32 = 0.3;
+
+const SUMMARY_SYSTEM_PROMPT: &str = "You synthesize tool results for the user. Rules:\n\
+\n\
+1) Use ONLY the text in the user message's Data section (tool outputs). Do not add facts, legal claims, or country-specific rules that are not clearly supported there.\n\
+2) If the Data is insufficient, say so briefly and list what is missing — do not invent answers.\n\
+3) Language: match the user's question where possible.\n\
+4) After the substantive answer, add a final section **Quellen** with a bullet list of every relevant full URL:\n\
+   - Copy URLs exactly as they appear in the Data (fetch bodies, HTML links, or Location lines).\n\
+   - If the Data shows only page text without URLs, write one bullet per tool block naming the fetch target if it appears in the `--- fetch ---` headers or quoted links in the excerpt.\n\
+   - Never omit **Quellen** when the Data came from web fetches.\n\
+5) Keep the body concise but do not drop **Quellen** to save space.";
+
+fn chat_options_for_agent_step(post_tool: bool, user_wants_think: bool) -> ChatOptions {
+    if !post_tool {
+        ChatOptions {
+            think: Some(user_wants_think),
+            num_predict: None,
+            temperature: None,
+            ..ChatOptions::default()
+        }
+    } else {
+        ChatOptions {
+            think: Some(false),
+            num_predict: Some(POST_TOOL_NUM_PREDICT),
+            temperature: Some(POST_TOOL_TEMPERATURE),
+            ..ChatOptions::default()
+        }
+    }
+}
+
+/// Cap on tool output fed back to the model. Raw fetch bodies can be 5–10 kB
+/// of HTML; the model only needs the first screen to answer, and larger
+/// feedback balloons the step-1 prompt. Direct replies (answers routed
+/// straight to the user) are NOT truncated.
+const TOOL_OUTPUT_CHAR_CAP: usize = 4000;
+
+fn push_ephemeral_post_tool_reminder(messages: &mut serde_json::Value) {
+    if let Some(arr) = messages.as_array_mut() {
+        arr.push(json!({
+            "role": "system",
+            "content": PENGINE_POST_TOOL_REMINDER,
+        }));
+    }
+}
+
+fn pop_ephemeral_post_tool_reminder(messages: &mut serde_json::Value) {
+    let Some(arr) = messages.as_array_mut() else {
+        return;
+    };
+    let pop = arr.last().is_some_and(|m| {
+        m.get("role").and_then(|r| r.as_str()) == Some("system")
+            && m.get("content").and_then(|c| c.as_str()) == Some(PENGINE_POST_TOOL_REMINDER)
+    });
+    if pop {
+        arr.pop();
+    }
+}
+
+/// Source of a think-mode decision for this turn, mainly for observability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ThinkSource {
+    SlashOn,
+    SlashOff,
+    Keyword,
+    Default,
+}
+
+impl ThinkSource {
+    fn enabled(self) -> bool {
+        matches!(self, Self::SlashOn | Self::Keyword)
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::SlashOn => "on (/think)",
+            Self::SlashOff => "off (/nothink)",
+            Self::Keyword => "on (keyword)",
+            Self::Default => "off (default)",
+        }
+    }
+}
+
+/// Strip a leading `/think` or `/nothink` slash command from `msg`. Returns
+/// the override flag (if any) and the remaining message, borrowed from the
+/// input. The command is only recognized when followed by whitespace or
+/// end-of-input so `/thinker` and similar don't match.
+fn parse_think_override(msg: &str) -> (Option<bool>, &str) {
+    let trimmed = msg.trim_start();
+    for (prefix, value) in [("/nothink", false), ("/think", true)] {
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            let at_boundary = rest.chars().next().is_none_or(char::is_whitespace);
+            if at_boundary {
+                return (Some(value), rest.trim_start());
+            }
+        }
+    }
+    (None, msg)
+}
+
+/// Decide whether to enable Ollama thinking mode for this turn. Precedence:
+/// explicit slash command wins; else the multilingual `THINK_ON` keyword
+/// group; else off.
+fn decide_think(override_flag: Option<bool>, cleaned_msg: &str) -> ThinkSource {
+    match override_flag {
+        Some(true) => ThinkSource::SlashOn,
+        Some(false) => ThinkSource::SlashOff,
+        None if THINK_ON.matches(cleaned_msg) => ThinkSource::Keyword,
+        None => ThinkSource::Default,
+    }
+}
 
 fn memory_hint(session_active: Option<&str>, diary_active: bool) -> String {
     let status = match session_active {
-        Some(name) if diary_active => {
-            format!(" Diary recording ACTIVE (`{name}`); your replies are NOT saved.")
+        Some(name) if diary_active => format!(" Diary ACTIVE (`{name}`)."),
+        Some(name) => {
+            format!(" Session ACTIVE (`{name}`); host saves each turn — no write tools.")
         }
-        Some(name) => format!(
-            " Chat session ACTIVE (`{name}`); host records each turn — do NOT call memory write tools."
-        ),
         None => String::new(),
     };
-    format!(
-        "\nMemory MCP server connected. Host controls recording via keywords \
-(\"captain's log\" / \"record\" to start; \"close session\" / \"over and out\" / \
-\"Commander <name> out\" to stop). Use read tools (`read_graph`, `search_nodes`, \
-`open_nodes`) when prior context helps.{status}"
-    )
+    format!("\nMemory server ready. Use read tools for prior context.{status}")
 }
 
 fn tool_call_arguments(call: &serde_json::Value) -> serde_json::Value {
@@ -43,6 +165,17 @@ fn fmt_duration(d: Duration) -> String {
         format!("{}ms", d.as_millis())
     } else {
         format!("{:.1}s", d.as_secs_f64())
+    }
+}
+
+fn fmt_tokens(prompt: Option<u64>, eval: Option<u64>) -> String {
+    match (prompt, eval) {
+        (None, None) => String::new(),
+        (p, e) => {
+            let p = p.map(|n| n.to_string()).unwrap_or_else(|| "?".into());
+            let e = e.map(|n| n.to_string()).unwrap_or_else(|| "?".into());
+            format!(" (in:{p} out:{e})")
+        }
     }
 }
 
@@ -79,6 +212,8 @@ impl TurnResult {
 // ── Public entry point ─────────────────────────────────────────────
 
 pub async fn run_turn(state: &AppState, user_message: &str) -> Result<TurnResult, String> {
+    let (think_override, user_message) = parse_think_override(user_message);
+
     if let Some(cmd) = memory::detect_session_command(user_message) {
         return match cmd {
             SessionCommand::Start => handle_recording_start(state, false).await,
@@ -94,7 +229,12 @@ pub async fn run_turn(state: &AppState, user_message: &str) -> Result<TurnResult
         }
     }
 
-    let result = run_model_turn(state, user_message).await?;
+    let think = decide_think(think_override, user_message);
+    state
+        .emit_log("run", &format!("think:{}", think.label()))
+        .await;
+
+    let result = run_model_turn(state, user_message, think.enabled()).await?;
     spawn_memory_save(state, user_message, &result.text).await;
     Ok(result)
 }
@@ -300,68 +440,119 @@ async fn spawn_append(state: &AppState, mem: &MemoryProvider, entity: &str, cont
 
 // ── Model turn with tool loop ──────────────────────────────────────
 
-async fn run_model_turn(state: &AppState, user_message: &str) -> Result<TurnResult, String> {
+/// Assemble the static assistant preamble plus fs/memory/skills fragments.
+/// The order is stable turn-to-turn so Ollama can reuse its KV-cache prefix.
+async fn build_system_prompt(state: &AppState, has_tools: bool, has_memory: bool) -> String {
+    if !has_tools {
+        return format!("{PENGINE_OUTPUT_CONTRACT_LEAD}Answer concisely.");
+    }
+
+    let fs_hint = {
+        let paths = state.cached_filesystem_paths.read().await.clone();
+        if paths.is_empty() {
+            String::new()
+        } else {
+            let mounts = workspace_app_bind_pairs(&paths)
+                .iter()
+                .map(|(_, cpath)| cpath.clone())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("\nFile tools: use /app/… paths only. Mounts: {mounts}.")
+        }
+    };
+
+    let mem_hint = if has_memory {
+        let snap = state.memory_session.read().await;
+        memory_hint(
+            snap.as_ref().map(|s| s.entity_name.as_str()),
+            snap.as_ref().is_some_and(|s| s.diary_only),
+        )
+    } else {
+        String::new()
+    };
+
+    let skills_raw = skills::skills_prompt_hint(&state.store_path);
+    let (skills_hint, skills_truncated) =
+        skills::limit_skills_hint_bytes(skills_raw, skills::MAX_TOTAL_SKILL_HINT_BYTES);
+    if skills_truncated {
+        state
+            .emit_log(
+                "run",
+                &format!(
+                    "skills hint truncated to {} bytes (cap {})",
+                    skills_hint.len(),
+                    skills::MAX_TOTAL_SKILL_HINT_BYTES
+                ),
+            )
+            .await;
+    }
+
+    format!(
+        "{PENGINE_OUTPUT_CONTRACT_LEAD}Assistant with tools. Call a tool only for external data; otherwise answer directly. \
+         After tool results, answer immediately. Be concise.{fs_hint}{mem_hint}{skills_hint}"
+    )
+}
+
+async fn run_model_turn(
+    state: &AppState,
+    user_message: &str,
+    think: bool,
+) -> Result<TurnResult, String> {
     let model = match state.preferred_ollama_model.read().await.clone() {
         Some(m) => m,
         None => ollama::active_model().await?,
     };
 
-    let (ollama_tools, has_tools, has_memory) = {
+    let recent_tools = state.recent_tools_snapshot().await;
+    let (has_tools, has_memory, memory_server_key) = {
         let reg = state.mcp.read().await;
+        let mem = MemoryProvider::detect(&reg);
         (
-            reg.ollama_tools(),
             !reg.is_empty(),
-            MemoryProvider::detect(&reg).is_some(),
+            mem.is_some(),
+            mem.map(|m| m.server_name().to_string()),
         )
     };
 
-    let mem_snapshot = state.memory_session.read().await.clone();
+    let chat_session_recording = state
+        .memory_session
+        .read()
+        .await
+        .as_ref()
+        .is_some_and(|s| !s.diary_only);
 
-    let system = if has_tools {
-        let fs_hint = {
-            let paths = state.cached_filesystem_paths.read().await.clone();
-            if paths.is_empty() {
-                String::new()
-            } else {
-                let mounts: String = workspace_app_bind_pairs(&paths)
-                    .iter()
-                    .map(|(host, cpath)| format!("{cpath} ← {host}"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!("\nFile tools use container paths under /app/. Mounts: {mounts}. Use /app/… paths only.")
-            }
-        };
-        let mem_hint = if has_memory {
-            memory_hint(
-                mem_snapshot.as_ref().map(|s| s.entity_name.as_str()),
-                mem_snapshot.as_ref().is_some_and(|s| s.diary_only),
-            )
-        } else {
-            String::new()
-        };
-        let skills_raw = skills::skills_prompt_hint(&state.store_path);
-        let (skills_hint, skills_truncated) =
-            skills::limit_skills_hint_bytes(skills_raw, skills::MAX_TOTAL_SKILL_HINT_BYTES);
-        if skills_truncated {
-            state
-                .emit_log(
-                    "run",
-                    &format!(
-                        "skills hint truncated to {} bytes (cap {})",
-                        skills_hint.len(),
-                        skills::MAX_TOTAL_SKILL_HINT_BYTES
-                    ),
-                )
-                .await;
-        }
-        format!(
-            "Helpful assistant with tools. Call a tool ONLY when you need external data. \
-             After tool results, answer immediately. Be concise.{fs_hint}{mem_hint}{skills_hint}"
+    let mut tool_ctx = {
+        let reg = state.mcp.read().await;
+        reg.select_tools_for_turn(
+            user_message,
+            &recent_tools,
+            memory_server_key.as_deref(),
+            chat_session_recording,
         )
-    } else {
-        "Answer concisely.".to_string()
     };
+    state
+        .emit_log(
+            "tool_ctx",
+            &format!(
+                "select_ms={} active={}/{} subset={} routing={} recording={} high_risk={} recent_n={}",
+                tool_ctx.select_ms,
+                tool_ctx.active_count,
+                tool_ctx.total_count,
+                tool_ctx.used_subset,
+                tool_ctx.routing,
+                chat_session_recording,
+                tool_ctx.high_risk_active,
+                recent_tools.len()
+            ),
+        )
+        .await;
+    state.record_tool_selection_ms(tool_ctx.select_ms).await;
 
+    let system = build_system_prompt(state, has_tools, has_memory).await;
+
+    // Order matters for Ollama KV-cache reuse across turns: system message
+    // first, user second. Changing fragment order would invalidate the cached
+    // prefix between turns even when the content is identical.
     let mut messages = json!([
         { "role": "system", "content": system },
         { "role": "user", "content": user_message }
@@ -370,15 +561,33 @@ async fn run_model_turn(state: &AppState, user_message: &str) -> Result<TurnResu
     let mut tool_results: Vec<(String, String)> = Vec::new();
     let mut tools_supported = true;
     let empty_tools = json!([]);
+    let mut routing_escalated = false;
+    // Counts actual tool-result rounds, not loop iterations. A routing escalation
+    // re-enters step 0 with a fresh catalog, so it must not be treated as a
+    // post-tool continuation (no reminder, keep user's think/num_predict).
+    let mut tool_rounds: usize = 0;
 
     for step in 0..MAX_STEPS {
         let t0 = Instant::now();
         let effective_tools = if tools_supported {
-            &ollama_tools
+            &tool_ctx.tools_json
         } else {
             &empty_tools
         };
-        let result = ollama::chat_with_tools(&model, &messages, effective_tools).await?;
+        let post_tool = tool_rounds > 0;
+        let chat_opts = chat_options_for_agent_step(post_tool, think);
+
+        let inject_post_tool = post_tool;
+        if inject_post_tool {
+            push_ephemeral_post_tool_reminder(&mut messages);
+        }
+
+        let result = ollama::chat_with_tools(&model, &messages, effective_tools, &chat_opts).await;
+        if inject_post_tool {
+            pop_ephemeral_post_tool_reminder(&mut messages);
+        }
+        let result = result?;
+        let tokens = fmt_tokens(result.prompt_tokens, result.eval_tokens);
         let msg = result.message;
 
         if !result.tools_sent && tools_supported {
@@ -390,33 +599,49 @@ async fn run_model_turn(state: &AppState, user_message: &str) -> Result<TurnResu
         state
             .emit_log(
                 "time",
-                &format!("model step {step} {}", fmt_duration(t0.elapsed())),
+                &format!("model step {step} {}{tokens}", fmt_duration(t0.elapsed())),
             )
             .await;
-
-        if let Some(arr) = messages.as_array_mut() {
-            arr.push(msg.clone());
-        }
 
         let tool_calls = msg
             .get("tool_calls")
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();
+        let content = msg
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+
+        if step == 0
+            && !routing_escalated
+            && tool_ctx.used_subset
+            && tool_calls.is_empty()
+            && content.is_empty()
+        {
+            routing_escalated = true;
+            tool_ctx = {
+                let reg = state.mcp.read().await;
+                reg.full_tool_context()
+            };
+            state
+                .emit_log(
+                    "tool_ctx",
+                    &format!("escalate full catalog ({} tools)", tool_ctx.active_count),
+                )
+                .await;
+            continue;
+        }
+
+        if let Some(arr) = messages.as_array_mut() {
+            arr.push(msg);
+        }
 
         if tool_calls.is_empty() {
-            let text = msg
-                .get("content")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .trim()
-                .to_string();
-            if !text.is_empty() {
-                return Ok(TurnResult {
-                    text,
-                    source: ReplySource::Model,
-                    suppress_telegram_reply: false,
-                });
+            if !content.is_empty() {
+                return Ok(TurnResult::reply(content));
             }
             if tool_results.is_empty() {
                 return Ok(TurnResult::reply(""));
@@ -446,6 +671,9 @@ async fn run_model_turn(state: &AppState, user_message: &str) -> Result<TurnResu
                 })
                 .collect()
         };
+
+        let invoked_names: Vec<String> = prepared.iter().map(|(n, _)| n.clone()).collect();
+        state.note_tools_used(&invoked_names).await;
 
         let t0 = Instant::now();
         let mut handles = Vec::with_capacity(prepared.len());
@@ -488,10 +716,12 @@ async fn run_model_turn(state: &AppState, user_message: &str) -> Result<TurnResu
             if is_direct {
                 direct_replies.push(text.clone());
             }
+            let compacted = compact_tool_output(&text);
+            let for_model = truncate_for_model(&compacted, TOOL_OUTPUT_CHAR_CAP);
             if let Some(arr) = messages.as_array_mut() {
-                arr.push(json!({ "role": "tool", "name": name, "content": &text }));
+                arr.push(json!({ "role": "tool", "name": name, "content": &for_model }));
             }
-            tool_results.push((name.clone(), text));
+            tool_results.push((name.clone(), for_model));
         }
         state
             .emit_log(
@@ -499,6 +729,7 @@ async fn run_model_turn(state: &AppState, user_message: &str) -> Result<TurnResu
                 &format!("{} tool(s) {}", prepared.len(), fmt_duration(t0.elapsed())),
             )
             .await;
+        tool_rounds += 1;
 
         if !direct_replies.is_empty() {
             return Ok(TurnResult {
@@ -517,14 +748,26 @@ async fn run_model_turn(state: &AppState, user_message: &str) -> Result<TurnResu
         }
 
         let summary_messages = json!([
-            { "role": "system", "content": "Answer using ONLY the data below. Be concise." },
+            { "role": "system", "content": SUMMARY_SYSTEM_PROMPT },
             { "role": "user", "content": format!("{user_message}\n\nData:\n{data}") }
         ]);
 
+        let summary_opts = ChatOptions {
+            think: Some(false),
+            num_predict: Some(SUMMARY_NUM_PREDICT),
+            temperature: Some(SUMMARY_TEMPERATURE),
+            format: Some(ollama::summarize_reply_json_schema()),
+            ..ChatOptions::default()
+        };
         let t0 = Instant::now();
-        let result = ollama::chat_with_tools(&model, &summary_messages, &json!([])).await?;
+        let result =
+            ollama::chat_with_tools(&model, &summary_messages, &json!([]), &summary_opts).await?;
+        let tokens = fmt_tokens(result.prompt_tokens, result.eval_tokens);
         state
-            .emit_log("time", &format!("summarize {}", fmt_duration(t0.elapsed())))
+            .emit_log(
+                "time",
+                &format!("summarize {}{tokens}", fmt_duration(t0.elapsed())),
+            )
             .await;
 
         let text = result
@@ -552,4 +795,49 @@ async fn run_model_turn(state: &AppState, user_message: &str) -> Result<TurnResu
     Err(format!(
         "agent exceeded {MAX_STEPS} steps without finishing"
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn think_prefix_parsed_and_stripped() {
+        assert_eq!(
+            parse_think_override("/think solve this"),
+            (Some(true), "solve this")
+        );
+        assert_eq!(parse_think_override("  /nothink  hi"), (Some(false), "hi"));
+        assert_eq!(parse_think_override("/think"), (Some(true), ""));
+    }
+
+    #[test]
+    fn think_prefix_ignored_when_not_a_word_boundary() {
+        assert_eq!(parse_think_override("/thinker"), (None, "/thinker"));
+    }
+
+    #[test]
+    fn decide_think_precedence() {
+        assert_eq!(decide_think(Some(true), "anything"), ThinkSource::SlashOn);
+        assert_eq!(
+            decide_think(Some(false), "think hard please"),
+            ThinkSource::SlashOff
+        );
+        assert_eq!(
+            decide_think(None, "think hard about this"),
+            ThinkSource::Keyword
+        );
+        assert_eq!(
+            decide_think(None, "what is the weather"),
+            ThinkSource::Default
+        );
+    }
+
+    #[test]
+    fn think_source_enabled_maps_correctly() {
+        assert!(ThinkSource::SlashOn.enabled());
+        assert!(ThinkSource::Keyword.enabled());
+        assert!(!ThinkSource::SlashOff.enabled());
+        assert!(!ThinkSource::Default.enabled());
+    }
 }

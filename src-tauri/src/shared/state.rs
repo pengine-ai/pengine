@@ -6,6 +6,9 @@ use std::sync::Arc;
 use tauri::Emitter;
 use tokio::sync::{Mutex, Notify, RwLock};
 
+const RECENT_TOOLS_CAP: usize = 32;
+const TOOL_CTX_LATENCY_CAP: usize = 128;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectionData {
     pub bot_token: String,
@@ -47,6 +50,10 @@ pub struct AppState {
     pub tool_engine_mutex: Arc<Mutex<()>>,
     /// Active memory-session recording (toggled by keyword commands; see `bot::agent`).
     pub memory_session: Arc<RwLock<Option<MemorySession>>>,
+    /// Flat tool names last invoked by the model (FIFO, for routing next turns).
+    pub recent_tool_names: Arc<Mutex<Vec<String>>>,
+    /// Milliseconds spent in tool subset selection (rolling, for p95 logs).
+    pub tool_ctx_latency_ms: Arc<Mutex<Vec<u64>>>,
 }
 
 impl AppState {
@@ -68,6 +75,54 @@ impl AppState {
             cached_filesystem_paths: Arc::new(RwLock::new(Vec::new())),
             tool_engine_mutex: Arc::new(Mutex::new(())),
             memory_session: Arc::new(RwLock::new(None)),
+            recent_tool_names: Arc::new(Mutex::new(Vec::new())),
+            tool_ctx_latency_ms: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    /// Snapshot of recently invoked tool names in **insertion order** (oldest
+    /// first, newest last). Callers relying on recency weighting (e.g. the
+    /// tool router) must treat a larger index as "more recent".
+    pub async fn recent_tools_snapshot(&self) -> Vec<String> {
+        self.recent_tool_names.lock().await.clone()
+    }
+
+    pub async fn note_tools_used(&self, names: &[String]) {
+        if names.is_empty() {
+            return;
+        }
+        let mut g = self.recent_tool_names.lock().await;
+        for n in names {
+            let t = n.trim();
+            if t.is_empty() {
+                continue;
+            }
+            g.push(t.to_string());
+        }
+        while g.len() > RECENT_TOOLS_CAP {
+            g.remove(0);
+        }
+    }
+
+    pub async fn record_tool_selection_ms(&self, ms: u64) {
+        let mut buf = self.tool_ctx_latency_ms.lock().await;
+        buf.push(ms);
+        while buf.len() > TOOL_CTX_LATENCY_CAP {
+            buf.remove(0);
+        }
+        let n = buf.len();
+        if n >= 10 && n % 10 == 0 {
+            let mut s = buf.clone();
+            s.sort_unstable();
+            let idx = ((n as f64 * 0.95).ceil() as usize)
+                .saturating_sub(1)
+                .min(n - 1);
+            let p95 = s[idx];
+            self.emit_log(
+                "tool_ctx",
+                &format!("p95_select_ms={p95} samples={n} (routing histogram)"),
+            )
+            .await;
         }
     }
 

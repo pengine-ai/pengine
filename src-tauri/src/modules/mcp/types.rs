@@ -71,6 +71,16 @@ fn super_default_true() -> bool {
     true
 }
 
+/// Rough risk tier for routing / observability (not a security boundary on its own).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolRisk {
+    #[default]
+    Low,
+    Medium,
+    High,
+}
+
 /// Definition of a single tool, regardless of where it runs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDef {
@@ -83,4 +93,10 @@ pub struct ToolDef {
     pub input_schema: serde_json::Value,
     #[serde(skip)]
     pub direct_return: bool,
+    /// Inferred category for routing logs (e.g. `web`, `memory`, `filesystem`).
+    #[serde(skip)]
+    pub category: Option<String>,
+    /// Inferred risk for observability and future policy hooks.
+    #[serde(skip)]
+    pub risk: ToolRisk,
 }

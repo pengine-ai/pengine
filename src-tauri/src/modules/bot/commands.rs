@@ -1,5 +1,7 @@
 use crate::infrastructure::bot_lifecycle;
 use crate::modules::bot::repository;
+use crate::modules::keywords::all_keyword_groups;
+use crate::shared::keywords::KeywordGroup;
 use crate::shared::state::AppState;
 #[cfg(desktop)]
 use tauri_plugin_dialog::DialogExt;
@@ -45,4 +47,12 @@ pub async fn pick_mcp_filesystem_folder(app: tauri::AppHandle) -> Result<Option<
 #[tauri::command]
 pub async fn pick_mcp_filesystem_folder() -> Result<Option<String>, String> {
     Err("folder picker is only available on desktop".into())
+}
+
+/// Dashboard overview of every user-message keyword group the agent reacts to.
+/// Each group exposes its id, description, match mode, and phrases grouped by
+/// language — making it obvious where to add a translation.
+#[tauri::command]
+pub fn list_keyword_groups() -> Vec<&'static KeywordGroup> {
+    all_keyword_groups()
 }
