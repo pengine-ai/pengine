@@ -187,17 +187,26 @@ impl ToolRegistry {
     }
 
     /// Tools for one model turn: keyword + **recent-use** ranking, always-on
-    /// tools, and (when provided) every tool on the memory MCP server.
+    /// tools, and (when relevant) memory MCP tools — including while a **full chat
+    /// session** is recording (`chat_session_recording`), so the model can call
+    /// memory APIs on every turn, not only `fetch`/`time`.
     pub fn select_tools_for_turn(
         &self,
         user_message: &str,
         recent_tool_names: &[String],
         memory_server: Option<&str>,
+        chat_session_recording: bool,
     ) -> ToolContextSelection {
         let t0 = Instant::now();
         let all = self.all_tools();
         let total = all.len();
-        match route_tools(&all, user_message, recent_tool_names, memory_server) {
+        match route_tools(
+            &all,
+            user_message,
+            recent_tool_names,
+            memory_server,
+            chat_session_recording,
+        ) {
             ToolRoutePlan::Subset {
                 tools: selected,
                 routing,
@@ -433,9 +442,8 @@ fn registry_routing_threshold(tools: &[ToolDef], memory_server: Option<&str>) ->
     ROUTED_TOOL_BUDGET + ALWAYS_ON_TOOL_NAMES.len() + memory_tool_count
 }
 
-fn push_always_on_and_memory_tools(
+fn push_always_on_tools(
     tools: &[ToolDef],
-    memory_server: Option<&str>,
     selected: &mut Vec<ToolDef>,
     seen: &mut HashSet<String>,
 ) {
@@ -448,6 +456,59 @@ fn push_always_on_and_memory_tools(
             selected.push(tool.clone());
         }
     }
+}
+
+/// Memory MCP tools are large; only attach them when the user likely needs memory
+/// (Captain's log / session recording, recent use, or phrasing), not for unrelated
+/// weather-only turns when nothing is being recorded.
+fn memory_tools_relevant(
+    user_message: &str,
+    recent_tool_names: &[String],
+    tools: &[ToolDef],
+    memory_server: Option<&str>,
+    chat_session_recording: bool,
+) -> bool {
+    let Some(mem_srv) = memory_server else {
+        return false;
+    };
+    if chat_session_recording {
+        return true;
+    }
+    if recent_tool_names.iter().any(|r| {
+        tools
+            .iter()
+            .any(|t| t.server_name.eq_ignore_ascii_case(mem_srv) && tool_name_matches_recent(t, r))
+    }) {
+        return true;
+    }
+    let lower = user_message.to_lowercase();
+    const HINTS: &[&str] = &[
+        "remember",
+        "session",
+        "diary",
+        "captain's log",
+        "captain\u{2019}s log",
+        "captains log",
+        "tagebuch",
+        "notizbuch",
+        "gedächtnis",
+        "gedachtnis",
+        "memory",
+        "read the log",
+        "open the log",
+        "merk dir",
+        "speicher",
+        "transcript",
+    ];
+    HINTS.iter().any(|h| lower.contains(h))
+}
+
+fn push_memory_server_tools(
+    tools: &[ToolDef],
+    memory_server: Option<&str>,
+    selected: &mut Vec<ToolDef>,
+    seen: &mut HashSet<String>,
+) {
     if let Some(m) = memory_server {
         for tool in tools {
             if tool.server_name.eq_ignore_ascii_case(m) && seen.insert(tool.name.clone()) {
@@ -457,23 +518,15 @@ fn push_always_on_and_memory_tools(
     }
 }
 
-fn core_tool_subset(tools: &[ToolDef], memory_server: Option<&str>) -> Vec<ToolDef> {
-    let mut selected = Vec::new();
-    let mut seen = HashSet::new();
-    push_always_on_and_memory_tools(tools, memory_server, &mut selected, &mut seen);
-    selected.sort_by(|a, b| a.name.cmp(&b.name));
-    selected
-}
-
 /// Large registries: return a subset. Small registries (`len` ≤ threshold): pass the full list.
 /// When every tool scores 0 (common for non-English queries before any tool was used recently),
-/// use **core** tools only (always-on + memory), not the full catalog — same ballpark as after
-/// the first `fetch` when `fetch` gets a recent-use score.
+/// use **always-on** tools only (`fetch`, `time`) — not the full catalog.
 fn route_tools(
     tools: &[ToolDef],
     user_message: &str,
     recent_tool_names: &[String],
     memory_server: Option<&str>,
+    chat_session_recording: bool,
 ) -> ToolRoutePlan {
     let threshold = registry_routing_threshold(tools, memory_server);
     if tools.len() <= threshold {
@@ -484,14 +537,27 @@ fn route_tools(
     let mut scored: Vec<(usize, &ToolDef)> = tools
         .iter()
         .map(|t| {
-            let s = score_tool_combined(t, &query_tokens, recent_tool_names);
+            let s = score_tool_combined(t, &query_tokens, recent_tool_names, user_message);
             (s, t)
         })
         .collect();
 
     if scored.iter().all(|(s, _)| *s == 0) {
+        let mut selected = Vec::new();
+        let mut seen = HashSet::new();
+        push_always_on_tools(tools, &mut selected, &mut seen);
+        if memory_tools_relevant(
+            user_message,
+            recent_tool_names,
+            tools,
+            memory_server,
+            chat_session_recording,
+        ) {
+            push_memory_server_tools(tools, memory_server, &mut selected, &mut seen);
+        }
+        selected.sort_by(|a, b| a.name.cmp(&b.name));
         return ToolRoutePlan::Subset {
-            tools: core_tool_subset(tools, memory_server),
+            tools: selected,
             routing: "core_no_signal",
         };
     }
@@ -510,7 +576,16 @@ fn route_tools(
         }
     }
 
-    push_always_on_and_memory_tools(tools, memory_server, &mut selected, &mut seen);
+    push_always_on_tools(tools, &mut selected, &mut seen);
+    if memory_tools_relevant(
+        user_message,
+        recent_tool_names,
+        tools,
+        memory_server,
+        chat_session_recording,
+    ) {
+        push_memory_server_tools(tools, memory_server, &mut selected, &mut seen);
+    }
 
     ToolRoutePlan::Subset {
         tools: selected,
@@ -518,10 +593,36 @@ fn route_tools(
     }
 }
 
+fn message_suggests_url_fetch(msg: &str) -> bool {
+    let lower = msg.to_lowercase();
+    const HINTS: &[&str] = &[
+        "wetter",
+        "weather",
+        "forecast",
+        "vorhersage",
+        "regenwahrscheinlichkeit",
+        "temperatur",
+        "gewitter",
+        "schnee",
+        "hagel",
+        "wind",
+        "niederschlag",
+        "wttr",
+        "http",
+        "https",
+        "curl",
+        "api",
+        "download",
+        "abruf",
+    ];
+    HINTS.iter().any(|h| lower.contains(h))
+}
+
 fn score_tool_combined(
     tool: &ToolDef,
     query_tokens: &HashSet<String>,
     recent_tool_names: &[String],
+    user_message: &str,
 ) -> usize {
     let mut s = if query_tokens.is_empty() {
         0
@@ -529,6 +630,9 @@ fn score_tool_combined(
         score_tool(tool, query_tokens)
     };
     s += recent_tool_score(tool, recent_tool_names);
+    if tool.name.eq_ignore_ascii_case("fetch") && message_suggests_url_fetch(user_message) {
+        s += 14;
+    }
     s
 }
 
@@ -790,8 +894,9 @@ mod tests {
                 risk: ToolRisk::Low,
             });
         }
-        // 14 tools > threshold (8+2+0) without memory server
-        let plan = super::route_tools(&tools, "wie wird morgen das wetter", &[], None);
+        // 14 tools > threshold (8+2+0) without memory server. Message must not hit the
+        // weather/fetch URL hint or every tool still scores 0.
+        let plan = super::route_tools(&tools, "qqq zzz unrelated", &[], None, false);
         match plan {
             super::ToolRoutePlan::Subset {
                 tools: sel,
@@ -803,6 +908,120 @@ mod tests {
                 assert!(sel.iter().any(|t| t.name == "time"));
             }
             super::ToolRoutePlan::FullCatalog => panic!("expected core subset"),
+        }
+    }
+
+    #[test]
+    fn routing_german_weather_does_not_auto_attach_memory_mcp() {
+        let mut tools: Vec<ToolDef> = (0..12)
+            .map(|i| ToolDef {
+                server_name: "srv".into(),
+                name: format!("misc_{i}"),
+                description: None,
+                input_schema: json!({}),
+                direct_return: false,
+                category: None,
+                risk: ToolRisk::Low,
+            })
+            .collect();
+        for name in ["fetch", "time"] {
+            tools.push(ToolDef {
+                server_name: "srv".into(),
+                name: name.into(),
+                description: None,
+                input_schema: json!({}),
+                direct_return: false,
+                category: None,
+                risk: ToolRisk::Low,
+            });
+        }
+        for i in 0..4 {
+            tools.push(ToolDef {
+                server_name: "memsrv".into(),
+                name: format!("mem_{i}"),
+                description: None,
+                input_schema: json!({}),
+                direct_return: false,
+                category: None,
+                risk: ToolRisk::Low,
+            });
+        }
+        let plan = super::route_tools(
+            &tools,
+            "wie wird morgen das wetter in berlin",
+            &[],
+            Some("memsrv"),
+            false,
+        );
+        match plan {
+            super::ToolRoutePlan::Subset {
+                tools: sel,
+                routing,
+            } => {
+                assert_eq!(routing, "ranked");
+                assert_eq!(sel.len(), 2, "{sel:?}");
+                assert!(sel.iter().any(|t| t.name == "fetch"));
+                assert!(sel.iter().any(|t| t.name == "time"));
+                assert!(!sel.iter().any(|t| t.server_name == "memsrv"));
+            }
+            super::ToolRoutePlan::FullCatalog => panic!("expected ranked subset"),
+        }
+    }
+
+    #[test]
+    fn routing_chat_session_recording_includes_memory_mcp_with_weather() {
+        let mut tools: Vec<ToolDef> = (0..12)
+            .map(|i| ToolDef {
+                server_name: "srv".into(),
+                name: format!("misc_{i}"),
+                description: None,
+                input_schema: json!({}),
+                direct_return: false,
+                category: None,
+                risk: ToolRisk::Low,
+            })
+            .collect();
+        for name in ["fetch", "time"] {
+            tools.push(ToolDef {
+                server_name: "srv".into(),
+                name: name.into(),
+                description: None,
+                input_schema: json!({}),
+                direct_return: false,
+                category: None,
+                risk: ToolRisk::Low,
+            });
+        }
+        for i in 0..4 {
+            tools.push(ToolDef {
+                server_name: "memsrv".into(),
+                name: format!("mem_{i}"),
+                description: None,
+                input_schema: json!({}),
+                direct_return: false,
+                category: None,
+                risk: ToolRisk::Low,
+            });
+        }
+        let plan = super::route_tools(
+            &tools,
+            "wie wird morgen das wetter in berlin",
+            &[],
+            Some("memsrv"),
+            true,
+        );
+        match plan {
+            super::ToolRoutePlan::Subset {
+                tools: sel,
+                routing,
+            } => {
+                assert_eq!(routing, "ranked");
+                assert_eq!(sel.len(), 6, "{sel:?}");
+                assert!(sel.iter().any(|t| t.name == "fetch"));
+                assert!(sel.iter().any(|t| t.name == "time"));
+                assert_eq!(sel.iter().filter(|t| t.server_name == "memsrv").count(), 4);
+            }
+            super::ToolRoutePlan::FullCatalog => panic!("expected ranked subset"),
         }
     }
 }

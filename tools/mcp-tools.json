@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_at": "2026-04-14T00:00:00Z",
-  "catalog_revision": 6,
+  "catalog_revision": 7,
   "valid_until": "2026-05-14T00:00:00Z",
   "minimum_pengine_version": "0.5.0",
   "tools": [
@@ -22,7 +22,7 @@
         }
       ],
       "container_read_only_rootfs": false,
-      "mount_read_only": true,
+      "mount_read_only": false,
       "mount_workspace": true,
       "append_workspace_roots": true,
       "direct_return": true,

@@ -500,20 +500,33 @@ async fn run_model_turn(
         )
     };
 
+    let chat_session_recording = state
+        .memory_session
+        .read()
+        .await
+        .as_ref()
+        .is_some_and(|s| !s.diary_only);
+
     let mut tool_ctx = {
         let reg = state.mcp.read().await;
-        reg.select_tools_for_turn(user_message, &recent_tools, memory_server_key.as_deref())
+        reg.select_tools_for_turn(
+            user_message,
+            &recent_tools,
+            memory_server_key.as_deref(),
+            chat_session_recording,
+        )
     };
     state
         .emit_log(
             "tool_ctx",
             &format!(
-                "select_ms={} active={}/{} subset={} routing={} high_risk={} recent_n={}",
+                "select_ms={} active={}/{} subset={} routing={} recording={} high_risk={} recent_n={}",
                 tool_ctx.select_ms,
                 tool_ctx.active_count,
                 tool_ctx.total_count,
                 tool_ctx.used_subset,
                 tool_ctx.routing,
+                chat_session_recording,
                 tool_ctx.high_risk_active,
                 recent_tools.len()
             ),

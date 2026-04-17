@@ -25,6 +25,7 @@ const SESSION_START_EN: &[&str] = &[
     "remember this session",
     "save this session",
     "captain's log",
+    "captain\u{2019}s log",
     "captains log",
     "begin log",
 ];

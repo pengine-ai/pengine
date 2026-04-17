@@ -10,11 +10,14 @@ tags: [weather, forecast, wttr, open-meteo]
 
 Free: **wttr.in** (text) and **Open-Meteo** (JSON). No keys.
 
-## Default: one request
+## Default: one small request
 
-`https://wttr.in/PLACE?T&m` — spaces → `+` (e.g. `Vienna`). **`T`** = multi-day terminal forecast, **`m`** = metric.
+Prefer a **short** forecast to save tokens and latency:
 
-If the response looks like a real forecast → **summarize and stop**. No Open-Meteo unless wttr failed, error page, or you need JSON.
+- **1–2 days** (typical “today / tomorrow / morgen”): `https://wttr.in/PLACE?2&m` — spaces → `+`. **`2`** = two-day forecast, **`m`** = metric.
+- **Full multi-day table** only if the user asks for the week, several days, or `?2` is not enough: `https://wttr.in/PLACE?T&m` (**`T`** = full terminal layout).
+
+If the body looks like a real forecast → **summarize and stop**. No Open-Meteo unless wttr failed, error page, or you need JSON.
 
 ## How to answer
 
@@ -22,11 +25,12 @@ Chat, not a datasheet: short intro on how it _feels_, then compact day lines (da
 
 ## wttr.in (curl / fetch)
 
-| Goal                  | Example                                           |
-| --------------------- | ------------------------------------------------- |
-| Multi-day (preferred) | `curl -s "wttr.in/London?T&m"`                    |
-| One line now          | `curl -s "wttr.in/London?format=3"`               |
-| Custom one-liner      | `curl -s "wttr.in/London?format=%l:+%c+%t+%h+%w"` |
+| Goal | Example |
+| ---- | ------- |
+| Short (default), 1–2 days | `curl -s "wttr.in/London?2&m"` |
+| Full week-style table | `curl -s "wttr.in/London?T&m"` |
+| One line now | `curl -s "wttr.in/London?format=3"` |
+| Custom one-liner | `curl -s "wttr.in/London?format=%l:+%c+%t+%h+%w"` |
 
 Tips: `+` for spaces; `?m` / `?u` units; `?1` today only; `?0` now only; airports `wttr.in/JFK`; PNG `wttr.in/Berlin.png`.
 
