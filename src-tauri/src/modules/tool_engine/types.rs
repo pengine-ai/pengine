@@ -103,7 +103,8 @@ pub struct ToolEntry {
     /// Resource limits applied to the container.
     #[serde(default)]
     pub limits: ResourceLimits,
-    /// When true, tool results go directly to the user without model summarisation.
+    /// When true, tool results may go straight to the user without a model pass (host may still
+    /// override for specific tools). Default false; `pengine/fetch` ships with false so replies stay human-readable.
     #[serde(default)]
     pub direct_return: bool,
     /// When set, image build (`tools-publish.yml`) installs this npm package at this version.
@@ -120,6 +121,11 @@ pub struct ToolEntry {
     /// path via env so the tool can persist state (e.g. the Memory server's knowledge-graph JSON).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub private_folder: Option<PrivateFolderConfig>,
+    /// Host env var names to forward into the container via `--env=KEY=VALUE`. Missing host
+    /// vars are silently skipped (the container is expected to surface its own error). Used
+    /// for required secrets like `BRAVE_API_KEY` that must reach the MCP server at runtime.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub passthrough_env: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

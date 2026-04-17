@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { fetchToolCatalog, putToolPrivateFolder } from "../../toolengine";
 import { workspaceAppContainerMountPaths } from "../../../shared/workspaceMounts";
 import {
@@ -8,6 +8,11 @@ import {
   type ServerEntry,
   type ServerEntryStdio,
 } from "..";
+import {
+  buildEnvMapFromMcpForm,
+  envToOtherLinesText,
+  extractPrimarySecretEnvKey,
+} from "../mcpEnvHelpers";
 
 /** `pengine/memory` → `te_pengine-memory` (matches Rust `server_key`). */
 function teServerKeyForToolId(toolId: string): string {
@@ -215,11 +220,18 @@ function InlineEditForm({
 }) {
   const [command, setCommand] = useState(entry.command);
   const [argsText, setArgsText] = useState(entry.args.join("\n"));
-  const [envText, setEnvText] = useState(
-    Object.entries(entry.env)
-      .map(([k, v]) => `${k}=${v}`)
-      .join("\n"),
+  const primarySecretKey0 = extractPrimarySecretEnvKey(entry.env);
+  const baselineSecretRef = useRef<{ name: string; value: string } | null>(
+    primarySecretKey0 && entry.env[primarySecretKey0]
+      ? { name: primarySecretKey0, value: entry.env[primarySecretKey0] }
+      : null,
   );
+  const [apiKeyName, setApiKeyName] = useState(primarySecretKey0 ?? "");
+  const [apiKeyValue, setApiKeyValue] = useState("");
+  const [envOtherLines, setEnvOtherLines] = useState(
+    envToOtherLinesText(entry.env, primarySecretKey0),
+  );
+  const [replacingSecret, setReplacingSecret] = useState(false);
   const [directReturn, setDirectReturn] = useState(entry.direct_return);
   const [pickFolderError, setPickFolderError] = useState<string | null>(null);
 
@@ -412,14 +424,19 @@ function InlineEditForm({
       .split("\n")
       .map((l) => l.trim())
       .filter(Boolean);
-    const env: Record<string, string> = {};
-    for (const line of envText.split("\n")) {
-      const eq = line.indexOf("=");
-      if (eq > 0) {
-        const key = line.slice(0, eq).trim();
-        if (key !== "") env[key] = line.slice(eq + 1).trim();
-      }
-    }
+    const preserved =
+      !replacingSecret &&
+      baselineSecretRef.current &&
+      apiKeyName.trim() === baselineSecretRef.current.name
+        ? baselineSecretRef.current.value
+        : null;
+    const env = buildEnvMapFromMcpForm({
+      otherLinesText: envOtherLines,
+      apiKeyName,
+      apiKeyValue,
+      preservedSecretValue: preserved,
+      replacingSecret,
+    });
     await onSave({
       type: "stdio",
       command: command.trim(),
@@ -576,15 +593,96 @@ function InlineEditForm({
             className={`${INPUT_CLASS} resize-y`}
           />
         </div>
+        <div className="rounded-lg border border-white/10 bg-black/15 p-3">
+          <label className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-(--mid)">
+            API key / secret (optional)
+          </label>
+          <p className="mb-2 text-[10px] leading-snug text-white/40">
+            Variable name plus value. After you save and reopen edit, the value stays hidden until
+            you choose Replace.
+          </p>
+          {baselineSecretRef.current && !replacingSecret ? (
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-white/10 bg-black/25 px-2 py-2">
+              <div className="min-w-0">
+                <p className="font-mono text-[9px] text-white/45">
+                  {(baselineSecretRef.current?.name ?? apiKeyName) || "—"}
+                </p>
+                <p
+                  className="mt-0.5 font-mono text-[11px] tracking-widest text-white/35"
+                  aria-hidden
+                >
+                  ••••••••
+                </p>
+              </div>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => {
+                  setReplacingSecret(true);
+                  setApiKeyValue("");
+                }}
+                className="shrink-0 rounded border border-white/15 bg-white/5 px-2 py-0.5 font-mono text-[10px] text-white/70 transition hover:bg-white/10 disabled:opacity-40"
+              >
+                Replace…
+              </button>
+            </div>
+          ) : (
+            <div className="grid gap-2 sm:grid-cols-2">
+              <div className="sm:col-span-1">
+                <label className="mb-0.5 block font-mono text-[9px] text-white/45">
+                  Variable name
+                </label>
+                <input
+                  type="text"
+                  value={apiKeyName}
+                  onChange={(e) => setApiKeyName(e.target.value)}
+                  placeholder="BRAVE_API_KEY"
+                  autoComplete="off"
+                  className={INPUT_CLASS}
+                />
+              </div>
+              <div className="sm:col-span-1">
+                <div className="flex items-end justify-between gap-2">
+                  <label className="mb-0.5 block font-mono text-[9px] text-white/45">Value</label>
+                  {replacingSecret && baselineSecretRef.current ? (
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => {
+                        setReplacingSecret(false);
+                        setApiKeyName(baselineSecretRef.current?.name ?? "");
+                        setApiKeyValue("");
+                      }}
+                      className="mb-0.5 font-mono text-[9px] text-white/40 underline decoration-white/20 underline-offset-2 hover:text-white/60"
+                    >
+                      Cancel
+                    </button>
+                  ) : null}
+                </div>
+                <input
+                  type="password"
+                  value={apiKeyValue}
+                  onChange={(e) => setApiKeyValue(e.target.value)}
+                  placeholder={replacingSecret ? "New value (empty removes)" : "Secret value"}
+                  autoComplete="new-password"
+                  className={INPUT_CLASS}
+                />
+              </div>
+            </div>
+          )}
+        </div>
         <div>
           <label className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-(--mid)">
-            Env (KEY=value per line)
+            Other environment (KEY=value per line)
           </label>
+          <p className="mb-1.5 text-[10px] leading-snug text-white/40">
+            Use for non-secret vars. Do not repeat the API key name here.
+          </p>
           <textarea
-            value={envText}
-            onChange={(e) => setEnvText(e.target.value)}
+            value={envOtherLines}
+            onChange={(e) => setEnvOtherLines(e.target.value)}
             rows={2}
-            placeholder={"API_KEY=sk-..."}
+            placeholder={"NODE_ENV=production"}
             className={`${INPUT_CLASS} resize-y`}
           />
         </div>

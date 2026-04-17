@@ -7,6 +7,7 @@ import {
   fetchRuntimeStatus,
   fetchToolCatalog,
   installTool,
+  putToolPassthroughEnv,
   uninstallTool,
   type CatalogTool,
   type RuntimeStatus,
@@ -24,9 +25,34 @@ export function ToolEnginePanel() {
   const [notice, setNotice] = useState<string | null>(null);
   const [progressLines, setProgressLines] = useState<string[]>([]);
   const busyToolRef = useRef<string | null>(null);
+  const [passthroughValues, setPassthroughValues] = useState<
+    Record<string, Record<string, string>>
+  >({});
+  /** Per-key "replace secret" mode (only used when the key is already saved). */
+  const [passthroughReplacing, setPassthroughReplacing] = useState<
+    Record<string, Record<string, boolean>>
+  >({});
+  const [passthroughSavingId, setPassthroughSavingId] = useState<string | null>(null);
 
   const cancelledRef = useRef(false);
   const seqRef = useRef(0);
+
+  useEffect(() => {
+    if (!catalog) return;
+    setPassthroughValues((prev) => {
+      const next = { ...prev };
+      for (const t of catalog) {
+        const keys = t.passthrough_env;
+        if (!keys?.length) continue;
+        const cur = { ...(next[t.id] ?? {}) };
+        for (const k of keys) {
+          if (cur[k] === undefined) cur[k] = "";
+        }
+        next[t.id] = cur;
+      }
+      return next;
+    });
+  }, [catalog]);
 
   // Listen for toolengine log events to show pull progress.
   useEffect(() => {
@@ -129,6 +155,43 @@ export function ToolEnginePanel() {
         busyToolRef.current = null;
         setBusyKind(null);
       }
+    }
+  };
+
+  const savePassthrough = async (tool: CatalogTool) => {
+    const keys = tool.passthrough_env ?? [];
+    if (!keys.length || !tool.installed) return;
+    const draft = passthroughValues[tool.id] ?? {};
+    const configured = new Set(tool.passthrough_configured_keys ?? []);
+    const replacing = passthroughReplacing[tool.id] ?? {};
+    const env: Record<string, string> = {};
+    for (const k of keys) {
+      const trimmed = (draft[k] ?? "").trim();
+      if (configured.has(k) && !replacing[k]) {
+        // Omit so the server keeps the existing value (empty draft must not clear secrets).
+        continue;
+      }
+      env[k] = trimmed;
+    }
+    setPassthroughSavingId(tool.id);
+    setActionError(null);
+    try {
+      const result = await putToolPassthroughEnv(tool.id, env);
+      if (cancelledRef.current) return;
+      if (result.ok) {
+        setNotice(`Saved secrets for ${tool.name}`);
+        setPassthroughReplacing((prev) => {
+          const next = { ...prev };
+          delete next[tool.id];
+          return next;
+        });
+        notifyMcpRegistryChanged();
+        await loadData();
+      } else {
+        setActionError(result.error ?? "Could not save API keys");
+      }
+    } finally {
+      setPassthroughSavingId(null);
     }
   };
 
@@ -291,6 +354,127 @@ export function ToolEnginePanel() {
                         ? ` · allowlist (informational): ${tool.robots_ignore_allowlist.join(", ")}`
                         : ""}
                     </p>
+                  )}
+                  {(tool.passthrough_env?.length ?? 0) > 0 && !tool.installed && (
+                    <p className="mt-2 font-mono text-[9px] text-white/40">
+                      Install this tool, then set {tool.passthrough_env?.join(", ")} below so the
+                      MCP server can start and register all commands.
+                    </p>
+                  )}
+                  {(tool.passthrough_env?.length ?? 0) > 0 && tool.installed && (
+                    <div className="mt-2 rounded-lg border border-white/10 bg-black/15 px-2.5 py-2 sm:px-3">
+                      <p className="font-mono text-[10px] uppercase tracking-[0.12em] text-(--mid)">
+                        Container secrets
+                      </p>
+                      {tool.passthrough_configured_keys &&
+                      tool.passthrough_configured_keys.length > 0 ? (
+                        <p className="mt-1 font-mono text-[9px] text-emerald-200/80">
+                          Saved: {tool.passthrough_configured_keys.join(", ")}
+                        </p>
+                      ) : (
+                        <p className="mt-1 font-mono text-[9px] text-amber-200/70">
+                          Required for this tool to start. Stored locally in mcp.json (not sent to
+                          the model).
+                        </p>
+                      )}
+                      <div className="mt-2 space-y-2">
+                        {(tool.passthrough_env ?? []).map((key) => {
+                          const configuredKeys = tool.passthrough_configured_keys ?? [];
+                          const isSaved = configuredKeys.includes(key);
+                          const isReplacing = passthroughReplacing[tool.id]?.[key] === true;
+                          if (isSaved && !isReplacing) {
+                            return (
+                              <div
+                                key={key}
+                                className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-white/10 bg-black/20 px-2 py-1.5"
+                              >
+                                <span className="font-mono text-[9px] text-white/45">{key}</span>
+                                <div className="flex min-w-0 flex-1 items-center justify-end gap-2">
+                                  <span
+                                    className="truncate font-mono text-[11px] tracking-widest text-white/35"
+                                    aria-hidden
+                                  >
+                                    ••••••••
+                                  </span>
+                                  <button
+                                    type="button"
+                                    disabled={busyTool !== null || passthroughSavingId === tool.id}
+                                    onClick={() => {
+                                      setPassthroughReplacing((prev) => ({
+                                        ...prev,
+                                        [tool.id]: { ...(prev[tool.id] ?? {}), [key]: true },
+                                      }));
+                                      setPassthroughValues((prev) => ({
+                                        ...prev,
+                                        [tool.id]: { ...(prev[tool.id] ?? {}), [key]: "" },
+                                      }));
+                                    }}
+                                    className="shrink-0 rounded border border-white/15 bg-white/5 px-2 py-0.5 font-mono text-[10px] text-white/70 transition hover:bg-white/10 disabled:opacity-40"
+                                  >
+                                    Replace…
+                                  </button>
+                                </div>
+                              </div>
+                            );
+                          }
+                          return (
+                            <label key={key} className="block">
+                              <div className="flex items-baseline justify-between gap-2">
+                                <span className="font-mono text-[9px] text-white/45">{key}</span>
+                                {isSaved && isReplacing ? (
+                                  <button
+                                    type="button"
+                                    disabled={busyTool !== null || passthroughSavingId === tool.id}
+                                    onClick={() => {
+                                      setPassthroughReplacing((prev) => {
+                                        const row = { ...(prev[tool.id] ?? {}) };
+                                        delete row[key];
+                                        const next = { ...prev };
+                                        if (Object.keys(row).length) next[tool.id] = row;
+                                        else delete next[tool.id];
+                                        return next;
+                                      });
+                                      setPassthroughValues((prev) => ({
+                                        ...prev,
+                                        [tool.id]: { ...(prev[tool.id] ?? {}), [key]: "" },
+                                      }));
+                                    }}
+                                    className="font-mono text-[9px] text-white/40 underline decoration-white/20 underline-offset-2 hover:text-white/60"
+                                  >
+                                    Cancel
+                                  </button>
+                                ) : null}
+                              </div>
+                              <input
+                                type={/KEY|SECRET|TOKEN|PASSWORD/i.test(key) ? "password" : "text"}
+                                value={passthroughValues[tool.id]?.[key] ?? ""}
+                                onChange={(e) =>
+                                  setPassthroughValues((prev) => ({
+                                    ...prev,
+                                    [tool.id]: { ...(prev[tool.id] ?? {}), [key]: e.target.value },
+                                  }))
+                                }
+                                placeholder={
+                                  isReplacing ? "New value (empty removes key)" : undefined
+                                }
+                                className="mt-0.5 w-full rounded-md border border-white/10 bg-black/25 px-2 py-1 font-mono text-[11px] text-white outline-none focus:border-emerald-300/35"
+                                autoComplete="off"
+                              />
+                            </label>
+                          );
+                        })}
+                      </div>
+                      <div className="mt-2 flex justify-end">
+                        <button
+                          type="button"
+                          disabled={busyTool !== null || passthroughSavingId === tool.id}
+                          onClick={() => void savePassthrough(tool)}
+                          className="rounded-lg border border-emerald-300/20 bg-emerald-300/10 px-3 py-1 font-mono text-[11px] text-emerald-300 transition hover:bg-emerald-300/20 disabled:opacity-40"
+                        >
+                          {passthroughSavingId === tool.id ? "Saving…" : "Save keys"}
+                        </button>
+                      </div>
+                    </div>
                   )}
                 </div>
 

@@ -72,7 +72,7 @@
       "mount_read_only": true,
       "mount_workspace": false,
       "append_workspace_roots": false,
-      "direct_return": true,
+      "direct_return": false,
       "network_isolated": false,
       "upstream_mcp_pypi": {
         "package": "mcp-server-fetch",
@@ -203,6 +203,48 @@
         "cpus": "0.25",
         "memory": "256m",
         "timeout_secs": 30
+      }
+    },
+    {
+      "id": "pengine/brave-search",
+      "name": "Brave Search",
+      "description": "Brave Search MCP: web, local, video, image, news, and summarizer tools via the Brave Search API. After install, add BRAVE_API_KEY under Tool Engine → Container secrets (saved in mcp.json). Alternatively, export BRAVE_API_KEY in the shell before you start Pengine. Requires outbound network.",
+      "image": "ghcr.io/pengine-ai/pengine-brave-search",
+      "current": "0.1.0",
+      "versions": [
+        {
+          "version": "0.1.0",
+          "digest": "sha256:placeholder",
+          "released_at": "2026-04-17T00:00:00Z",
+          "yanked": false,
+          "revoked": false,
+          "security": false
+        }
+      ],
+      "container_read_only_rootfs": true,
+      "mount_read_only": true,
+      "mount_workspace": false,
+      "append_workspace_roots": false,
+      "direct_return": false,
+      "network_isolated": false,
+      "upstream_mcp_npm": {
+        "package": "@brave/brave-search-mcp-server",
+        "version": "2.0.76"
+      },
+      "mcp_server_cmd": [],
+      "passthrough_env": ["BRAVE_API_KEY"],
+      "commands": [
+        { "name": "brave_web_search", "description": "Web search with filtering, pagination, and optional AI summarization" },
+        { "name": "brave_local_search", "description": "Local business and place discovery with ratings, hours, and AI descriptions" },
+        { "name": "brave_video_search", "description": "Video search with metadata and thumbnails" },
+        { "name": "brave_image_search", "description": "Image search with automatic fetching" },
+        { "name": "brave_news_search", "description": "News search with freshness controls and breaking-news indicators" },
+        { "name": "brave_summarizer", "description": "AI-powered summaries from web search results" }
+      ],
+      "limits": {
+        "cpus": "0.5",
+        "memory": "512m",
+        "timeout_secs": 60
       }
     },
     {

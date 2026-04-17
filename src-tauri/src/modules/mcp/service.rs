@@ -5,6 +5,7 @@ use super::client::McpClient;
 use super::native;
 use super::registry::{Provider, ToolRegistry};
 use super::types::{McpConfig, ServerEntry};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::Emitter;
@@ -118,6 +119,152 @@ fn default_config_value() -> serde_json::Value {
             }
         }
     })
+}
+
+fn redact_podman_docker_env_argv(args: &[String]) -> Vec<String> {
+    args.iter()
+        .map(|a| {
+            let Some(rest) = a.strip_prefix("--env=") else {
+                return a.clone();
+            };
+            let Some((name, val)) = rest.split_once('=') else {
+                return a.clone();
+            };
+            if val.is_empty() {
+                return a.clone();
+            }
+            format!("--env={name}=********")
+        })
+        .collect()
+}
+
+fn command_is_podman_or_docker(command: &str) -> bool {
+    let cmd_trim = command.trim();
+    std::path::Path::new(cmd_trim)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(|b| b == "podman" || b == "docker")
+        .unwrap_or(cmd_trim == "podman" || cmd_trim == "docker")
+}
+
+/// Removes stored catalog secrets and masks `--env=…` values in `podman|docker run` argv before
+/// returning `mcp.json` over HTTP (GET `/v1/mcp/servers`).
+pub fn redact_mcp_server_entry_for_list_response(entry: &ServerEntry) -> ServerEntry {
+    match entry {
+        ServerEntry::Native { .. } => entry.clone(),
+        ServerEntry::Stdio {
+            command,
+            args,
+            env,
+            direct_return,
+            private_host_path,
+            ..
+        } => {
+            let args = if command_is_podman_or_docker(command) {
+                redact_podman_docker_env_argv(args)
+            } else {
+                args.clone()
+            };
+            ServerEntry::Stdio {
+                command: command.clone(),
+                args,
+                env: env.clone(),
+                direct_return: *direct_return,
+                private_host_path: private_host_path.clone(),
+                catalog_passthrough: HashMap::new(),
+            }
+        }
+    }
+}
+
+const REDACTED_ENV_VALUE_PLACEHOLDER: &str = "********";
+
+fn is_redacted_podman_env_arg(token: &str) -> bool {
+    let Some(rest) = token.strip_prefix("--env=") else {
+        return false;
+    };
+    let Some((_name, val)) = rest.split_once('=') else {
+        return false;
+    };
+    val == REDACTED_ENV_VALUE_PLACEHOLDER
+}
+
+/// Restores real `podman|docker run --env=…` argv and `catalog_passthrough` when the client PUTs
+/// a stdio entry that came from [`redact_mcp_server_entry_for_list_response`] (dashboard round-trip,
+/// e.g. toggling `direct_return`), so secrets are not replaced with `********` on disk.
+pub fn merge_stdio_entry_preserving_redacted_secrets(
+    old_entry: Option<&ServerEntry>,
+    entry: ServerEntry,
+) -> ServerEntry {
+    let ServerEntry::Stdio {
+        command,
+        mut args,
+        env,
+        direct_return,
+        private_host_path,
+        mut catalog_passthrough,
+    } = entry
+    else {
+        return entry;
+    };
+
+    let Some(ServerEntry::Stdio {
+        args: old_args,
+        catalog_passthrough: old_cp,
+        ..
+    }) = old_entry
+    else {
+        return ServerEntry::Stdio {
+            command,
+            args,
+            env,
+            direct_return,
+            private_host_path,
+            catalog_passthrough,
+        };
+    };
+
+    if !command_is_podman_or_docker(&command) {
+        return ServerEntry::Stdio {
+            command,
+            args,
+            env,
+            direct_return,
+            private_host_path,
+            catalog_passthrough,
+        };
+    }
+
+    let mut restored_any_env = false;
+    for new_a in &mut args {
+        if !is_redacted_podman_env_arg(new_a.as_str()) {
+            continue;
+        }
+        let Some(rest) = new_a.strip_prefix("--env=") else {
+            continue;
+        };
+        let Some((name, _)) = rest.split_once('=') else {
+            continue;
+        };
+        let prefix = format!("--env={name}=");
+        if let Some(old_a) = old_args.iter().find(|a| a.starts_with(&prefix)) {
+            *new_a = old_a.clone();
+            restored_any_env = true;
+        }
+    }
+
+    if restored_any_env && catalog_passthrough.is_empty() && !old_cp.is_empty() {
+        catalog_passthrough = old_cp.clone();
+    }
+
+    ServerEntry::Stdio {
+        command,
+        args,
+        env,
+        direct_return,
+        private_host_path,
+        catalog_passthrough,
+    }
 }
 
 pub fn load_or_init_config(path: &Path) -> Result<McpConfig, String> {
@@ -411,5 +558,79 @@ mod tests {
         let (path, src) = resolve_mcp_config_path(&store);
         assert_eq!(src, "app_data");
         assert_eq!(path, PathBuf::from("/tmp/pengine-fake-app/mcp.json"));
+    }
+
+    #[test]
+    fn list_response_redacts_podman_env_args_and_catalog_passthrough() {
+        let entry = ServerEntry::Stdio {
+            command: "podman".into(),
+            args: vec![
+                "run".into(),
+                "--rm".into(),
+                "--env=BRAVE_API_KEY=super-secret".into(),
+            ],
+            env: HashMap::new(),
+            direct_return: false,
+            private_host_path: None,
+            catalog_passthrough: HashMap::from([("BRAVE_API_KEY".into(), "super-secret".into())]),
+        };
+        let r = redact_mcp_server_entry_for_list_response(&entry);
+        let ServerEntry::Stdio {
+            args,
+            catalog_passthrough,
+            ..
+        } = r
+        else {
+            panic!("expected stdio");
+        };
+        assert!(
+            args.iter().any(|a| a == "--env=BRAVE_API_KEY=********"),
+            "args={args:?}"
+        );
+        assert!(catalog_passthrough.is_empty());
+    }
+
+    #[test]
+    fn merge_stdio_restores_redacted_env_argv_and_catalog_passthrough() {
+        let old = ServerEntry::Stdio {
+            command: "podman".into(),
+            args: vec![
+                "run".into(),
+                "--rm".into(),
+                "--env=BRAVE_API_KEY=real-secret".into(),
+            ],
+            env: HashMap::new(),
+            direct_return: false,
+            private_host_path: None,
+            catalog_passthrough: HashMap::from([("BRAVE_API_KEY".into(), "real-secret".into())]),
+        };
+        let new = ServerEntry::Stdio {
+            command: "podman".into(),
+            args: vec![
+                "run".into(),
+                "--rm".into(),
+                "--env=BRAVE_API_KEY=********".into(),
+            ],
+            env: HashMap::new(),
+            direct_return: true,
+            private_host_path: None,
+            catalog_passthrough: HashMap::new(),
+        };
+        let merged = merge_stdio_entry_preserving_redacted_secrets(Some(&old), new);
+        let ServerEntry::Stdio {
+            args,
+            catalog_passthrough,
+            direct_return,
+            ..
+        } = merged
+        else {
+            panic!("expected stdio");
+        };
+        assert_eq!(args[2], "--env=BRAVE_API_KEY=real-secret");
+        assert_eq!(
+            catalog_passthrough.get("BRAVE_API_KEY").map(String::as_str),
+            Some("real-secret")
+        );
+        assert!(direct_return);
     }
 }

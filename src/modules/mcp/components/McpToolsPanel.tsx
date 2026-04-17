@@ -12,6 +12,22 @@ import { useRegistryChanged } from "../../../shared/useRegistryChanged";
 import { AddServerForm } from "./AddServerForm";
 import { McpServerCard } from "./McpServerCard";
 
+/** Steady-state refresh when the registry already exposes tools. */
+const MCP_TOOLS_POLL_MS_READY = 12_000;
+/**
+ * After install or reconnect, `GET /v1/mcp/tools` often returns [] while stdio servers still
+ * handshake — the old 30s wait made the dashboard look broken until a full page reload.
+ */
+const MCP_TOOLS_POLL_MS_EMPTY = 2_500;
+/** Request failed or timed out — retry sooner than steady-state. */
+const MCP_TOOLS_POLL_MS_ERROR = 5_000;
+
+function nextToolsPollDelayMs(data: McpTool[] | null): number {
+  if (data === null) return MCP_TOOLS_POLL_MS_ERROR;
+  if (data.length === 0) return MCP_TOOLS_POLL_MS_EMPTY;
+  return MCP_TOOLS_POLL_MS_READY;
+}
+
 /**
  * Dashboard panel: MCP tools (config entries), CRUD, and commands grouped per tool.
  */
@@ -60,8 +76,7 @@ export function McpToolsPanel() {
       } else {
         setToolsError("Could not load MCP commands");
       }
-      const next = t !== null && t.length > 0 ? 10_000 : 30_000;
-      scheduleToolsPollRef.current(next);
+      scheduleToolsPollRef.current(nextToolsPollDelayMs(t));
     }
   }, []);
 
@@ -89,8 +104,7 @@ export function McpToolsPanel() {
       } else {
         setToolsError("Could not load MCP commands");
       }
-      const next = data !== null && data.length > 0 ? 10_000 : 30_000;
-      schedulePoll(next);
+      schedulePoll(nextToolsPollDelayMs(data));
     };
 
     const loadServersOnce = async () => {

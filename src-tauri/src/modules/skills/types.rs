@@ -30,6 +30,10 @@ pub struct Skill {
     pub license: Option<String>,
     #[serde(default)]
     pub requires: Vec<String>,
+    /// If `requires` lists `brave_web_search`, optional substrings (case-insensitive) that must
+    /// appear in the user message before that tool is exposed — in addition to `tags` (length ≥4).
+    #[serde(default)]
+    pub brave_allow_substrings: Vec<String>,
     #[serde(default)]
     pub origin: SkillOrigin,
     /// Optional extra rules from `mandatory.md` next to `SKILL.md` (server-only; not serialized to clients).

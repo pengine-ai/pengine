@@ -27,6 +27,8 @@ pub enum ServerEntry {
         command: String,
         #[serde(default)]
         args: Vec<String>,
+        /// Host environment passed to the spawned `command` (e.g. `npx`). Tool Engine catalog
+        /// servers normally leave this empty and inject container env via `args` (`podman run --env=…`).
         #[serde(default)]
         env: HashMap<String, String>,
         /// When true, tool results are returned directly to the user without
@@ -37,6 +39,10 @@ pub enum ServerEntry {
         /// into the container. Defaults to `$APP_DATA/tool-data/<slug>/`; user overrides land here.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         private_host_path: Option<String>,
+        /// Persisted values for catalog `passthrough_env` keys (injected into `args` as
+        /// `podman|docker run --env=…`). Not applied to the host `podman` process via `env`.
+        #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+        catalog_passthrough: HashMap<String, String>,
     },
 }
 
