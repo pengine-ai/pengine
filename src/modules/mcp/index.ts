@@ -91,7 +91,7 @@ export async function putMcpFilesystemPaths(paths: string[], timeoutMs = 15000):
 }
 
 /** GET `/v1/mcp/tools` — flat list of tools across all connected MCP servers. `null` = request failed. */
-export async function fetchMcpTools(timeoutMs = 3000): Promise<McpTool[] | null> {
+export async function fetchMcpTools(timeoutMs = 15000): Promise<McpTool[] | null> {
   const { signal, cleanup } = makeTimeoutSignal(timeoutMs);
   try {
     const resp = await fetch(`${PENGINE_API_BASE}/v1/mcp/tools`, {

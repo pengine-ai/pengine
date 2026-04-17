@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { ServerEntry } from "..";
+import { buildEnvMapFromMcpForm } from "../mcpEnvHelpers";
 
 type Props = {
   busy: boolean;
@@ -24,7 +25,9 @@ export function AddServerForm({ busy, onAdd }: Props) {
   const [nativeId, setNativeId] = useState("");
   const [command, setCommand] = useState("");
   const [argsText, setArgsText] = useState("");
-  const [envText, setEnvText] = useState("");
+  const [apiKeyName, setApiKeyName] = useState("");
+  const [apiKeyValue, setApiKeyValue] = useState("");
+  const [envOtherLines, setEnvOtherLines] = useState("");
   const [directReturn, setDirectReturn] = useState(false);
 
   const reset = () => {
@@ -35,7 +38,9 @@ export function AddServerForm({ busy, onAdd }: Props) {
     setManualKind("stdio");
     setCommand("");
     setArgsText("");
-    setEnvText("");
+    setApiKeyName("");
+    setApiKeyValue("");
+    setEnvOtherLines("");
     setDirectReturn(false);
     setError(null);
   };
@@ -127,11 +132,13 @@ export function AddServerForm({ busy, onAdd }: Props) {
       .split("\n")
       .map((l) => l.trim())
       .filter(Boolean);
-    const env: Record<string, string> = {};
-    for (const line of envText.split("\n")) {
-      const eq = line.indexOf("=");
-      if (eq > 0) env[line.slice(0, eq).trim()] = line.slice(eq + 1).trim();
-    }
+    const env = buildEnvMapFromMcpForm({
+      otherLinesText: envOtherLines,
+      apiKeyName,
+      apiKeyValue,
+      preservedSecretValue: null,
+      replacingSecret: true,
+    });
 
     try {
       await onAdd(name, {
@@ -328,15 +335,50 @@ export function AddServerForm({ busy, onAdd }: Props) {
                   className={`${inputClass} resize-y`}
                 />
               </div>
+              <div className="md:col-span-2 rounded-lg border border-white/10 bg-black/15 p-3">
+                <label className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-(--mid)">
+                  API key / secret (optional)
+                </label>
+                <p className="mb-2 text-[10px] leading-snug text-white/40">
+                  Use a dedicated password field instead of putting secrets in the multi-line env
+                  box.
+                </p>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <div>
+                    <label className="mb-0.5 block font-mono text-[9px] text-white/45">
+                      Variable name
+                    </label>
+                    <input
+                      type="text"
+                      value={apiKeyName}
+                      onChange={(e) => setApiKeyName(e.target.value)}
+                      placeholder="BRAVE_API_KEY"
+                      autoComplete="off"
+                      className={inputClass}
+                    />
+                  </div>
+                  <div>
+                    <label className="mb-0.5 block font-mono text-[9px] text-white/45">Value</label>
+                    <input
+                      type="password"
+                      value={apiKeyValue}
+                      onChange={(e) => setApiKeyValue(e.target.value)}
+                      placeholder="Secret value"
+                      autoComplete="new-password"
+                      className={inputClass}
+                    />
+                  </div>
+                </div>
+              </div>
               <div className="md:col-span-2">
                 <label className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-(--mid)">
-                  Env (KEY=value per line)
+                  Other environment (KEY=value per line)
                 </label>
                 <textarea
-                  value={envText}
-                  onChange={(e) => setEnvText(e.target.value)}
+                  value={envOtherLines}
+                  onChange={(e) => setEnvOtherLines(e.target.value)}
                   rows={2}
-                  placeholder={"API_KEY=sk-..."}
+                  placeholder={"NODE_ENV=production"}
                   className={`${inputClass} resize-y`}
                 />
               </div>

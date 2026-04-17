@@ -31,6 +31,10 @@ export type CatalogTool = {
   ignore_robots_txt?: boolean;
   /** Reserved for future per-host policy; informational in the UI today. */
   robots_ignore_allowlist?: string[];
+  /** Catalog `passthrough_env` keys forwarded into the tool container (`--env=…`). */
+  passthrough_env?: string[];
+  /** Subset of `passthrough_env` keys that have a non-empty value saved in `mcp.json`. */
+  passthrough_configured_keys?: string[];
 };
 
 function makeTimeoutSignal(timeoutMs: number): { signal: AbortSignal; cleanup: () => void } {
@@ -124,6 +128,28 @@ export async function installTool(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ tool_id: toolId }),
+      signal,
+    });
+    if (resp.ok) return { ok: true };
+    return { ok: false, error: await parseApiError(resp) };
+  } catch (e) {
+    return { ok: false, error: fetchErrorMessage(e) };
+  } finally {
+    cleanup();
+  }
+}
+
+export async function putToolPassthroughEnv(
+  toolId: string,
+  env: Record<string, string>,
+  timeoutMs = 120_000,
+): Promise<{ ok: boolean; error?: string }> {
+  const { signal, cleanup } = makeTimeoutSignal(timeoutMs);
+  try {
+    const resp = await fetch(`${PENGINE_API_BASE}/v1/toolengine/passthrough-env`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tool_id: toolId, env }),
       signal,
     });
     if (resp.ok) return { ok: true };

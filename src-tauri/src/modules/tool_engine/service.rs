@@ -30,6 +30,41 @@ const TE_CUSTOM_PREFIX: &str = "te_custom_";
 /// In-image workspace stub when no host folders are mounted yet.
 pub const EMPTY_WORKSPACE_CONTAINER_ROOT: &str = "/tmp";
 
+fn filter_stored_catalog_passthrough(
+    entry: &ToolEntry,
+    stored: &HashMap<String, String>,
+) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for name in &entry.passthrough_env {
+        if let Some(v) = stored.get(name) {
+            if !v.trim().is_empty() {
+                out.insert(name.clone(), v.clone());
+            }
+        }
+    }
+    out
+}
+
+/// Values for `podman|docker run --env=…`: `mcp.json` `catalog_passthrough` first, else host `std::env`.
+fn merged_passthrough_for_container(
+    entry: &ToolEntry,
+    stored: &HashMap<String, String>,
+) -> HashMap<String, String> {
+    let filtered = filter_stored_catalog_passthrough(entry, stored);
+    let mut out = HashMap::new();
+    for name in &entry.passthrough_env {
+        if let Some(v) = filtered.get(name) {
+            out.insert(name.clone(), v.clone());
+        } else if let Ok(v) = std::env::var(name) {
+            let t = v.trim().to_string();
+            if !t.is_empty() {
+                out.insert(name.clone(), t);
+            }
+        }
+    }
+    out
+}
+
 /// Parse and validate a catalog JSON string. Returns `None` if parsing fails
 /// or schema_version is unsupported.
 fn parse_catalog(json: &str) -> Option<ToolCatalog> {
@@ -55,27 +90,61 @@ pub fn load_embedded_catalog() -> Result<ToolCatalog, String> {
         .map_err(|e| format!("parse embedded mcp-tools.json: {e}"))
 }
 
-/// Local `tools/mcp-tools.json` next to the crate or executable; with `debug_assertions` or
-/// `LOCAL_TOOLS_CATALOG=1`, also walks up to 8 parents from `current_dir` (e.g. `tauri dev`).
+fn push_unique_path(paths: &mut Vec<PathBuf>, p: PathBuf) {
+    if paths.iter().any(|q| q == &p) {
+        return;
+    }
+    paths.push(p);
+}
+
+/// True when we should walk `current_dir` for `tools/mcp-tools.json` and try those paths **before**
+/// the compile-time `CARGO_MANIFEST_DIR` location (so `tauri dev` / dev builds use the repo you are in).
+fn prefer_repo_catalog_paths_first() -> bool {
+    if cfg!(debug_assertions) {
+        return true;
+    }
+    if std::env::var("LOCAL_TOOLS_CATALOG")
+        .map(|v| {
+            let v = v.trim();
+            v.eq_ignore_ascii_case("true") || v == "1"
+        })
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    std::env::var("TAURI_ENV")
+        .map(|v| v.trim().eq_ignore_ascii_case("development"))
+        .unwrap_or(false)
+}
+
+/// Local `tools/mcp-tools.json`: in dev, cwd / ancestors first, then crate-relative path; in release,
+/// crate-relative then next to the executable. `LOCAL_TOOLS_CATALOG=1` opts into the dev search in release too.
 fn try_load_local_tools_catalog() -> Option<ToolCatalog> {
     let mut paths: Vec<PathBuf> = Vec::new();
-    paths.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../tools/mcp-tools.json"));
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            paths.push(dir.join("tools/mcp-tools.json"));
-        }
-    }
-    let ancestor_walk = cfg!(debug_assertions)
-        || std::env::var("LOCAL_TOOLS_CATALOG")
-            .map(|v| {
-                let v = v.trim();
-                v.eq_ignore_ascii_case("true") || v == "1"
-            })
-            .unwrap_or(false);
-    if ancestor_walk {
+    let dev_order = prefer_repo_catalog_paths_first();
+    if dev_order {
         if let Ok(mut cwd) = std::env::current_dir() {
             for _ in 0..8 {
-                paths.push(cwd.join("tools/mcp-tools.json"));
+                push_unique_path(&mut paths, cwd.join("tools/mcp-tools.json"));
+                if !cwd.pop() {
+                    break;
+                }
+            }
+        }
+    }
+    push_unique_path(
+        &mut paths,
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../tools/mcp-tools.json"),
+    );
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            push_unique_path(&mut paths, dir.join("tools/mcp-tools.json"));
+        }
+    }
+    if !dev_order {
+        if let Ok(mut cwd) = std::env::current_dir() {
+            for _ in 0..8 {
+                push_unique_path(&mut paths, cwd.join("tools/mcp-tools.json"));
                 if !cwd.pop() {
                     break;
                 }
@@ -117,7 +186,7 @@ fn try_load_local_tools_catalog() -> Option<ToolCatalog> {
     None
 }
 
-/// Local file, then remote URL, then embedded `mcp-tools.json`.
+/// Local `tools/mcp-tools.json` (see [`try_load_local_tools_catalog`]), then remote URL, then embedded `mcp-tools.json`.
 pub async fn load_catalog() -> Result<ToolCatalog, String> {
     if let Some(cat) = try_load_local_tools_catalog() {
         log::info!(
@@ -213,6 +282,7 @@ fn catalog_tool_stdio_eq(a: &ServerEntry, b: &ServerEntry) -> bool {
                 env: e1,
                 direct_return: d1,
                 private_host_path: p1,
+                catalog_passthrough: t1,
             },
             ServerEntry::Stdio {
                 command: c2,
@@ -220,15 +290,16 @@ fn catalog_tool_stdio_eq(a: &ServerEntry, b: &ServerEntry) -> bool {
                 env: e2,
                 direct_return: d2,
                 private_host_path: p2,
+                catalog_passthrough: t2,
             },
-        ) => c1 == c2 && a1 == a2 && e1 == e2 && d1 == d2 && p1 == p2,
+        ) => c1 == c2 && a1 == a2 && e1 == e2 && d1 == d2 && p1 == p2 && t1 == t2,
         _ => false,
     }
 }
 
 /// Rebuild argv for one installed catalog tool from `mcp.json` + catalog entry.
-/// The container env is baked into argv via `-e` flags, so `ServerEntry.env` stays empty
-/// (host-process env does not propagate into the container).
+/// Container env for catalog tools is baked into argv via `podman run --env=…`. User-provided
+/// secrets live in `catalog_passthrough`; `env` is for legacy stdio (e.g. `npx`) only.
 fn rebuild_installed_catalog_tool_stdio(
     entry: &ToolEntry,
     host_paths: &[String],
@@ -240,6 +311,7 @@ fn rebuild_installed_catalog_tool_stdio(
         command,
         direct_return,
         private_host_path,
+        catalog_passthrough,
         ..
     } = prev
     else {
@@ -264,7 +336,9 @@ fn rebuild_installed_catalog_tool_stdio(
         _ => None,
     };
 
-    let args = podman_run_argv_for_tool(entry, host_paths, private_bind.as_ref())?;
+    let stored = filter_stored_catalog_passthrough(entry, catalog_passthrough);
+    let merged = merged_passthrough_for_container(entry, &stored);
+    let args = podman_run_argv_for_tool(entry, host_paths, private_bind.as_ref(), &merged)?;
 
     Ok(Some(ServerEntry::Stdio {
         command: command.clone(),
@@ -272,6 +346,7 @@ fn rebuild_installed_catalog_tool_stdio(
         env: HashMap::new(),
         direct_return: *direct_return,
         private_host_path: private_host_path.clone(),
+        catalog_passthrough: stored,
     }))
 }
 
@@ -322,6 +397,7 @@ pub fn podman_run_argv_for_tool(
     entry: &ToolEntry,
     host_paths: &[String],
     private_bind: Option<&PrivateBind<'_>>,
+    passthrough: &HashMap<String, String>,
 ) -> Result<Vec<String>, String> {
     if entry.append_workspace_roots && !entry.mount_workspace {
         return Err("catalog: append_workspace_roots requires mount_workspace".into());
@@ -373,6 +449,10 @@ pub fn podman_run_argv_for_tool(
         ));
         let (k, v) = private_folder_container_env(pb.config, pb.bot_id);
         args.push(format!("--env={k}={v}"));
+    }
+
+    for (name, value) in passthrough {
+        args.push(format!("--env={name}={value}"));
     }
 
     args.push(image_ref);
@@ -445,6 +525,45 @@ async fn image_present(runtime: &RuntimeInfo, image: &str) -> bool {
 /// A callback for streaming log lines during long-running operations.
 pub type LogFn = Box<dyn Fn(&str) + Send + Sync>;
 
+/// Last path segment of an OCI repository (e.g. `ghcr.io/org/pengine-brave-search` → `pengine-brave-search`).
+fn oci_image_repository_basename(image: &str) -> Option<String> {
+    let tail = image.rsplit('/').next()?.trim();
+    if tail.is_empty() {
+        None
+    } else {
+        Some(tail.to_string())
+    }
+}
+
+/// `pengine/brave-search` → `brave-search` (matches `tools/<slug>/Dockerfile` in this repo).
+fn tool_repo_subdir(tool_id: &str) -> Option<&str> {
+    tool_id.rsplit('/').next().filter(|s| !s.is_empty())
+}
+
+/// Local tags users get when they follow `podman build -t <basename>:<version> …`.
+fn local_build_image_candidates(entry: &ToolEntry) -> Vec<String> {
+    let Some(base) = oci_image_repository_basename(&entry.image) else {
+        return Vec::new();
+    };
+    let v = entry.current.as_str();
+    vec![format!("{base}:{v}"), format!("localhost/{base}:{v}")]
+}
+
+fn local_build_hint(entry: &ToolEntry) -> String {
+    let base =
+        oci_image_repository_basename(&entry.image).unwrap_or_else(|| "<image-basename>".into());
+    let sub = tool_repo_subdir(&entry.id).unwrap_or("<slug>");
+    let v = entry.current.as_str();
+    let expected = format!("{}:{}", entry.image.trim(), v);
+    format!(
+        "No registry image for this version yet. Build locally, then retry install:\n  podman build -t {base}:{v} -f tools/{sub}/Dockerfile tools/{sub}/\nIf the build succeeds, install tags that image as `{expected}` automatically.",
+        base = base,
+        sub = sub,
+        v = v,
+        expected = expected,
+    )
+}
+
 /// Pull if missing; accept a local image when the digest is not pinned. Logs are prefixed with `[tool_id]`.
 async fn ensure_tool_image(
     runtime: &RuntimeInfo,
@@ -472,12 +591,31 @@ async fn ensure_tool_image(
                 log(&format!("{tag} pull failed but image found locally"));
                 return Ok(());
             }
+            if !pinned {
+                for alt in local_build_image_candidates(entry) {
+                    if !image_present(runtime, &alt).await {
+                        continue;
+                    }
+                    let ok = tokio::process::Command::new(&runtime.binary)
+                        .args(["tag", &alt, &image_ref])
+                        .status()
+                        .await
+                        .map(|s| s.success())
+                        .unwrap_or(false);
+                    if ok && image_present(runtime, &image_ref).await {
+                        log(&format!(
+                            "{tag} registry pull failed; tagged local `{alt}` as `{image_ref}`."
+                        ));
+                        return Ok(());
+                    }
+                }
+            }
             let hint = if pinned {
-                "Ensure the image is published to the registry."
+                "Ensure the image is published to the registry.".to_string()
             } else {
-                "No registry image yet. Build locally: podman build -t <image>:<version> tools/<slug>/"
+                local_build_hint(entry)
             };
-            return Err(format!("failed to pull image `{image_ref}` — {e}. {hint}"));
+            return Err(format!("failed to pull image `{image_ref}` — {e}\n{hint}"));
         }
     }
 
@@ -620,7 +758,27 @@ pub async fn install_tool(
         _ => None,
     };
 
-    let args = podman_run_argv_for_tool(entry, &host_paths, private_bind.as_ref())?;
+    let key = server_key(tool_id);
+    let stored = cfg
+        .servers
+        .get(&key)
+        .and_then(|e| {
+            if let ServerEntry::Stdio {
+                catalog_passthrough,
+                ..
+            } = e
+            {
+                Some(filter_stored_catalog_passthrough(
+                    entry,
+                    catalog_passthrough,
+                ))
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default();
+    let merged = merged_passthrough_for_container(entry, &stored);
+    let args = podman_run_argv_for_tool(entry, &host_paths, private_bind.as_ref(), &merged)?;
 
     let server_entry = ServerEntry::Stdio {
         command: runtime.binary.clone(),
@@ -628,9 +786,10 @@ pub async fn install_tool(
         env: HashMap::new(),
         direct_return: entry.direct_return,
         private_host_path: None,
+        catalog_passthrough: stored,
     };
 
-    cfg.servers.insert(server_key(tool_id), server_entry);
+    cfg.servers.insert(key, server_entry);
     mcp_service::save_config(mcp_config_path, &cfg)?;
 
     Ok(())
@@ -869,6 +1028,7 @@ pub async fn add_custom_tool(
         env: HashMap::new(),
         direct_return: entry.direct_return,
         private_host_path: None,
+        catalog_passthrough: HashMap::new(),
     };
 
     cfg.servers
@@ -916,6 +1076,7 @@ pub fn sync_custom_tools_if_installed(cfg: &mut McpConfig, host_paths: &[String]
             env,
             direct_return,
             private_host_path,
+            catalog_passthrough,
         }) = cfg.servers.get(&key)
         else {
             continue;
@@ -932,6 +1093,7 @@ pub fn sync_custom_tools_if_installed(cfg: &mut McpConfig, host_paths: &[String]
             env: env.clone(),
             direct_return: *direct_return,
             private_host_path: private_host_path.clone(),
+            catalog_passthrough: catalog_passthrough.clone(),
         };
         cfg.servers.insert(key, new_entry);
         changed = true;
@@ -942,6 +1104,7 @@ pub fn sync_custom_tools_if_installed(cfg: &mut McpConfig, host_paths: &[String]
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     use tempfile::tempdir;
 
     #[test]
@@ -1009,7 +1172,7 @@ mod tests {
             .find(|v| v.version == fm.current)
             .unwrap();
         assert_eq!(ver.digest, "sha256:placeholder");
-        let argv = podman_run_argv_for_tool(fm, &[], None).expect("argv");
+        let argv = podman_run_argv_for_tool(fm, &[], None, &HashMap::new()).expect("argv");
         let tagged = format!("{}:{}", fm.image, fm.current);
         let image_ref = argv
             .iter()
@@ -1042,7 +1205,7 @@ mod tests {
             config: pf,
             bot_id: "12345",
         };
-        let argv = podman_run_argv_for_tool(mem, &[], Some(&pb)).expect("argv");
+        let argv = podman_run_argv_for_tool(mem, &[], Some(&pb), &HashMap::new()).expect("argv");
 
         let want_mount = format!(
             "-v={}:/mcp/data:rw",
@@ -1057,6 +1220,30 @@ mod tests {
         assert!(
             argv.iter().any(|a| a == &want_env),
             "missing -e flag: argv={argv:?}"
+        );
+    }
+
+    #[test]
+    fn oci_image_repository_basename_last_segment() {
+        assert_eq!(
+            oci_image_repository_basename("ghcr.io/pengine-ai/pengine-brave-search").as_deref(),
+            Some("pengine-brave-search")
+        );
+    }
+
+    #[test]
+    fn local_build_image_candidates_use_catalog_tag() {
+        let catalog = load_embedded_catalog().unwrap();
+        let brave = catalog
+            .tools
+            .iter()
+            .find(|t| t.id == "pengine/brave-search")
+            .expect("brave-search in catalog");
+        let c = local_build_image_candidates(brave);
+        assert!(
+            c.contains(&"pengine-brave-search:0.1.0".to_string())
+                && c.contains(&"localhost/pengine-brave-search:0.1.0".to_string()),
+            "{c:?}"
         );
     }
 }

@@ -285,6 +285,13 @@ fn extract_message(
         .cloned()
         .ok_or_else(|| format!("ollama protocol error: missing `message` in response: {body}"))?;
 
+    // Ollama thinking-capable models can return a separate `message.thinking` trace
+    // (see https://docs.ollama.com/capabilities/thinking). Never persist or forward it:
+    // only `content` is user-visible after normalization.
+    if let Some(obj) = msg.as_object_mut() {
+        obj.remove("thinking");
+    }
+
     // Strip template-injected reasoning, then apply our reply contract (JSON or
     // `<pengine_reply>`) so Telegram and the next-step history never carry plan text.
     if let Some(content) = msg.get("content").and_then(|v| v.as_str()) {

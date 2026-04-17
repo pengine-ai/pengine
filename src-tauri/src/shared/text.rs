@@ -1,4 +1,13 @@
 //! Small text helpers shared across modules.
+//!
+//! ## Reasoning vs user-visible text (defense in depth)
+//!
+//! Major hosted APIs (e.g. OpenAI reasoning models) keep chain-of-thought off the user-visible
+//! channel entirely. Ollama does the same when thinking mode is enabled: traces go in
+//! `message.thinking` and the host must drop that field before history or UI (see
+//! `extract_message` in `ollama/service.rs`). Models still sometimes emit planning in
+//! `message.content`; we strip tags, optional `<pengine_reply>`, JSON `reply`, heuristics,
+//! and (when safe) constrain generations with a JSON schema so only `reply` reaches users.
 
 /// Remove reasoning scaffolding from model content.
 ///
@@ -52,26 +61,106 @@ Example: <pengine_plan>scan forecast</pengine_plan><pengine_reply>Morgen in X: k
 /// Injected as an extra system message immediately before the post-tool model call only.
 pub const PENGINE_POST_TOOL_REMINDER: &str = "\
 You have tool output. Respond in the user's language. REQUIRED: put ONLY the user-visible answer inside \
-<pengine_reply>...</pengine_reply>. Put any English reasoning ONLY inside <pengine_plan>...</pengine_plan>. \
-Do not write plain paragraphs outside those tags.";
+<pengine_reply>...</pengine_reply>. Put any English or meta reasoning ONLY inside <pengine_plan>...</pengine_plan>. \
+Do not narrate tool usage, skills, or planning in plain text; no sentences outside those tags. \
+If several `fetch` results are present, some may show robots.txt or User-Agent blocks — still use any successful excerpts; do not tell the user that nothing could be retrieved when other blocks contain usable text.";
 
 fn looks_like_english_scratchpad(s: &str) -> bool {
     s.contains("Okay, let's")
         || s.contains("Okay, let me")
         || s.contains("The user asked")
+        || s.contains("The user is asking")
         || s.contains("Wait, the user")
         || s.contains("the user's query")
         || s.contains("Let me check")
         || s.contains("I need to check")
+        || s.contains("First, I need")
+        || s.contains("according to the skill")
+        || s.contains("The instructions say")
         || s.matches("Wait,").count() >= 2
+}
+
+/// German / mixed prompts often produce German meta ("Zunächst muss …") without the English cues above.
+fn looks_like_german_scratchpad(s: &str) -> bool {
+    let l = s.to_lowercase();
+    l.contains("der nutzer fragt")
+        || l.contains("die nutzerin fragt")
+        || l.contains("zunächst muss")
+        || l.contains("zuerst muss ich")
+        || l.contains("ich sollte jetzt")
+        || (l.contains(" laut skill") || l.contains("laut der skill"))
+}
+
+fn looks_like_scratchpad_meta(s: &str) -> bool {
+    looks_like_english_scratchpad(s) || looks_like_german_scratchpad(s)
+}
+
+fn paragraph_opens_like_meta(p: &str) -> bool {
+    let head: String = p.chars().take(120).collect::<String>().to_lowercase();
+    head.starts_with("okay,")
+        || head.starts_with("wait,")
+        || head.starts_with("let me ")
+        || head.starts_with("first,")
+        || head.starts_with("hmm,")
+        || head.contains("the user asked")
+        || head.contains("the user is asking")
+        || head.contains("der nutzer fragt")
+        || head.contains("die nutzerin fragt")
+}
+
+fn last_non_meta_paragraph(s: &str) -> Option<String> {
+    for block in s.rsplit("\n\n") {
+        let t = block.trim();
+        if t.len() < 60 {
+            continue;
+        }
+        if paragraph_opens_like_meta(t) {
+            continue;
+        }
+        let open: String = t.chars().take(220).collect::<String>().to_lowercase();
+        if open.contains("the user is")
+            || open.contains("i should now")
+            || open.contains("according to the search")
+            || open.contains("tool response")
+        {
+            continue;
+        }
+        return Some(t.to_string());
+    }
+    None
+}
+
+/// If the model inlined a labeled answer section, keep only that tail (exact-case markers common in DE output).
+fn strip_after_inline_answer_label(s: &str) -> Option<String> {
+    for marker in [
+        "**Antwort:**",
+        "**Antwort**",
+        "Antwort:\n\n",
+        "\nAntwort:\n",
+        "**Zusammenfassung:**",
+        "**Zusammenfassung**",
+    ] {
+        if let Some(idx) = s.find(marker) {
+            let tail =
+                s[idx + marker.len()..].trim_start_matches(|c: char| c == ':' || c.is_whitespace());
+            if tail.len() >= 12 {
+                return Some(tail.to_string());
+            }
+        }
+    }
+    None
 }
 
 /// When the model ignores `<pengine_reply>` but dumps English chain-of-thought, keep the tail that
 /// usually starts the real answer. Used only as a last resort after tag parsing fails.
 fn strip_plain_scratchpad_fallback(s: &str) -> String {
     let s = s.trim();
-    if s.is_empty() || !looks_like_english_scratchpad(s) {
+    if s.is_empty() || !looks_like_scratchpad_meta(s) {
         return s.to_string();
+    }
+
+    if let Some(tail) = strip_after_inline_answer_label(s) {
+        return tail;
     }
 
     let markers = [
@@ -86,6 +175,17 @@ fn strip_plain_scratchpad_fallback(s: &str) -> String {
         "\n\nTomorrow in ",
         "\nTomorrow in ",
         "\n\nThe answer is ",
+        "\n\n### Antwort",
+        "\n\nZusammenfassung:",
+        "\nZusammenfassung:",
+        "\n\n**Zusammenfassung",
+        "\n\nKurzfassung:",
+        "\nKurzfassung:",
+        "\n\nDamit:",
+        "\n\nFazit:",
+        "\n\nZusammenfassend",
+        "\n\nKurz gesagt,",
+        "\nKurz gesagt,",
     ];
     let mut best: Option<usize> = None;
     for m in markers {
@@ -110,7 +210,12 @@ fn strip_plain_scratchpad_fallback(s: &str) -> String {
         return s[i..].trim_start().to_string();
     }
 
-    s.to_string()
+    if let Some(p) = last_non_meta_paragraph(s) {
+        return p;
+    }
+
+    // Meta-only or no recoverable user-facing block — better empty than leaking CoT to Telegram/UI.
+    String::new()
 }
 
 /// Drop paired XML/HTML-style blocks iteratively.
@@ -175,20 +280,39 @@ fn parse_json_reply_field(content: &str) -> Option<String> {
 pub fn normalize_assistant_message_content(raw: &str, json_object_reply: bool) -> String {
     if json_object_reply {
         if let Some(reply) = parse_json_reply_field(raw) {
-            return reply;
+            return block_if_still_meta_scratchpad(reply);
         }
     }
 
     let s = strip_think(raw);
     let s = strip_tag_pair(&s, concat!("<", "think", ">"), concat!("</", "think", ">"));
 
+    // Explicit host contract wins; do not second-guess tagged user text.
     if let Some(inner) = last_tag_inner(&s, "pengine_reply") {
-        return inner;
+        return inner.trim().to_string();
+    }
+
+    // Some reasoning models wrap only the final reply in `<answer>…</answer>`.
+    if let Some(inner) = last_tag_inner(&s, "answer") {
+        return block_if_still_meta_scratchpad(inner);
     }
 
     let without_plan = strip_all_named_blocks(&s, "pengine_plan");
     let t = without_plan.trim().to_string();
-    strip_plain_scratchpad_fallback(&t)
+    let out = strip_plain_scratchpad_fallback(&t);
+    block_if_still_meta_scratchpad(out)
+}
+
+/// If the model slipped planning into the only channel we show, drop it rather than leak CoT.
+fn block_if_still_meta_scratchpad(s: String) -> String {
+    let t = s.trim();
+    if t.is_empty() {
+        return String::new();
+    }
+    if looks_like_scratchpad_meta(t) {
+        return String::new();
+    }
+    t.to_string()
 }
 
 /// Strip ANSI escape sequences (CSI + OSC) and collapse runs of blank lines.
@@ -406,6 +530,18 @@ mod tests {
     }
 
     #[test]
+    fn normalize_assistant_extracts_answer_tag_when_no_pengine_reply() {
+        let s = "<think>r</think><answer>Only this.</answer>";
+        assert_eq!(normalize_assistant_message_content(s, false), "Only this.");
+    }
+
+    #[test]
+    fn normalize_assistant_json_reply_still_meta_gets_cleared() {
+        let s = r#"{"reply":"Okay, let's see. The user asked for X."}"#;
+        assert_eq!(normalize_assistant_message_content(s, true), "");
+    }
+
+    #[test]
     fn normalize_assistant_fallback_strips_english_scratchpad_before_morgen() {
         let pad = "Okay, let's see. The user asked for weather.\n\n";
         let answer = "Morgen in Breitenau: sonnig.";
@@ -413,6 +549,34 @@ mod tests {
         assert_eq!(
             normalize_assistant_message_content(&combined, false),
             answer
+        );
+    }
+
+    #[test]
+    fn normalize_assistant_fallback_strips_after_antwort_label() {
+        let pad = "Okay, let's see. The user is asking about divorce.\n\n";
+        let answer = "**Antwort:** Ja, das ist möglich.";
+        let combined = format!("{pad}{answer}");
+        assert_eq!(
+            normalize_assistant_message_content(&combined, false),
+            "Ja, das ist möglich."
+        );
+    }
+
+    #[test]
+    fn normalize_assistant_fallback_meta_only_returns_empty() {
+        let s = "Okay, let's see. The user is asking about X. First, I need to check. Wait, the skill says. So I should.";
+        assert_eq!(normalize_assistant_message_content(s, false), "");
+    }
+
+    #[test]
+    fn normalize_assistant_fallback_german_meta_then_paragraph() {
+        let pad = "Zunächst muss ich die Frage prüfen.\n\n";
+        let answer = "Kurz: In Österreich gilt aus den Familienberatungsstellen-Infos Folgendes für Ihren Fall und die Beratungsbestätigung.";
+        let combined = format!("{pad}{answer}");
+        assert_eq!(
+            normalize_assistant_message_content(&combined, false),
+            answer.trim()
         );
     }
 

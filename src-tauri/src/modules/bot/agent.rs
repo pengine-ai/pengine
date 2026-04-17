@@ -1,3 +1,4 @@
+use super::search_followup;
 use crate::modules::memory::{self, MemoryProvider, SessionCommand};
 use crate::modules::ollama::keywords::THINK_ON;
 use crate::modules::ollama::service::{self as ollama, ChatOptions};
@@ -17,6 +18,13 @@ use std::time::{Duration, Instant};
 /// used to drop URLs and paraphrase loosely.
 const MAX_STEPS: usize = 6;
 
+/// Brave Search web calls are billed; allow at most one `brave_web_search` per user message
+/// (across all agent steps). Other Brave tools are unchanged.
+const MAX_BRAVE_WEB_SEARCH_PER_USER_MESSAGE: u32 = 1;
+
+const BRAVE_WEB_SEARCH_LIMIT_MSG: &str = "Pengine policy: at most one `brave_web_search` call per user message (cost control). \
+Use the previous search result, answer without another search, or ask the user to narrow the query.";
+
 /// After tool results (agent step ≥1), cap completion tokens. The model should
 /// put the user-visible answer in `<pengine_reply>` (see system prompt); this
 /// cap bounds wall time if it drafts a long `<pengine_plan>`. ~1024 fits a
@@ -33,18 +41,29 @@ const SUMMARY_SYSTEM_PROMPT: &str = "You synthesize tool results for the user. R
 1) Use ONLY the text in the user message's Data section (tool outputs). Do not add facts, legal claims, or country-specific rules that are not clearly supported there.\n\
 2) If the Data is insufficient, say so briefly and list what is missing — do not invent answers.\n\
 3) Language: match the user's question where possible.\n\
-4) After the substantive answer, add a final section **Quellen** with a bullet list of every relevant full URL:\n\
+4) After the substantive answer, add a final section **Quellen** with a bullet list of every relevant full URL you relied on:\n\
+   - Include URLs from `brave_web_search` results and from every `fetch` block (including lines like `--- fetch (auto: https://…) ---`).\n\
    - Copy URLs exactly as they appear in the Data (fetch bodies, HTML links, or Location lines).\n\
    - If the Data shows only page text without URLs, write one bullet per tool block naming the fetch target if it appears in the `--- fetch ---` headers or quoted links in the excerpt.\n\
-   - Never omit **Quellen** when the Data came from web fetches.\n\
-5) Keep the body concise but do not drop **Quellen** to save space.";
+   - Never omit **Quellen** when the Data came from web search or fetches.\n\
+5) Keep the body concise but do not drop **Quellen** to save space.\n\
+6) No chain-of-thought, planning, or English meta: write only text that should appear in the user's chat bubble.";
 
-fn chat_options_for_agent_step(post_tool: bool, user_wants_think: bool) -> ChatOptions {
+/// When the MCP catalog is empty and the user did not enable `/think`, constrain the model to JSON
+/// `{\"reply\":...}` so the host can take a single user-visible field (same schema as the summarize pass).
+fn chat_options_for_agent_step(
+    post_tool: bool,
+    user_wants_think: bool,
+    json_only_user_reply: bool,
+) -> ChatOptions {
+    let format = (json_only_user_reply && !user_wants_think)
+        .then_some(ollama::summarize_reply_json_schema());
     if !post_tool {
         ChatOptions {
             think: Some(user_wants_think),
             num_predict: None,
             temperature: None,
+            format,
             ..ChatOptions::default()
         }
     } else {
@@ -52,6 +71,7 @@ fn chat_options_for_agent_step(post_tool: bool, user_wants_think: bool) -> ChatO
             think: Some(false),
             num_predict: Some(POST_TOOL_NUM_PREDICT),
             temperature: Some(POST_TOOL_TEMPERATURE),
+            format,
             ..ChatOptions::default()
         }
     }
@@ -59,9 +79,55 @@ fn chat_options_for_agent_step(post_tool: bool, user_wants_think: bool) -> ChatO
 
 /// Cap on tool output fed back to the model. Raw fetch bodies can be 5–10 kB
 /// of HTML; the model only needs the first screen to answer, and larger
-/// feedback balloons the step-1 prompt. Direct replies (answers routed
-/// straight to the user) are NOT truncated.
+/// feedback balloons the step-1 prompt. Direct replies (non-fetch tools) are
+/// not truncated before sending to the user.
 const TOOL_OUTPUT_CHAR_CAP: usize = 4000;
+
+fn tool_name_is_fetch(name: &str) -> bool {
+    name.eq_ignore_ascii_case("fetch")
+        || name
+            .rsplit_once('.')
+            .is_some_and(|(_, tail)| tail.eq_ignore_ascii_case("fetch"))
+}
+
+/// After `brave_web_search`, prefetch this many distinct result URLs (one search per message; extra bandwidth here is `fetch` only).
+const AUTO_FETCH_TOP_URLS: usize = search_followup::DEFAULT_AUTO_FETCH_CAP;
+
+async fn append_host_prefetch_after_brave_search(
+    state: &AppState,
+    messages: &mut serde_json::Value,
+    tool_results: &mut Vec<(String, String)>,
+    search_blob: &str,
+) {
+    let urls = search_followup::extract_fetchable_urls(search_blob, AUTO_FETCH_TOP_URLS);
+    for url in urls {
+        state
+            .emit_log("tool", &format!("[host] auto-fetch {url}"))
+            .await;
+        let prep = {
+            let reg = state.mcp.read().await;
+            reg.prepare_tool_invocation("fetch", json!({ "url": url.clone() }))
+        };
+        let Ok((provider, tool_name, _, args)) = prep else {
+            continue;
+        };
+        let text = match provider.call_tool(&tool_name, args).await {
+            Ok(t) => t,
+            Err(e) => format!("ERROR: {e}"),
+        };
+        let compacted = compact_tool_output(&text);
+        let for_model = truncate_for_model(&compacted, TOOL_OUTPUT_CHAR_CAP);
+        let block_name = format!("fetch (auto: {url})");
+        if let Some(arr) = messages.as_array_mut() {
+            arr.push(json!({
+                "role": "tool",
+                "name": "fetch",
+                "content": &for_model,
+            }));
+        }
+        tool_results.push((block_name, for_model));
+    }
+}
 
 fn push_ephemeral_post_tool_reminder(messages: &mut serde_json::Value) {
     if let Some(arr) = messages.as_array_mut() {
@@ -489,7 +555,10 @@ async fn build_system_prompt(state: &AppState, has_tools: bool, has_memory: bool
 
     format!(
         "{PENGINE_OUTPUT_CONTRACT_LEAD}Assistant with tools. Call a tool only for external data; otherwise answer directly. \
-         After tool results, answer immediately. Be concise.{fs_hint}{mem_hint}{skills_hint}"
+         After tool results, answer immediately. Be concise. \
+         `brave_web_search` is only in the tool list when the user asked to search the open web (e.g. “search the internet”, “suche im Internet”, “suche nach …”) or a skill’s `requires` matches this turn — otherwise prefer **`fetch`** on any `http(s)` URL you have (including from the user). \
+         At most one `brave_web_search` per user message when it is available. \
+         After an allowed search, the host may auto-`fetch` several top result URLs — use those excerpts and end with **Quellen** listing every source URL.{fs_hint}{mem_hint}{skills_hint}"
     )
 }
 
@@ -521,6 +590,9 @@ async fn run_model_turn(
         .as_ref()
         .is_some_and(|s| !s.diary_only);
 
+    let allow_brave_web_search =
+        skills::allow_brave_web_search_for_message(&state.store_path, user_message);
+
     let mut tool_ctx = {
         let reg = state.mcp.read().await;
         reg.select_tools_for_turn(
@@ -528,13 +600,14 @@ async fn run_model_turn(
             &recent_tools,
             memory_server_key.as_deref(),
             chat_session_recording,
+            allow_brave_web_search,
         )
     };
     state
         .emit_log(
             "tool_ctx",
             &format!(
-                "select_ms={} active={}/{} subset={} routing={} recording={} high_risk={} recent_n={}",
+                "select_ms={} active={}/{} subset={} routing={} recording={} high_risk={} recent_n={} brave_web={}",
                 tool_ctx.select_ms,
                 tool_ctx.active_count,
                 tool_ctx.total_count,
@@ -542,7 +615,8 @@ async fn run_model_turn(
                 tool_ctx.routing,
                 chat_session_recording,
                 tool_ctx.high_risk_active,
-                recent_tools.len()
+                recent_tools.len(),
+                allow_brave_web_search
             ),
         )
         .await;
@@ -562,6 +636,7 @@ async fn run_model_turn(
     let mut tools_supported = true;
     let empty_tools = json!([]);
     let mut routing_escalated = false;
+    let mut brave_web_search_calls_this_message: u32 = 0;
     // Counts actual tool-result rounds, not loop iterations. A routing escalation
     // re-enters step 0 with a fresh catalog, so it must not be treated as a
     // post-tool continuation (no reminder, keep user's think/num_predict).
@@ -575,7 +650,8 @@ async fn run_model_turn(
             &empty_tools
         };
         let post_tool = tool_rounds > 0;
-        let chat_opts = chat_options_for_agent_step(post_tool, think);
+        let json_only_user_reply = !has_tools;
+        let chat_opts = chat_options_for_agent_step(post_tool, think, json_only_user_reply);
 
         let inject_post_tool = post_tool;
         if inject_post_tool {
@@ -624,7 +700,7 @@ async fn run_model_turn(
             routing_escalated = true;
             tool_ctx = {
                 let reg = state.mcp.read().await;
-                reg.full_tool_context()
+                reg.full_tool_context(allow_brave_web_search)
             };
             state
                 .emit_log(
@@ -654,7 +730,7 @@ async fn run_model_turn(
             .await;
 
         // Resolve under one lock, then execute in parallel.
-        let prepared: Vec<_> = {
+        let mut prepared = {
             let reg = state.mcp.read().await;
             tool_calls
                 .iter()
@@ -669,8 +745,22 @@ async fn run_model_turn(
                     let resolved = reg.prepare_tool_invocation(&name, args);
                     (name, resolved)
                 })
-                .collect()
+                .collect::<Vec<_>>()
         };
+
+        for (name, res) in &mut prepared {
+            if !name.eq_ignore_ascii_case("brave_web_search") {
+                continue;
+            }
+            if res.is_err() {
+                continue;
+            }
+            if brave_web_search_calls_this_message >= MAX_BRAVE_WEB_SEARCH_PER_USER_MESSAGE {
+                *res = Err(BRAVE_WEB_SEARCH_LIMIT_MSG.to_string());
+            } else {
+                brave_web_search_calls_this_message += 1;
+            }
+        }
 
         let invoked_names: Vec<String> = prepared.iter().map(|(n, _)| n.clone()).collect();
         state.note_tools_used(&invoked_names).await;
@@ -684,13 +774,15 @@ async fn run_model_turn(
                     let (p, tn, a) = (provider.clone(), tool_name.clone(), args.clone());
                     handles.push(tokio::spawn(async move { p.call_tool(&tn, a).await }));
                 }
-                Err(_) => {
-                    handles.push(tokio::spawn(async { Err("resolve failed".to_string()) }));
+                Err(e) => {
+                    let e = e.clone();
+                    handles.push(tokio::spawn(async move { Err(e) }));
                 }
             }
         }
 
         let mut direct_replies: Vec<String> = Vec::new();
+        let mut last_brave_search_blob: Option<String> = None;
         for (i, handle) in handles.into_iter().enumerate() {
             let (name, resolved) = &prepared[i];
             let (text, is_direct) = match handle.await {
@@ -713,11 +805,18 @@ async fn run_model_turn(
                 }
             };
 
-            if is_direct {
+            // Fetch output is often XML/HTML snippets; never bypass the model for the user bubble
+            // (even if `mcp.json` still has `direct_return: true` from an older catalog default).
+            if is_direct && !tool_name_is_fetch(name) {
                 direct_replies.push(text.clone());
             }
             let compacted = compact_tool_output(&text);
             let for_model = truncate_for_model(&compacted, TOOL_OUTPUT_CHAR_CAP);
+            if name.eq_ignore_ascii_case("brave_web_search")
+                && !for_model.trim_start().starts_with("ERROR:")
+            {
+                last_brave_search_blob = Some(for_model.clone());
+            }
             if let Some(arr) = messages.as_array_mut() {
                 arr.push(json!({ "role": "tool", "name": name, "content": &for_model }));
             }
@@ -730,6 +829,11 @@ async fn run_model_turn(
             )
             .await;
         tool_rounds += 1;
+
+        if let Some(blob) = last_brave_search_blob {
+            append_host_prefetch_after_brave_search(state, &mut messages, &mut tool_results, &blob)
+                .await;
+        }
 
         if !direct_replies.is_empty() {
             return Ok(TurnResult {
@@ -839,5 +943,12 @@ mod tests {
         assert!(ThinkSource::Keyword.enabled());
         assert!(!ThinkSource::SlashOff.enabled());
         assert!(!ThinkSource::Default.enabled());
+    }
+
+    #[test]
+    fn fetch_tool_name_detection() {
+        assert!(tool_name_is_fetch("fetch"));
+        assert!(tool_name_is_fetch("te_pengine-fetch.fetch"));
+        assert!(!tool_name_is_fetch("roll_dice"));
     }
 }

@@ -196,6 +196,7 @@ impl ToolRegistry {
         recent_tool_names: &[String],
         memory_server: Option<&str>,
         chat_session_recording: bool,
+        allow_brave_web_search: bool,
     ) -> ToolContextSelection {
         let t0 = Instant::now();
         let all = self.all_tools();
@@ -211,6 +212,7 @@ impl ToolRegistry {
                 tools: selected,
                 routing,
             } => {
+                let selected = filter_brave_web_search(selected, allow_brave_web_search);
                 let select_ms = t0.elapsed().as_millis() as u64;
                 let high = selected.iter().filter(|t| t.risk == ToolRisk::High).count();
                 let active = selected.len();
@@ -225,12 +227,14 @@ impl ToolRegistry {
                 }
             }
             ToolRoutePlan::FullCatalog => {
+                let selected = filter_brave_web_search(all, allow_brave_web_search);
                 let select_ms = t0.elapsed().as_millis() as u64;
-                let high = all.iter().filter(|t| t.risk == ToolRisk::High).count();
+                let high = selected.iter().filter(|t| t.risk == ToolRisk::High).count();
+                let active = selected.len();
                 ToolContextSelection {
-                    tools_json: self.cached_ollama_tools.clone(),
+                    tools_json: build_ollama_tools(&selected),
                     total_count: total,
-                    active_count: total,
+                    active_count: active,
                     used_subset: false,
                     routing: "full",
                     select_ms,
@@ -241,14 +245,15 @@ impl ToolRegistry {
     }
 
     /// Full catalog (no subset). Used after routing escalation.
-    pub fn full_tool_context(&self) -> ToolContextSelection {
+    pub fn full_tool_context(&self, allow_brave_web_search: bool) -> ToolContextSelection {
         let all = self.all_tools();
         let total = self.cached_tool_names.len();
-        let high = all.iter().filter(|t| t.risk == ToolRisk::High).count();
+        let selected = filter_brave_web_search(all, allow_brave_web_search);
+        let high = selected.iter().filter(|t| t.risk == ToolRisk::High).count();
         ToolContextSelection {
-            tools_json: self.cached_ollama_tools.clone(),
+            tools_json: build_ollama_tools(&selected),
             total_count: total,
-            active_count: total,
+            active_count: selected.len(),
             used_subset: false,
             routing: "full_escalation",
             select_ms: 0,
@@ -420,6 +425,14 @@ const ROUTING_STOPWORDS: &[&str] = &[
 /// getting stuck when keyword matching misses (short queries, non-English
 /// intent words, typos) — a tiny token cost for a big correctness win.
 const ALWAYS_ON_TOOL_NAMES: &[&str] = &["fetch", "time"];
+
+fn filter_brave_web_search(mut tools: Vec<ToolDef>, allow: bool) -> Vec<ToolDef> {
+    if allow {
+        return tools;
+    }
+    tools.retain(|t| !t.name.eq_ignore_ascii_case("brave_web_search"));
+    tools
+}
 
 #[derive(Debug)]
 enum ToolRoutePlan {
@@ -614,6 +627,21 @@ fn message_suggests_url_fetch(msg: &str) -> bool {
         "api",
         "download",
         "abruf",
+        "webseite",
+        "website",
+        "offiziell",
+        "öffentlich",
+        "oeffentlich",
+        "link ",
+        "url ",
+        "quelle",
+        "nachlesen",
+        "abrufen",
+        "dokumentation",
+        "spec",
+        "readme",
+        "oesterreich.gv",
+        "bundesrecht",
     ];
     HINTS.iter().any(|h| lower.contains(h))
 }
@@ -631,7 +659,7 @@ fn score_tool_combined(
     };
     s += recent_tool_score(tool, recent_tool_names);
     if tool.name.eq_ignore_ascii_case("fetch") && message_suggests_url_fetch(user_message) {
-        s += 14;
+        s += 22;
     }
     s
 }

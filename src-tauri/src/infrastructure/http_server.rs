@@ -15,6 +15,7 @@ use axum::Router;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use socket2::{Domain, Socket, Type};
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::io::ErrorKind;
 use std::time::Duration;
@@ -111,6 +112,10 @@ pub async fn start_server(state: AppState) {
         .route(
             "/v1/toolengine/private-folder",
             put(handle_toolengine_private_folder_put),
+        )
+        .route(
+            "/v1/toolengine/passthrough-env",
+            put(handle_toolengine_passthrough_env_put),
         )
         .route("/v1/toolengine/custom", get(handle_toolengine_custom_list))
         .route("/v1/toolengine/custom", post(handle_toolengine_custom_add))
@@ -502,7 +507,16 @@ async fn handle_mcp_servers_list(
         })?
     };
     Ok(Json(McpServersResponse {
-        servers: cfg.servers,
+        servers: cfg
+            .servers
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    mcp_service::redact_mcp_server_entry_for_list_response(v),
+                )
+            })
+            .collect(),
     }))
 }
 
@@ -528,6 +542,7 @@ fn mcp_stdio_identity_ignores_direct_return(
                 args: a0,
                 env: e0,
                 private_host_path: p0,
+                catalog_passthrough: t0,
                 ..
             },
             ServerEntry::Stdio {
@@ -535,9 +550,10 @@ fn mcp_stdio_identity_ignores_direct_return(
                 args: a1,
                 env: e1,
                 private_host_path: p1,
+                catalog_passthrough: t1,
                 ..
             },
-        ) => c0 == c1 && a0 == a1 && e0 == e1 && p0 == p1,
+        ) => c0 == c1 && a0 == a1 && e0 == e1 && p0 == p1 && t0 == t1,
         _ => false,
     }
 }
@@ -557,7 +573,7 @@ async fn handle_mcp_server_upsert(
         ));
     }
 
-    if let crate::modules::mcp::types::ServerEntry::Stdio { ref command, .. } = entry {
+    if let crate::modules::mcp::types::ServerEntry::Stdio { ref command, .. } = &entry {
         if command.trim().is_empty() {
             return Err((
                 StatusCode::BAD_REQUEST,
@@ -568,7 +584,7 @@ async fn handle_mcp_server_upsert(
         }
     }
 
-    let old_entry = {
+    let (old_entry, entry) = {
         let _guard = state.mcp_config_mutex.lock().await;
         let mut cfg = mcp_service::load_or_init_config(&state.mcp_config_path).map_err(|e| {
             (
@@ -578,6 +594,7 @@ async fn handle_mcp_server_upsert(
         })?;
 
         let old = cfg.servers.get(&name).cloned();
+        let entry = mcp_service::merge_stdio_entry_preserving_redacted_secrets(old.as_ref(), entry);
         if old.as_ref() == Some(&entry) {
             return Ok((StatusCode::OK, Json(serde_json::json!({ "ok": true }))));
         }
@@ -591,7 +608,7 @@ async fn handle_mcp_server_upsert(
             )
         })?;
 
-        old
+        (old, entry)
     };
 
     let try_direct_patch = match (&old_entry, &entry) {
@@ -763,6 +780,33 @@ async fn handle_toolengine_catalog(
                     .to_string_lossy()
                     .into_owned()
             });
+            let passthrough_configured: Vec<String> = cfg_snap
+                .as_ref()
+                .and_then(|c| {
+                    let k = te_service::server_key(&t.id);
+                    match c.servers.get(&k)? {
+                        crate::modules::mcp::types::ServerEntry::Stdio {
+                            catalog_passthrough,
+                            ..
+                        } => {
+                            let mut names: Vec<String> = t
+                                .passthrough_env
+                                .iter()
+                                .filter(|name| {
+                                    catalog_passthrough
+                                        .get(*name)
+                                        .map(|v| !v.trim().is_empty())
+                                        .unwrap_or(false)
+                                })
+                                .cloned()
+                                .collect();
+                            names.sort();
+                            Some(names)
+                        }
+                        _ => None,
+                    }
+                })
+                .unwrap_or_default();
             serde_json::json!({
                 "id": t.id,
                 "name": t.name,
@@ -774,6 +818,8 @@ async fn handle_toolengine_catalog(
                 "private_host_path": private_host_resolved,
                 "ignore_robots_txt": t.ignore_robots_txt,
                 "robots_ignore_allowlist": t.robots_ignore_allowlist,
+                "passthrough_env": t.passthrough_env,
+                "passthrough_configured_keys": passthrough_configured,
             })
         })
         .collect();
@@ -795,6 +841,13 @@ struct ToolEngineActionBody {
 struct PutToolPrivateFolderBody {
     tool_id: String,
     path: String,
+}
+
+#[derive(Deserialize)]
+struct PutToolPassthroughEnvBody {
+    tool_id: String,
+    #[serde(default)]
+    env: HashMap<String, String>,
 }
 
 async fn handle_toolengine_install(
@@ -1008,6 +1061,158 @@ async fn handle_toolengine_private_folder_put(
             bg.emit_log(
                 "mcp",
                 &format!("ERROR: MCP registry rebuild failed after private-folder update: {e}"),
+            )
+            .await;
+        }
+    });
+
+    Ok((StatusCode::OK, Json(serde_json::json!({ "ok": true }))))
+}
+
+async fn handle_toolengine_passthrough_env_put(
+    State(state): State<AppState>,
+    Json(body): Json<PutToolPassthroughEnvBody>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ErrorResponse>)> {
+    let tool_id = body.tool_id.trim().to_string();
+    if tool_id.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "tool_id is required".into(),
+            }),
+        ));
+    }
+
+    let catalog = te_service::load_catalog().await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse { error: e }),
+        )
+    })?;
+
+    let entry = catalog
+        .tools
+        .iter()
+        .find(|t| t.id == tool_id)
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("unknown tool '{tool_id}'"),
+                }),
+            )
+        })?;
+
+    if entry.passthrough_env.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "this catalog tool does not declare passthrough_env".into(),
+            }),
+        ));
+    }
+
+    let allowed: HashMap<String, ()> = entry
+        .passthrough_env
+        .iter()
+        .map(|k| (k.clone(), ()))
+        .collect();
+    for key in body.env.keys() {
+        if !allowed.contains_key(key) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!("unknown passthrough key '{key}' for tool '{tool_id}'"),
+                }),
+            ));
+        }
+    }
+
+    let bot_id = state
+        .connection
+        .lock()
+        .await
+        .as_ref()
+        .map(|c| c.bot_id.clone());
+
+    {
+        let _guard = state.mcp_config_mutex.lock().await;
+        let mut cfg = mcp_service::load_or_init_config(&state.mcp_config_path).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse { error: e }),
+            )
+        })?;
+
+        let key = te_service::server_key(&tool_id);
+        let Some(server_ent) = cfg.servers.get_mut(&key) else {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("tool '{tool_id}' is not installed"),
+                }),
+            ));
+        };
+
+        match server_ent {
+            crate::modules::mcp::types::ServerEntry::Stdio {
+                catalog_passthrough,
+                ..
+            } => {
+                for (k, v) in &body.env {
+                    if v.trim().is_empty() {
+                        catalog_passthrough.remove(k);
+                    } else {
+                        catalog_passthrough.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+            _ => {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: "tool server entry is not stdio".into(),
+                    }),
+                ));
+            }
+        }
+
+        let host_paths = mcp_service::filesystem_allowed_paths(&cfg);
+        te_service::sync_workspace_mounted_tools_for_catalog(
+            &mut cfg,
+            &host_paths,
+            &catalog,
+            &state.mcp_config_path,
+            bot_id,
+        )
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse { error: e }),
+            )
+        })?;
+
+        mcp_service::save_config(&state.mcp_config_path, &cfg).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse { error: e }),
+            )
+        })?;
+    }
+
+    state
+        .emit_log(
+            "toolengine",
+            &format!("passthrough env updated for {tool_id}"),
+        )
+        .await;
+
+    let bg = state.clone();
+    tokio::spawn(async move {
+        if let Err(e) = mcp_service::rebuild_registry_into_state(&bg).await {
+            bg.emit_log(
+                "mcp",
+                &format!("ERROR: MCP registry rebuild failed after passthrough-env update: {e}"),
             )
             .await;
         }

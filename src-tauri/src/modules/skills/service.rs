@@ -111,7 +111,9 @@ pub const MAX_TOTAL_SKILL_HINT_BYTES: usize = SKILL_HINT_BODY_CAP * 8;
 
 const SKILL_HINT_INTRO: &str = "\n\nSkills: follow each recipe exactly — \
 it lists WHICH URL and HOW MANY calls. Stop when you can answer; \
-don't probe alternate hosts. The fetch tool is available.";
+don't probe alternate hosts. Prefer **`fetch`** whenever you have a concrete URL; use **`brave_web_search`** only when the recipe lists it in `requires` (and this turn matches that skill) or the user explicitly asked to search the open web.\n\
+Portal- or government-specific skills you install yourself apply **only** when the user is clearly asking about that jurisdiction’s government, law, official forms, or public administration — \
+not for recipes, hobbies, general knowledge, software, or unrelated chit-chat. If the topic does not match the skill’s scope, ignore that recipe entirely.";
 
 /// Build a system-prompt fragment describing the enabled skills so the agent
 /// knows when/how to invoke fetch tools for each. Returns `""` if there are
@@ -268,11 +270,99 @@ pub fn parse_skill(slug: &str, raw: &str, origin: SkillOrigin) -> Result<Skill, 
         source,
         license: fields.get("license").cloned(),
         requires: fields.get_list("requires"),
+        brave_allow_substrings: fields.get_list("brave_allow_substrings"),
         origin,
         mandatory_hint: None,
         enabled: true,
         body: body.trim_start_matches(['\n', '\r']).to_string(),
     })
+}
+
+/// User explicitly asked to search the open web (not just “look something up” in general).
+fn user_explicitly_requests_web_search(user_message: &str) -> bool {
+    let u = user_message.to_lowercase();
+    const PHRASES: &[&str] = &[
+        "search the internet",
+        "search the web",
+        "suche im internet",
+        "suche im internt",
+        "suche mir im internet",
+        "such mir im internet",
+        "such mir im web",
+        "such mal im internet",
+        "im internet suchen",
+        "im web suchen",
+        "finde mir im internet",
+        "suche im internet",
+        "seachr",
+        "web search",
+        "internetrecherche",
+        "recherche im internet",
+        "online recherchieren",
+        "google mal",
+        "duckduckgo",
+    ];
+    if PHRASES.iter().any(|p| u.contains(p)) {
+        return true;
+    }
+    // "suche nach" alone matches too many German sentences; require an explicit web intent nearby.
+    if u.contains("suche nach")
+        && (u.contains("internet")
+            || u.contains("online")
+            || u.contains("im web")
+            || u.contains("bei google")
+            || u.contains("duckduckgo"))
+    {
+        return true;
+    }
+    false
+}
+
+/// Tags this generic must not alone enable billed web search (e.g. "news" ⊆ "gameinformer news").
+const BRAVE_TAG_DENYLIST: &[&str] = &[
+    "news", "info", "help", "guide", "tips", "blog", "home", "page", "data", "list", "links",
+    "link", "tool", "tools", "apps", "app", "media", "site", "sites", "world", "daily", "live",
+];
+
+fn skill_triggers_brave_web_search(skill: &Skill, user_message: &str) -> bool {
+    if !skill
+        .requires
+        .iter()
+        .any(|r| r.eq_ignore_ascii_case("brave_web_search"))
+    {
+        return false;
+    }
+    let u = user_message.to_lowercase();
+    for sub in &skill.brave_allow_substrings {
+        if sub.len() >= 3 && u.contains(&sub.to_lowercase()) {
+            return true;
+        }
+    }
+    for t in &skill.tags {
+        if t.len() < 6 {
+            continue;
+        }
+        if BRAVE_TAG_DENYLIST.iter().any(|g| g.eq_ignore_ascii_case(t)) {
+            continue;
+        }
+        if u.contains(&t.to_lowercase()) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Expose the billed `brave_web_search` tool only when a skill lists it in `requires` and the
+/// user message matches that skill’s `brave_allow_substrings` / tags, or when the user uses an
+/// explicit “search the internet”-style phrase.
+pub fn allow_brave_web_search_for_message(store_path: &Path, user_message: &str) -> bool {
+    if user_explicitly_requests_web_search(user_message) {
+        return true;
+    }
+    list_skills(store_path)
+        .into_iter()
+        .filter(|s| s.enabled)
+        .any(|s| skill_triggers_brave_web_search(&s, user_message))
 }
 
 fn split_frontmatter(raw: &str) -> Option<(&str, &str)> {
@@ -864,5 +954,65 @@ mod tests {
             hint.contains("How to answer"),
             "expected answer-style reminder in:\n{hint}"
         );
+    }
+
+    #[test]
+    fn allow_brave_from_explicit_web_search_phrase() {
+        let tmp = tempdir().unwrap();
+        let fake_store = tmp.path().join("connection.json");
+        assert!(allow_brave_web_search_for_message(
+            &fake_store,
+            "bitte suche im Internet nach X"
+        ));
+        assert!(allow_brave_web_search_for_message(
+            &fake_store,
+            "search the internet for penguins"
+        ));
+        assert!(allow_brave_web_search_for_message(
+            &fake_store,
+            "suche mir im internet rezepte für einen Apfelstrudel"
+        ));
+    }
+
+    #[test]
+    fn allow_brave_when_skill_requires_and_substring_matches() {
+        let tmp = tempdir().unwrap();
+        let fake_store = tmp.path().join("connection.json");
+        let md = "---\nname: t\ndescription: d\ntags: [gov]\nrequires: [brave_web_search]\nbrave_allow_substrings: [widgets]\n---\n\nbody\n";
+        write_custom_skill(&fake_store, "t", md).unwrap();
+        assert!(!allow_brave_web_search_for_message(
+            &fake_store,
+            "hello world"
+        ));
+        assert!(allow_brave_web_search_for_message(
+            &fake_store,
+            "tell me about widgets"
+        ));
+    }
+
+    #[test]
+    fn allow_brave_not_enabled_by_generic_news_tag() {
+        let tmp = tempdir().unwrap();
+        let fake_store = tmp.path().join("connection.json");
+        let md = "---\nname: t\ndescription: d\ntags: [news, gaming]\nrequires: [brave_web_search]\n---\n\nbody\n";
+        write_custom_skill(&fake_store, "t", md).unwrap();
+        assert!(!allow_brave_web_search_for_message(
+            &fake_store,
+            "gameinformer news"
+        ));
+    }
+
+    #[test]
+    fn suche_nach_requires_web_context() {
+        let tmp = tempdir().unwrap();
+        let fake_store = tmp.path().join("connection.json");
+        assert!(!allow_brave_web_search_for_message(
+            &fake_store,
+            "suche nach gameinformer"
+        ));
+        assert!(allow_brave_web_search_for_message(
+            &fake_store,
+            "suche nach gameinformer im internet"
+        ));
     }
 }
