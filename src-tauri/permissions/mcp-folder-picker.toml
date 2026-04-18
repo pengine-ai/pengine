@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-mcp-folder-picker"
+description = "Open the native folder picker for MCP filesystem allow-list paths."
+commands.allow = ["pick_mcp_filesystem_folder"]

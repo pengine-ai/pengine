@@ -34,6 +34,14 @@ type Props = {
   onReloadServers?: () => Promise<void>;
 };
 
+/** Tauri `invoke` rejects with a plain string for command `Err(...)` returns,
+ *  not an `Error` — surface that string instead of a generic fallback. */
+function pickFolderErrorMessage(e: unknown): string {
+  if (e instanceof Error) return e.message;
+  if (typeof e === "string" && e.trim()) return e;
+  return "Could not open folder picker";
+}
+
 /** Detect filesystem MCP package in live args textarea (one token per line). */
 function argsTextLooksLikeFilesystem(argsText: string): boolean {
   return argsText
@@ -329,9 +337,7 @@ function InlineEditForm({
         const picked = await invoke<string | null>("pick_mcp_filesystem_folder");
         if (picked) addPath(picked);
       } catch (invokeErr) {
-        setPickFolderError(
-          invokeErr instanceof Error ? invokeErr.message : "Could not open folder picker",
-        );
+        setPickFolderError(pickFolderErrorMessage(invokeErr));
       }
     } catch {
       // Web / non-Tauri: dynamic import of `@tauri-apps/api/core` fails — expected, stay silent
@@ -356,9 +362,7 @@ function InlineEditForm({
         const picked = await invoke<string | null>("pick_mcp_filesystem_folder");
         if (picked) addTePath(picked);
       } catch (invokeErr) {
-        setTePickError(
-          invokeErr instanceof Error ? invokeErr.message : "Could not open folder picker",
-        );
+        setTePickError(pickFolderErrorMessage(invokeErr));
       }
     } catch {
       // Web / non-Tauri
@@ -386,9 +390,7 @@ function InlineEditForm({
         const picked = await invoke<string | null>("pick_mcp_filesystem_folder");
         if (picked) setTePrivatePathInput(picked);
       } catch (invokeErr) {
-        setTePrivatePickError(
-          invokeErr instanceof Error ? invokeErr.message : "Could not open folder picker",
-        );
+        setTePrivatePickError(pickFolderErrorMessage(invokeErr));
       }
     } catch {
       setTePrivatePickError("Folder picker needs the desktop app (Tauri).");

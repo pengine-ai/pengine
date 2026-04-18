@@ -10,6 +10,7 @@
     "core:event:default",
     "core:event:allow-listen",
     "core:event:allow-emit",
-    "allow-audit-logs"
+    "allow-audit-logs",
+    "allow-mcp-folder-picker"
   ]
 }

@@ -25,12 +25,12 @@ Chat, not a datasheet: short intro on how it _feels_, then compact day lines (da
 
 ## wttr.in (curl / fetch)
 
-| Goal | Example |
-| ---- | ------- |
-| Short (default), 1–2 days | `curl -s "wttr.in/London?2&m"` |
-| Full week-style table | `curl -s "wttr.in/London?T&m"` |
-| One line now | `curl -s "wttr.in/London?format=3"` |
-| Custom one-liner | `curl -s "wttr.in/London?format=%l:+%c+%t+%h+%w"` |
+| Goal                      | Example                                           |
+| ------------------------- | ------------------------------------------------- |
+| Short (default), 1–2 days | `curl -s "wttr.in/London?2&m"`                    |
+| Full week-style table     | `curl -s "wttr.in/London?T&m"`                    |
+| One line now              | `curl -s "wttr.in/London?format=3"`               |
+| Custom one-liner          | `curl -s "wttr.in/London?format=%l:+%c+%t+%h+%w"` |
 
 Tips: `+` for spaces; `?m` / `?u` units; `?1` today only; `?0` now only; airports `wttr.in/JFK`; PNG `wttr.in/Berlin.png`.
 
@@ -41,7 +41,7 @@ Tips: `+` for spaces; `?m` / `?u` units; `?1` today only; `?0` now only; airport
 **Flow (max 2 geocode + 1 forecast):**
 
 1. `https://geocoding-api.open-meteo.com/v1/search?name=PLACE&count=10` (spaces as `+`)
-2. If `results` missing/empty: **one** retry — shorter `name` + `countryCode` (e.g. `name=Breitenau&countryCode=AT` for _Breitenau am Hochlantsch_). Pick the row whose `admin3`/`admin2`/`admin1` matches the user phrase.
+2. If `results` missing/empty: **one** retry — shorter `name` + `countryCode` Pick the row whose `admin3`/`admin2`/`admin1` matches the user phrase.
 3. `https://api.open-meteo.com/v1/forecast?latitude=LAT&longitude=LON&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max,weathercode&forecast_days=7&timezone=auto` — extend `forecast_days` to 7–16 if they asked for more days.
 
 Current only: `curl -s "https://api.open-meteo.com/v1/forecast?latitude=51.5&longitude=-0.12&current_weather=true"`

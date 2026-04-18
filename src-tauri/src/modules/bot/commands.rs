@@ -46,14 +46,24 @@ pub async fn disconnect_bot(state: tauri::State<'_, AppState>) -> Result<String,
 }
 
 /// Native folder picker for MCP filesystem allow-list (desktop).
+///
+/// Uses the non-blocking callback API with a oneshot channel so the dialog
+/// dispatch to the main thread doesn't deadlock against the async runtime
+/// that's awaiting the result (a known issue with `blocking_pick_folder`
+/// inside `async` Tauri commands on macOS).
 #[cfg(desktop)]
 #[tauri::command]
 pub async fn pick_mcp_filesystem_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
-    let folder = app
-        .dialog()
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
         .file()
         .set_title("Folder for MCP filesystem tools")
-        .blocking_pick_folder();
+        .pick_folder(move |folder| {
+            let _ = tx.send(folder);
+        });
+    let folder = rx
+        .await
+        .map_err(|e| format!("folder picker closed unexpectedly: {e}"))?;
     Ok(folder.map(|p| p.to_string()))
 }
 
