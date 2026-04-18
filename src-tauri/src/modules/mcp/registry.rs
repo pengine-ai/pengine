@@ -962,8 +962,7 @@ mod tests {
     }
 
     #[test]
-    fn routing_gameinformer_news_includes_fetch_even_if_other_tools_match_news_token(
-    ) {
+    fn routing_gameinformer_news_includes_fetch_even_if_other_tools_match_news_token() {
         let mut tools: Vec<ToolDef> = (0..12)
             .map(|i| ToolDef {
                 server_name: "srv".into(),
@@ -997,7 +996,10 @@ mod tests {
         });
         let plan = super::route_tools(&tools, "gameinformer news", &[], None, false);
         match plan {
-            super::ToolRoutePlan::Subset { tools: sel, routing } => {
+            super::ToolRoutePlan::Subset {
+                tools: sel,
+                routing,
+            } => {
                 assert_eq!(routing, "ranked");
                 assert!(
                     sel.iter().any(|t| t.name == "fetch"),
