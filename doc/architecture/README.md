@@ -8,7 +8,7 @@
 
 A Tauri v2 desktop app. The frontend (React + TypeScript, built with Vite) talks to a loopback HTTP server embedded in the Tauri Rust backend. The backend connects to Telegram (via teloxide) and Ollama (local inference) on behalf of the user.
 
-**Implementation detail:** agent loop, tool routing, startup, and HTTP routes are summarized in [agent-runtime.md](../agent-runtime.md), [data-and-startup.md](../data-and-startup.md), and [http-api.md](../http-api.md).
+**Implementation detail:** agent loop, tool routing, startup, and HTTP routes are summarized in [agent/runtime.md](../agent/runtime.md), [platform/data-and-startup.md](../platform/data-and-startup.md), and [reference/http-api.md](../reference/http-api.md).
 
 ---
 
@@ -22,9 +22,11 @@ pengine/
 ├── e2e/                  # Playwright end-to-end tests
 ├── doc/
 │   ├── README.md            # Doc index + feature map (start here)
-│   ├── skills.md
-│   ├── custom-mcp-tools.md
-│   ├── design/              # Architecture (this file)
+│   ├── architecture/      # This folder (DDD + MCP design)
+│   ├── agent/
+│   ├── platform/
+│   ├── reference/
+│   ├── guides/
 │   └── tool-engine/
 ├── eslint.config.ts
 ├── .prettierrc

@@ -12,7 +12,7 @@ pub enum SkillOrigin {
 
 /// A skill is a folder with a `SKILL.md` whose YAML frontmatter declares the
 /// fields below. The markdown body after the frontmatter is passed to the agent
-/// as context — see `doc/skills.md`.
+/// as context — see `doc/guides/skills.md`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Skill {
     pub slug: String,

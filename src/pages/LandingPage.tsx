@@ -275,7 +275,7 @@ export function LandingPage() {
                 </p>
                 <div className="mt-6 flex flex-wrap gap-3">
                   <a
-                    href="https://github.com/pengine-ai/pengine/blob/main/doc/custom-mcp-tools.md"
+                    href="https://github.com/pengine-ai/pengine/blob/main/doc/guides/custom-mcp-tools.md"
                     target="_blank"
                     rel="noreferrer"
                     className="primary-button px-6"

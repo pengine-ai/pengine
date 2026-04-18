@@ -1,25 +1,67 @@
 # Pengine documentation
 
-Short reference for developers and AI agents. Deep dives live in the linked files.
+Short reference for developers and AI agents. Content is grouped **by topic** in subfolders.
 
-## Where to look
+## Folder layout
+
+```text
+doc/
+├── README.md                 # This index + feature map
+├── architecture/             # Codebase layout, DDD, MCP module design
+├── agent/                    # Telegram → Ollama → tools behavior
+├── platform/                 # Startup, AppState, files, secrets
+├── reference/                # Machine-oriented API tables
+├── guides/                   # How-to: skills, custom MCP tools
+└── tool-engine/              # Maintainers: image publish, registry
+```
+
+Product overview: [../README.md](../README.md).
+
+---
+
+## Topics
+
+### Architecture and codebase
 
 | Doc | Purpose |
 | --- | --- |
-| [design/README.md](design/README.md) | Repo layout, DDD boundaries, frontend/backend rules, tooling commands |
-| [design/mcp.md](design/mcp.md) | MCP host/client flow, Ollama tool bridge, audit logging |
-| [agent-runtime.md](agent-runtime.md) | **`run_turn`**, tool routing, system prompt, Ollama loop, limits |
-| [data-and-startup.md](data-and-startup.md) | **`AppState`**, on-disk files, keychain, **`app.rs`** boot order |
-| [http-api.md](http-api.md) | Loopback REST + SSE endpoints (method/path tables) |
-| [custom-mcp-tools.md](custom-mcp-tools.md) | `mcp.json`, stdio/native servers, Docker/custom tools, HTTP API snippets |
-| [skills.md](skills.md) | Skill format, ClawHub, bundled vs custom dirs |
-| [tool-engine/manual-publish.md](tool-engine/manual-publish.md) | GHCR images, `mcp-tools.json`, maintainer publish flow |
+| [architecture/README.md](architecture/README.md) | Repo layout, DDD boundaries, frontend/backend rules, tooling commands |
+| [architecture/mcp.md](architecture/mcp.md) | MCP host/client flow, Ollama tool bridge, audit logging |
 
-Project overview and user-facing product notes: [../README.md](../README.md).
+### Agent and runtime
+
+| Doc | Purpose |
+| --- | --- |
+| [agent/runtime.md](agent/runtime.md) | `run_turn`, tool routing, system prompt, Ollama loop, limits |
+
+### Platform (data and startup)
+
+| Doc | Purpose |
+| --- | --- |
+| [platform/data-and-startup.md](platform/data-and-startup.md) | `AppState`, on-disk files, keychain, `app.rs` boot order |
+
+### Reference
+
+| Doc | Purpose |
+| --- | --- |
+| [reference/http-api.md](reference/http-api.md) | Loopback REST + SSE endpoints (method/path tables) |
+
+### Guides (how-to)
+
+| Doc | Purpose |
+| --- | --- |
+| [guides/skills.md](guides/skills.md) | Skill format, ClawHub, bundled vs custom dirs |
+| [guides/custom-mcp-tools.md](guides/custom-mcp-tools.md) | `mcp.json`, stdio/native servers, Docker/custom tools, HTTP snippets |
+
+### Tool Engine (maintainers)
+
+| Doc | Purpose |
+| --- | --- |
+| [tool-engine/manual-publish.md](tool-engine/manual-publish.md) | GHCR images, `mcp-tools.json`, publish workflow |
+
+---
 
 ## Feature map (code anchors)
-
-Use this table to jump to the right area when changing behavior.
 
 | Feature | What it does | Primary locations |
 | --- | --- | --- |
@@ -37,9 +79,11 @@ Use this table to jump to the right area when changing behavior.
 | **Dashboard** | Status, Ollama model, MCP tools, Tool Engine, Skills | `src/pages/DashboardPage.tsx` |
 | **E2E** | Playwright setup path | `e2e/` |
 
+---
+
 ## HTTP API (quick list)
 
-Base URL: `http://127.0.0.1:21516` (see `src/shared/api/config.ts`). Per-endpoint notes: **[http-api.md](http-api.md)**.
+Base URL: `http://127.0.0.1:21516` (see `src/shared/api/config.ts`). Details: **[reference/http-api.md](reference/http-api.md)**.
 
 - **Core:** `POST/DELETE /v1/connect`, `GET /v1/health`, `GET /v1/logs` (SSE)
 - **Ollama:** `GET /v1/ollama/models`, `PUT /v1/ollama/model`
@@ -48,10 +92,12 @@ Base URL: `http://127.0.0.1:21516` (see `src/shared/api/config.ts`). Per-endpoin
 - **Tool Engine:** `GET /v1/toolengine/runtime`, `catalog`, `installed`, `POST install/uninstall`, `PUT private-folder`, `PUT passthrough-env`, `GET/POST/DELETE /v1/toolengine/custom/...`
 - **Skills:** `GET/POST /v1/skills`, `DELETE /v1/skills/{slug}`, `PUT /v1/skills/{slug}/enabled`, ClawHub routes under `/v1/skills/clawhub/...`
 
-Authoritative route list: `http_server.rs` router in `src-tauri/src/infrastructure/http_server.rs`.
+Authoritative route list: `http_server.rs` in `src-tauri/src/infrastructure/http_server.rs`.
+
+---
 
 ## Config and data paths
 
-- **Bot connection:** `connection.json` under app data (next to `mcp.json`); path logic in `src-tauri/src/modules/bot/repository.rs`
-- **MCP:** `mcp.json` — see [custom-mcp-tools.md](custom-mcp-tools.md) and `PENGINE_MCP_CONFIG`
-- **Skills (custom):** `$APP_DATA/skills/` — see [skills.md](skills.md)
+- **Bot connection:** `connection.json` under app data (next to `mcp.json`); see `src-tauri/src/modules/bot/repository.rs` and [platform/data-and-startup.md](platform/data-and-startup.md).
+- **MCP:** `mcp.json` — [guides/custom-mcp-tools.md](guides/custom-mcp-tools.md) and `PENGINE_MCP_CONFIG`.
+- **Skills (custom):** `$APP_DATA/skills/` — [guides/skills.md](guides/skills.md).

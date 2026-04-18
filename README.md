@@ -21,7 +21,7 @@ Pengine is a local-first agent runtime: you talk to it from **Telegram** while i
 
 ## Documentation
 
-Developer and AI-oriented reference: **[doc/README.md](doc/README.md)** (feature map, API index, links to MCP, skills, and architecture notes).
+Developer and AI-oriented reference: **[doc/README.md](doc/README.md)** — topic index (`architecture/`, `agent/`, `platform/`, `reference/`, `guides/`, `tool-engine/`), feature map, and API pointers.
 
 ## Project layout
 
@@ -31,7 +31,7 @@ src/assets/          Source logo: pengine-logo.png (master for all derivatives)
 public/              Favicon + small PNGs for the web UI (generated, committed)
 src-tauri/           Tauri + Rust backend (Telegram, Ollama, MCP, loopback HTTP API)
 src-tauri/icons/     App bundle icons (generated from the same source, committed)
-doc/                 Architecture and feature docs (start at doc/README.md)
+doc/                 Topic-based docs (start at doc/README.md)
 e2e/                 Playwright specs
 ```
 

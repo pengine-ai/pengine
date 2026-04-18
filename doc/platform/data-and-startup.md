@@ -31,7 +31,7 @@ Paths are Tauri **`app_data_dir()`** (platform-specific). The app uses **`connec
 | **`connection.json`** | `ConnectionMetadata` only: `bot_id`, `bot_username`, `connected_at` — **no token** |
 | **`user_settings.json`** | Optional prefs; currently `skills_hint_max_bytes` (clamped 4Ki–256Ki, default 10Ki). See `shared/user_settings.rs`. |
 | **`mcp.json`** | MCP server definitions + `workspace_roots`, `custom_tools` metadata, etc. Secrets migrated out to keychain when applicable. |
-| **`skills/`** | Custom skills + **`.disabled.json`** (disabled slugs). See `skills.md`. |
+| **`skills/`** | Custom skills + **`.disabled.json`** (disabled slugs). See [guides/skills.md](../guides/skills.md). |
 
 `PENGINE_MCP_CONFIG` can relocate **`mcp.json`** only; `connection.json` / `user_settings.json` stay with app data.
 

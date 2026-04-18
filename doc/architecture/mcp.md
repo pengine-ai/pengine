@@ -37,7 +37,7 @@ Registry state lives on `AppState` (see `shared/state.rs`) so HTTP handlers and 
 
 **File:** `mcp.json` next to `connection.json` (app data), unless **`PENGINE_MCP_CONFIG`** overrides. **`GET /v1/mcp/config`** returns the resolved path and metadata.
 
-**User guide:** [custom-mcp-tools.md](../custom-mcp-tools.md) (stdio `npx`, hand-written Docker argv, Tool Engine catalog, **`POST /v1/toolengine/custom`**, native entries).
+**User guide:** [guides/custom-mcp-tools.md](../guides/custom-mcp-tools.md) (stdio `npx`, hand-written Docker argv, Tool Engine catalog, **`POST /v1/toolengine/custom`**, native entries).
 
 **Multiple servers** are supported: each key under `servers` becomes a client; tool names exposed to the model are `server_key.tool_name`.
 

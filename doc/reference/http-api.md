@@ -52,7 +52,7 @@ Authoritative list: **`Router::new()`** in `http_server.rs`. Below: method, path
 | PUT | `/v1/toolengine/private-folder` | Host path for tool private data. |
 | PUT | `/v1/toolengine/passthrough-env` | MCP env passthrough (secrets path). |
 | GET | `/v1/toolengine/custom` | List custom Docker MCP tools. |
-| POST | `/v1/toolengine/custom` | Add custom image tool (see [custom-mcp-tools.md](custom-mcp-tools.md)). |
+| POST | `/v1/toolengine/custom` | Add custom image tool (see [guides/custom-mcp-tools.md](../guides/custom-mcp-tools.md)). |
 | DELETE | `/v1/toolengine/custom/{key}` | Remove custom tool. |
 
 ## Skills
