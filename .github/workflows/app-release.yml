@@ -9,6 +9,10 @@ name: App Release
 #
 # Builds are currently unsigned. See doc/guides/releasing.md for how to obtain
 # Apple and Windows code-signing credentials and wire them back in here.
+#
+# After the installers are built, each platform job also pushes them to GHCR
+# as an OCI artifact (ghcr.io/<owner>/pengine-installer-<slug>:<version>) so
+# they appear on the org's linked artifacts page alongside tool images.
 
 on:
   push:
@@ -22,6 +26,7 @@ on:
 
 permissions:
   contents: write
+  packages: write
 
 jobs:
   build:
@@ -30,12 +35,15 @@ jobs:
       matrix:
         include:
           - platform: macos-latest
+            slug: macos
             args: "--target universal-apple-darwin"
             rust-targets: "aarch64-apple-darwin,x86_64-apple-darwin"
           - platform: ubuntu-22.04
+            slug: linux
             args: ""
             rust-targets: ""
           - platform: windows-latest
+            slug: windows
             args: ""
             rust-targets: ""
 
@@ -74,6 +82,7 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Build and release
+        id: tauri
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -91,3 +100,18 @@ jobs:
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
+
+      - name: Set up oras
+        uses: oras-project/setup-oras@v1
+
+      - name: Publish installers to GHCR
+        shell: bash
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ARTIFACT_PATHS: ${{ steps.tauri.outputs.artifactPaths }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          SLUG: ${{ matrix.slug }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.repository }}
+          REVISION: ${{ github.sha }}
+        run: bash .github/scripts/app-release/push-installers.sh

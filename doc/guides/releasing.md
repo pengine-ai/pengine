@@ -3,7 +3,21 @@
 Pengine ships installers for macOS, Windows, and Linux via the
 [`App Release`](../../.github/workflows/app-release.yml) GitHub Actions
 workflow. Pushing a tag matching `v*` (e.g. `v1.0.1`) triggers a build on each
-platform and uploads the installers as assets on a **draft** GitHub Release.
+platform and publishes the installers in two places:
+
+- as assets on a **draft** GitHub Release (for humans to download), and
+- as OCI artifacts on GHCR under
+  `ghcr.io/pengine-ai/pengine-installer-<macos|linux|windows>:<version>`, which
+  surface on the org's
+  [linked artifacts page](https://github.com/orgs/pengine-ai/artifacts) next to
+  the tool images.
+
+Pull an installer from the registry with
+[`oras`](https://oras.land/docs/installation):
+
+```bash
+oras pull ghcr.io/pengine-ai/pengine-installer-macos:1.0.1
+```
 
 ```bash
 git tag v1.0.1
