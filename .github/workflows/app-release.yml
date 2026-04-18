@@ -9,6 +9,11 @@ name: App Release
 #
 # Builds are currently unsigned. See doc/guides/releasing.md for how to obtain
 # Apple and Windows code-signing credentials and wire them back in here.
+#
+# After the build, each platform job also uploads its bundles as GitHub
+# Actions build artifacts and generates a signed SLSA provenance attestation
+# (actions/attest-build-provenance). The attestation is what surfaces the
+# binaries on the org's linked-artifacts view via the artifact metadata API.
 
 on:
   push:
@@ -22,6 +27,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 jobs:
   build:
@@ -30,12 +37,15 @@ jobs:
       matrix:
         include:
           - platform: macos-latest
+            slug: macos
             args: "--target universal-apple-darwin"
             rust-targets: "aarch64-apple-darwin,x86_64-apple-darwin"
           - platform: ubuntu-22.04
+            slug: linux
             args: ""
             rust-targets: ""
           - platform: windows-latest
+            slug: windows
             args: ""
             rust-targets: ""
 
@@ -74,6 +84,7 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Build and release
+        id: tauri
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -91,3 +102,22 @@ jobs:
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
+
+      - name: Stage binaries
+        id: stage
+        shell: bash
+        env:
+          ARTIFACT_PATHS: ${{ steps.tauri.outputs.artifactPaths }}
+        run: bash .github/scripts/app-release/stage-binaries.sh
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pengine-${{ matrix.slug }}
+          path: ${{ steps.stage.outputs.dir }}
+          if-no-files-found: error
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ${{ steps.stage.outputs.dir }}/*
