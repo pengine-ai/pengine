@@ -1,116 +1,88 @@
-# MCP — Model Context Protocol Module (POC)
+# MCP — Model Context Protocol in Pengine
 
-> Status: **proof of concept**. One server, one transport, one happy path.
+Pengine acts as an **MCP host**: it runs one JSON-RPC **client** per configured server, merges tool lists for Ollama, and routes `tools/call` by `server.tool` name.
 
-## What & Why
-
-[MCP](https://modelcontextprotocol.org/) is an open JSON-RPC 2.0 protocol that lets an LLM "host" discover and call tools exposed by external "servers". Pengine adopts MCP so we can grow the agent's capabilities by dropping in new servers instead of writing bespoke Rust glue for each tool. Every tool call flows through one well-defined choke point, which is what makes it auditable.
-
-## Roles in Pengine
+## Roles
 
 | Role | Where | Responsibility |
-|---|---|---|
-| **Host** | Pengine (Tauri binary) | Owns the LLM (Ollama) connection, the Telegram bot, and the agent loop. |
-| **Client** | `src-tauri/src/modules/mcp/` | One `McpClient` per connected server. Speaks JSON-RPC over stdio. |
-| **Server** | External child process | Anything that speaks MCP — `npx @modelcontextprotocol/server-filesystem`, a Docker container, a custom binary. |
+| --- | --- | --- |
+| **Host** | Tauri binary | Telegram bot, loopback HTTP API, agent loop, Ollama |
+| **Client** | `src-tauri/src/modules/mcp/` | `McpClient` per server — stdio JSON-RPC |
+| **Server** | Child process or native provider | MCP over stdio, or built-in native tools |
 
 ```text
-Telegram message
-      │
-      ▼
-bot::service::text_handler
-      │
-      ▼
-bot::agent::run_turn ────► ollama::chat_with_tools (Ollama /api/chat)
-      ▲                            │
-      │                            │ tool_calls?
-      │                            ▼
-      └─────────── mcp::registry::call_tool ──► McpClient ──► child process (stdio)
+Telegram -> teloxide dispatcher -> bot::service::text_handler -> bot::agent::run_turn
+  run_turn calls ollama::chat_with_tools using tool definitions from mcp::registry
+  each model tool_call -> mcp::registry::call_tool -> McpClient (stdio) or native provider
 ```
 
-## Module Layout
+## Module layout
 
 ```text
 src-tauri/src/modules/mcp/
 ├── mod.rs
-├── protocol.rs   JSON-RPC 2.0 request/response types
-├── types.rs      McpConfig, ServerConfig, Tool
-├── transport.rs  StdioTransport — child process + line-delimited JSON
-├── client.rs     McpClient — initialize / tools/list / tools/call
-├── registry.rs   McpRegistry — fan-out across all connected servers
-└── service.rs    load_or_init_config(), connect_all()
+├── protocol.rs   # JSON-RPC types
+├── types.rs      # McpConfig, ServerConfig, ToolDef, …
+├── transport.rs  # StdioTransport
+├── client.rs     # initialize / tools/list / tools/call
+├── registry.rs   # ToolRegistry — fan-out + routing
+├── native.rs     # Built-in servers (e.g. dice, tool_manager)
+├── tool_metadata.rs
+└── service.rs    # load/reload mcp.json, connect_all, workspace sync
 ```
 
-The registry lives on `AppState.mcp` (`Arc<RwLock<McpRegistry>>`) so the bot agent and any future HTTP route can reach it.
+Registry state lives on `AppState` (see `shared/state.rs`) so HTTP handlers and the agent share the same view.
 
 ## Config
 
-File: `$APP_DATA/mcp.json` (next to `connection.json`). Created on first launch with a sane default if missing.
+**File:** `mcp.json` next to `connection.json` (app data), unless **`PENGINE_MCP_CONFIG`** overrides. **`GET /v1/mcp/config`** returns the resolved path and metadata.
 
-**User-facing guide (stdio packages, Docker images, API):** [custom-mcp-tools.md](../custom-mcp-tools.md).
+**User guide:** [custom-mcp-tools.md](../custom-mcp-tools.md) (stdio `npx`, hand-written Docker argv, Tool Engine catalog, **`POST /v1/toolengine/custom`**, native entries).
 
-```json
-{
-  "servers": {
-    "filesystem": {
-      "type": "stdio",
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
-      "env": {},
-      "direct_return": false
-    }
-  }
-}
-```
+**Multiple servers** are supported: each key under `servers` becomes a client; tool names exposed to the model are `server_key.tool_name`.
 
-To add a server: add another entry under `servers`. Restart Pengine.
+Secrets (bot tokens, MCP passthrough env) are stored via **`secure_store`**, not inline in `mcp.json`, when configured.
 
-## Protocol Subset Implemented
+## Protocol subset (stdio clients)
 
-Four messages, that's it:
+Implemented messages:
 
-1. `initialize` — handshake. We send `{protocolVersion, capabilities, clientInfo}` and ignore most of the response.
-2. `notifications/initialized` — required notification after init.
-3. `tools/list` — discovery, cached on the client.
-4. `tools/call` — `{name, arguments}` → `{content: [{type: "text", text}]}`.
+1. `initialize` / `notifications/initialized`
+2. `tools/list` (cached on the client)
+3. `tools/call`
 
-Out of scope for the POC: resources, prompts, sampling, server-initiated requests, batch JSON-RPC, HTTP transport.
+Not implemented here: resources, prompts, sampling, server-initiated requests, HTTP/SSE MCP transport.
 
-## Ollama Bridge
+## Ollama bridge
 
-MCP `inputSchema` is JSON Schema, and so are Ollama's tool `parameters` — translation is just a rename. See `to_ollama_tools` in `bot/agent.rs`. Tool names are emitted as `server.tool` so the registry can route a call back to the right client.
+MCP `inputSchema` maps to Ollama tool `parameters`. **`to_ollama_tools`** (in `bot/agent.rs` and MCP helpers) rewrites names to `server.tool` so **`registry.call_tool`** can dispatch.
 
-The agent loop in `bot::agent::run_turn`:
+**Agent loop** (`run_turn`):
 
-1. Snapshot the available tools from the registry.
-2. Send `system + user` plus the tool list to Ollama.
-3. If the response carries `tool_calls`, run each via `registry.call_tool`, append the results as `role: "tool"` messages, loop. Capped at **5 steps**.
-4. Otherwise return the assistant content as the final reply.
+1. Snapshot tools from the registry (+ native providers).
+2. Send system + user + tool list to Ollama.
+3. On `tool_calls`, execute via the registry, append `role: "tool"` messages, repeat until done or **step cap** (see `MAX_STEPS` in `agent.rs`).
+4. Otherwise return assistant text to Telegram.
 
-Use a tool-capable model (e.g. `qwen3:8b`). Check with `ollama show <model>` for the `tools` capability.
+Use a **tool-capable** model (`ollama show <model>` — `tools` capability).
 
-## Audit Logs
+## Dashboard and HTTP API
 
-Every MCP-relevant event is emitted as a `LogEntry` with `kind = "mcp"` via `state.emit_log`. They flow through the existing SSE log stream (`GET /v1/logs`) and are visible on the dashboard:
+The **Tools** / **Tool Engine** UI (`src/modules/mcp/`, `src/modules/toolengine/`) calls the loopback API to list tools, edit `mcp.json` entries, install catalog images, and manage workspace roots. Saving config triggers **MCP reconnect / reload** in the backend (`mcp::service`).
 
-- `loading MCP config…`
-- `filesystem ready (2 tools)`
-- `MCP ready (2 tools)`
-- `tools available: filesystem.read_file, filesystem.list_directory`
-- `tool call (0): filesystem.list_directory({"path":"/tmp"})`
-- `tool result (842 bytes)`
-- `tool error: …`
+## Audit logs
 
-That single audit trail is the "auditable protocol" promise of this feature.
+MCP events emit `LogEntry` with `kind = "mcp"` to **`GET /v1/logs`** (SSE) and the in-app log view.
 
-## Try It
+Examples: config load, server ready, `tools/list` sizes, each `tools/call` and result size, errors.
 
-1. `npx -y @modelcontextprotocol/server-filesystem /tmp` should run (Node + npm available).
-2. `ollama pull qwen3:8b` (or any tool-capable model).
-3. `bun run tauri dev`. On first launch, watch the dashboard for `mcp` lines confirming the filesystem server connected.
-4. Connect a Telegram bot, then send: *"List the files in /tmp."*
-5. Expect a `tool call` and `tool result` line in the log, followed by a coherent reply on Telegram.
+## Try it
 
-## Future Work
+1. Node on `PATH` if using `npx` stdio servers.
+2. `ollama pull` a tool-capable model.
+3. `bun run tauri dev` — dashboard should show MCP status lines.
+4. Connect a bot; ask something that triggers a configured tool; confirm log lines and Telegram reply.
 
-Permission prompts, multiple servers in the default config, a frontend tools panel, hot reload of `mcp.json`, HTTP/SSE transport, resources & prompts. Not in this PR.
+## Future work
+
+Finer-grained permission prompts, optional HTTP/SSE MCP transport, resources and prompts in the client, richer multi-server defaults for first-run.

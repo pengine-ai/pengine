@@ -199,5 +199,6 @@ Under **+ Add custom tool → Paste JSON**, you can paste either:
 
 ## See also
 
-- [design/mcp.md](design/mcp.md) — protocol and module overview (may be partially superseded by implementation details in code).
+- [design/mcp.md](design/mcp.md) — host/client flow and Ollama bridge (details also in `src-tauri/src/modules/mcp/`).
+- [README.md](README.md) — doc index and `/v1` API list.
 - [tool-engine/manual-publish.md](tool-engine/manual-publish.md) — publishing catalog tools (maintainers).

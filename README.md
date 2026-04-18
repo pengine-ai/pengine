@@ -19,13 +19,19 @@ Pengine is a local-first agent runtime: you talk to it from **Telegram** while i
 | State | Zustand (session / device gate) |
 | E2E | Playwright |
 
+## Documentation
+
+Developer and AI-oriented reference: **[doc/README.md](doc/README.md)** (feature map, API index, links to MCP, skills, and architecture notes).
+
 ## Project layout
 
 ```
 src/                 Web app (landing, setup wizard, dashboard)
 src/assets/          Source logo: pengine-logo.png (master for all derivatives)
 public/              Favicon + small PNGs for the web UI (generated, committed)
+src-tauri/           Tauri + Rust backend (Telegram, Ollama, MCP, loopback HTTP API)
 src-tauri/icons/     App bundle icons (generated from the same source, committed)
+doc/                 Architecture and feature docs (start at doc/README.md)
 e2e/                 Playwright specs
 ```
 
@@ -47,12 +53,13 @@ This writes `public/favicon-32.png`, `public/pengine-logo-64.png`, `public/pengi
 
 ## Setup wizard (`/setup`)
 
-Onboarding is a **four-step** flow:
+Onboarding is a **five-step** flow:
 
-1. **Create bot** — BotFather, paste the Telegram bot token (bot ID is derived from the token for pairing).
-2. **Install Ollama** — Local model runtime; demo button stands in until real health checks exist.
-3. **Pengine local** — Run the agent on this machine (web or Tauri); demo button for now.
-4. **Connect** — Optional `@username` for the QR / deep link; simulate linking the bot to Pengine (mock), then open the dashboard.
+1. **Create bot** — BotFather; paste the Telegram bot token (bot ID is derived from the token for pairing).
+2. **Install Ollama** — Local model runtime; the wizard checks reachability and a pulled model.
+3. **Install a container runtime** — Podman (preferred) or Docker for sandboxed MCP tools (Tool Engine).
+4. **Pengine local** — Confirm the app/runtime is reachable on this machine (`bun run tauri dev` or the packaged app).
+5. **Connect** — Hand off the token to the local app (deep link / QR flow); then open the dashboard.
 
 End-to-end tests cover this path under `e2e/`.
 
@@ -64,7 +71,7 @@ End-to-end tests cover this path under `e2e/`.
 
 ### Prerequisites
 
-- **Node.js** ≥ 20 (see `.nvmrc`)
+- **Node.js** — use the version in `.nvmrc` (repo currently pins **24.x**; ≥20 is generally fine)
 - **Rust** (stable) if you use Tauri
 - **Ollama** and **Docker** are expected for a full local stack (optional for UI-only work)
 

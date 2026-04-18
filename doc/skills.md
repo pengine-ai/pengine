@@ -71,7 +71,7 @@ requires: [curl]
 
 ### Optional fields
 
-`version`, `author`, `source`, `license`, `tags` (string[]), `requires` (string[] — host binaries needed like `curl`).
+`version`, `author`, `source` (ClawHub may use `homepage` — treated like `source`), `license`, `tags` (string[]), `requires` (string[] — host binaries or tool names such as `curl`; also used to gate **`brave_web_search`** for this turn), `brave_allow_substrings` (string[] — extra user-message phrases that may enable web search for this skill).
 
 ### Body convention
 
@@ -139,6 +139,8 @@ Reach for a skill first if the task is "call this URL, return this JSON". Reach 
 
 ## Wiring into the agent
 
-The agent receives the `description` of every skill as part of its system context, plus the full body of any skill whose `name` appears in the user message. This keeps the prompt small: a user asking about weather pulls in only `weather`'s `SKILL.md`, not every skill in the catalog.
+**Enabled** skills are merged into the **system** prompt on every turn: for each skill, the runtime adds `description`, a truncated `SKILL.md` body, and optional `mandatory.md` text (see `skills_prompt_hint` in `src-tauri/src/modules/skills/service.rs`). Disabled skills (Dashboard toggle → `.disabled.json`) are omitted.
 
-*(Injection is handled by `src-tauri/src/modules/skills/service.rs`; see the code for the exact selection rule.)*
+The **user message** does *not* pick which skill bodies load; it is used for other gates (for example whether **`brave_web_search`** is exposed this turn — keywords module + skill `requires` / `brave_allow_substrings` / long `tags`).
+
+The total skills fragment is capped by **`skills_hint_max_bytes`** (`GET/PUT /v1/settings`; dashboard slider).
