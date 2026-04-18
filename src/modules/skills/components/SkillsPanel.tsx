@@ -1,7 +1,28 @@
 import * as Accordion from "@radix-ui/react-accordion";
+import {
+  closestCenter,
+  defaultDropAnimation,
+  DndContext,
+  DragOverlay,
+  type DragEndEvent,
+  type DragStartEvent,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+} from "@dnd-kit/core";
+import { restrictToVerticalAxis } from "@dnd-kit/modifiers";
+import {
+  arrayMove,
+  SortableContext,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchUserSettings, putUserSettings } from "../../settings";
-import { addSkill, deleteSkill, fetchSkills, setSkillEnabled } from "../api";
+import { addSkill, deleteSkill, fetchSkills, putSkillSlugOrder, setSkillEnabled } from "../api";
 import { type Skill, skillMandatoryMarkdown } from "../types";
 import { ClawHubBrowse } from "./ClawHubBrowse";
 import { SkillsContextBytesSlider } from "./SkillsContextBytesSlider";
@@ -64,6 +85,139 @@ function composeSkillMarkdown(skill: Skill): string {
   return `${lines.join("\n")}\n`;
 }
 
+type SortableSkillCardProps = {
+  skill: Skill;
+  togglingSlug: string | null;
+  onToggleEnabled: (skill: Skill) => void;
+  onEdit: (skill: Skill) => void;
+  onDelete: (slug: string) => void;
+};
+
+function SortableSkillCard({
+  skill,
+  togglingSlug,
+  onToggleEnabled,
+  onEdit,
+  onDelete,
+}: SortableSkillCardProps) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id: skill.slug,
+  });
+
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    ...(isDragging ? { opacity: 0, pointerEvents: "none" as const } : {}),
+  };
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={style}
+      className={`rounded-xl border px-3 py-2.5 transition ${
+        skill.enabled ? "border-white/10 bg-white/5" : "border-white/5 bg-white/[0.015] opacity-60"
+      }`}
+    >
+      <div className="flex min-w-0 items-start justify-between gap-3">
+        <button
+          type="button"
+          {...attributes}
+          {...listeners}
+          className="mt-0.5 shrink-0 cursor-grab select-none border-0 bg-transparent p-0 font-mono text-sm text-white/30 outline-none active:cursor-grabbing"
+          title="Drag to reorder"
+          aria-label={`Drag to reorder ${skill.slug}`}
+        >
+          ::
+        </button>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <p className="truncate text-sm font-semibold text-white">{skill.name}</p>
+            <span
+              className={`rounded-full px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider ${
+                skill.origin === "bundled"
+                  ? "bg-white/10 text-white/60"
+                  : "bg-emerald-300/10 text-emerald-300/80"
+              }`}
+            >
+              {skill.origin}
+            </span>
+          </div>
+          <p className="mt-0.5 font-mono text-[11px] text-(--mid)">
+            {skill.slug}
+            {skill.version ? ` · v${skill.version}` : ""}
+            {skill.tags.length > 0 ? ` · ${skill.tags.join(", ")}` : ""}
+          </p>
+          <p className="mt-1 text-[11px] leading-snug text-(--mid)">{skill.description}</p>
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          <button
+            type="button"
+            role="switch"
+            aria-checked={skill.enabled}
+            onClick={() => void onToggleEnabled(skill)}
+            disabled={togglingSlug === skill.slug}
+            title={skill.enabled ? "Disable skill" : "Enable skill"}
+            className={`relative h-5 w-9 rounded-full border transition disabled:opacity-50 ${
+              skill.enabled
+                ? "border-emerald-300/30 bg-emerald-300/20"
+                : "border-white/10 bg-white/5"
+            }`}
+          >
+            <span
+              className={`absolute top-1/2 block h-3.5 w-3.5 -translate-y-1/2 rounded-full transition ${
+                skill.enabled
+                  ? "left-[18px] bg-emerald-300 shadow-[0_0_6px_rgba(52,211,153,0.5)]"
+                  : "left-[2px] bg-white/40"
+              }`}
+            />
+          </button>
+          {skill.origin === "custom" && (
+            <>
+              <button
+                type="button"
+                onClick={() => void onEdit(skill)}
+                className="rounded-lg border border-white/15 bg-white/5 px-3 py-1 font-mono text-[11px] text-white/80 transition hover:bg-white/10"
+              >
+                Edit
+              </button>
+              <button
+                type="button"
+                onClick={() => void onDelete(skill.slug)}
+                className="rounded-lg border border-rose-300/20 bg-transparent px-3 py-1 font-mono text-[11px] text-rose-300/70 transition hover:bg-rose-300/10 hover:text-rose-200"
+              >
+                Delete
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+
+      <Accordion.Root type="single" collapsible className="mt-2 border-t border-white/5 pt-2">
+        <Accordion.Item
+          value={`${skill.slug}-body`}
+          className="overflow-hidden rounded-lg border border-white/10 bg-white/3"
+        >
+          <Accordion.Header>
+            <Accordion.Trigger className="group flex w-full items-center justify-between gap-3 px-3 py-2 text-left">
+              <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-(--mid)">
+                SKILL.md body
+              </p>
+              <span className="shrink-0 font-mono text-xs text-(--mid) transition group-data-[state=open]:rotate-45">
+                +
+              </span>
+            </Accordion.Trigger>
+          </Accordion.Header>
+          <Accordion.Content className="border-t border-white/10 px-3 py-2">
+            <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-white/70">
+              {skill.body}
+            </pre>
+          </Accordion.Content>
+        </Accordion.Item>
+      </Accordion.Root>
+    </div>
+  );
+}
+
 export function SkillsPanel() {
   const [skills, setSkills] = useState<Skill[] | null>(null);
   const [customDir, setCustomDir] = useState<string>("");
@@ -107,6 +261,53 @@ export function SkillsPanel() {
       setError("Could not load skills");
     }
   }, []);
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
+
+  const [activeDragSkill, setActiveDragSkill] = useState<Skill | null>(null);
+
+  const handleSkillDragStart = useCallback(
+    (event: DragStartEvent) => {
+      const slug = String(event.active.id);
+      setActiveDragSkill(skills?.find((s) => s.slug === slug) ?? null);
+    },
+    [skills],
+  );
+
+  const clearSkillDrag = useCallback(() => {
+    setActiveDragSkill(null);
+  }, []);
+
+  const handleSkillOrderDragEnd = useCallback(
+    (event: DragEndEvent) => {
+      clearSkillDrag();
+      const { active, over } = event;
+      if (!over || active.id === over.id) return;
+      setSkills((current) => {
+        if (!current) return current;
+        const oldIndex = current.findIndex((s) => s.slug === active.id);
+        const newIndex = current.findIndex((s) => s.slug === over.id);
+        if (oldIndex < 0 || newIndex < 0) return current;
+        const next = arrayMove(current, oldIndex, newIndex);
+        void (async () => {
+          const r = await putSkillSlugOrder(next.map((s) => s.slug));
+          if (!r.ok) {
+            setError(r.error ?? "Could not save skill order");
+            void load();
+          }
+        })();
+        return next;
+      });
+    },
+    [clearSkillDrag, load],
+  );
+
+  const handleSkillDragCancel = useCallback(() => {
+    clearSkillDrag();
+  }, [clearSkillDrag]);
 
   useEffect(() => {
     cancelledRef.current = false;
@@ -419,107 +620,57 @@ export function SkillsPanel() {
 
       {skills !== null && skills.length > 0 && (
         <div className="mt-4 grid gap-2">
-          {skills.map((skill) => (
-            <div
-              key={skill.slug}
-              className={`rounded-xl border px-3 py-2.5 transition ${
-                skill.enabled
-                  ? "border-white/10 bg-white/5"
-                  : "border-white/5 bg-white/[0.015] opacity-60"
-              }`}
+          <p className="font-mono text-[10px] text-white/45">
+            Drag the <span className="text-white/55">::</span> handle to reorder. Order is saved to
+            disk and used for the skills block in the system prompt.
+          </p>
+          <DndContext
+            sensors={sensors}
+            collisionDetection={closestCenter}
+            modifiers={[restrictToVerticalAxis]}
+            onDragStart={handleSkillDragStart}
+            onDragEnd={handleSkillOrderDragEnd}
+            onDragCancel={handleSkillDragCancel}
+          >
+            <SortableContext
+              items={skills.map((s) => s.slug)}
+              strategy={verticalListSortingStrategy}
             >
-              <div className="flex min-w-0 items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2">
-                    <p className="truncate text-sm font-semibold text-white">{skill.name}</p>
-                    <span
-                      className={`rounded-full px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider ${
-                        skill.origin === "bundled"
-                          ? "bg-white/10 text-white/60"
-                          : "bg-emerald-300/10 text-emerald-300/80"
-                      }`}
-                    >
-                      {skill.origin}
+              <div className="grid gap-2">
+                {skills.map((skill) => (
+                  <SortableSkillCard
+                    key={skill.slug}
+                    skill={skill}
+                    togglingSlug={togglingSlug}
+                    onToggleEnabled={handleToggleEnabled}
+                    onEdit={handleEdit}
+                    onDelete={handleDelete}
+                  />
+                ))}
+              </div>
+            </SortableContext>
+            <DragOverlay dropAnimation={defaultDropAnimation}>
+              {activeDragSkill ? (
+                <div
+                  className="pointer-events-none max-w-[min(100vw-2rem,42rem)] rounded-xl border border-white/20 bg-[#141418] px-3 py-2.5 shadow-xl ring-1 ring-white/10"
+                  style={{ cursor: "grabbing" }}
+                >
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span className="shrink-0 font-mono text-sm text-white/35">::</span>
+                    <p className="truncate text-sm font-semibold text-white">
+                      {activeDragSkill.name}
+                    </p>
+                    <span className="shrink-0 rounded-full bg-white/10 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider text-white/60">
+                      {activeDragSkill.origin}
                     </span>
                   </div>
-                  <p className="mt-0.5 font-mono text-[11px] text-(--mid)">
-                    {skill.slug}
-                    {skill.version ? ` · v${skill.version}` : ""}
-                    {skill.tags.length > 0 ? ` · ${skill.tags.join(", ")}` : ""}
+                  <p className="mt-0.5 truncate font-mono text-[11px] text-(--mid)">
+                    {activeDragSkill.slug}
                   </p>
-                  <p className="mt-1 text-[11px] leading-snug text-(--mid)">{skill.description}</p>
                 </div>
-                <div className="flex shrink-0 items-center gap-2">
-                  <button
-                    type="button"
-                    role="switch"
-                    aria-checked={skill.enabled}
-                    onClick={() => void handleToggleEnabled(skill)}
-                    disabled={togglingSlug === skill.slug}
-                    title={skill.enabled ? "Disable skill" : "Enable skill"}
-                    className={`relative h-5 w-9 rounded-full border transition disabled:opacity-50 ${
-                      skill.enabled
-                        ? "border-emerald-300/30 bg-emerald-300/20"
-                        : "border-white/10 bg-white/5"
-                    }`}
-                  >
-                    <span
-                      className={`absolute top-1/2 block h-3.5 w-3.5 -translate-y-1/2 rounded-full transition ${
-                        skill.enabled
-                          ? "left-[18px] bg-emerald-300 shadow-[0_0_6px_rgba(52,211,153,0.5)]"
-                          : "left-[2px] bg-white/40"
-                      }`}
-                    />
-                  </button>
-                  {skill.origin === "custom" && (
-                    <>
-                      <button
-                        type="button"
-                        onClick={() => void handleEdit(skill)}
-                        className="rounded-lg border border-white/15 bg-white/5 px-3 py-1 font-mono text-[11px] text-white/80 transition hover:bg-white/10"
-                      >
-                        Edit
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => void handleDelete(skill.slug)}
-                        className="rounded-lg border border-rose-300/20 bg-transparent px-3 py-1 font-mono text-[11px] text-rose-300/70 transition hover:bg-rose-300/10 hover:text-rose-200"
-                      >
-                        Delete
-                      </button>
-                    </>
-                  )}
-                </div>
-              </div>
-
-              <Accordion.Root
-                type="single"
-                collapsible
-                className="mt-2 border-t border-white/5 pt-2"
-              >
-                <Accordion.Item
-                  value={`${skill.slug}-body`}
-                  className="overflow-hidden rounded-lg border border-white/10 bg-white/3"
-                >
-                  <Accordion.Header>
-                    <Accordion.Trigger className="group flex w-full items-center justify-between gap-3 px-3 py-2 text-left">
-                      <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-(--mid)">
-                        SKILL.md body
-                      </p>
-                      <span className="shrink-0 font-mono text-xs text-(--mid) transition group-data-[state=open]:rotate-45">
-                        +
-                      </span>
-                    </Accordion.Trigger>
-                  </Accordion.Header>
-                  <Accordion.Content className="border-t border-white/10 px-3 py-2">
-                    <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-white/70">
-                      {skill.body}
-                    </pre>
-                  </Accordion.Content>
-                </Accordion.Item>
-              </Accordion.Root>
-            </div>
-          ))}
+              ) : null}
+            </DragOverlay>
+          </DndContext>
         </div>
       )}
     </div>

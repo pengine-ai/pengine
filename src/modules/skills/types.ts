@@ -10,6 +10,8 @@ export type Skill = {
   source?: string;
   license?: string;
   requires: string[];
+  /** If set, skill block only injected when the message matches a substring (cron pins ignore). */
+  hint_allow_substrings?: string[];
   origin: SkillOrigin;
   enabled: boolean;
   body: string;

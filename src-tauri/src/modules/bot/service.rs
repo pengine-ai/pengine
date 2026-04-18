@@ -1,4 +1,5 @@
 use crate::modules::bot::agent;
+use crate::modules::cron::{repository as cron_repository, types::CronFile};
 use crate::shared::state::AppState;
 use crate::shared::text::split_by_chars;
 use std::sync::Arc;
@@ -111,6 +112,8 @@ async fn text_handler(bot: Bot, msg: Message, state: AppState) -> ResponseResult
         .emit_log("msg", &format!("from {}: {}", user_label(&msg), incoming))
         .await;
 
+    remember_chat_id(&state, msg.chat.id).await;
+
     // Telegram's `typing` action lasts ~5 seconds. Refresh it every 4s in a
     // background task while the agent runs so the user sees a continuous
     // "writing…" indicator no matter how long the tool calls take.
@@ -155,6 +158,29 @@ async fn text_handler(bot: Bot, msg: Message, state: AppState) -> ResponseResult
     }
 
     Ok(())
+}
+
+/// Persist the most recent chat id so the cron scheduler has somewhere to deliver
+/// proactive messages. Writes `cron.json` only when the id changed.
+async fn remember_chat_id(state: &AppState, chat_id: ChatId) {
+    let new_id = chat_id.0;
+    {
+        let mut guard = state.last_chat_id.write().await;
+        if *guard == Some(new_id) {
+            return;
+        }
+        *guard = Some(new_id);
+    }
+    let snapshot = state.cron_jobs.read().await.clone();
+    let file = CronFile {
+        jobs: snapshot,
+        last_chat_id: Some(new_id),
+    };
+    if let Err(e) = cron_repository::save(&state.cron_path, &file) {
+        state
+            .emit_log("cron", &format!("save last_chat_id failed: {e}"))
+            .await;
+    }
 }
 
 /// Send `text` to `chat_id`, splitting into Telegram-sized chunks if needed.

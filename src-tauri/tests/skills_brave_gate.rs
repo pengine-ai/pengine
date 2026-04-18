@@ -44,3 +44,16 @@ fn brave_not_enabled_by_generic_news_tag() {
         "gameinformer news"
     ));
 }
+
+#[test]
+fn brave_blocked_for_portal_skill_slug_without_admin_keywords() {
+    let tmp = tempdir().unwrap();
+    let store = tmp.path().join("connection.json");
+    let md = "---\nname: t\ndescription: d\ntags: []\nrequires: [brave_web_search]\nbrave_allow_substrings: [oesterreich]\n---\n\nbody\n";
+    write_custom_skill(&store, "austria-gv-data", md, None).unwrap();
+    assert!(!allow_brave_web_search_for_message(&store, "hello random"));
+    assert!(allow_brave_web_search_for_message(
+        &store,
+        "Infos von oesterreich.gv"
+    ));
+}

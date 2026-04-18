@@ -1,5 +1,9 @@
 use crate::infrastructure::bot_lifecycle;
-use crate::modules::bot::{repository, service as bot_service};
+use crate::modules::bot::{agent as bot_agent, repository, service as bot_service};
+use crate::modules::cron::{
+    repository as cron_repository, scheduler as cron_scheduler, service as cron_service,
+    types::{CronFile, CronJob, Schedule},
+};
 use crate::modules::mcp::service as mcp_service;
 use crate::modules::ollama::service as ollama_service;
 use crate::modules::secure_store::{self, SecureStoreError};
@@ -142,6 +146,7 @@ pub async fn start_server(state: AppState) {
         )
         .route("/v1/skills", get(handle_skills_list))
         .route("/v1/skills", post(handle_skills_add))
+        .route("/v1/skills/order", put(handle_skills_set_order))
         .route("/v1/skills/{slug}", delete(handle_skills_delete))
         .route("/v1/skills/{slug}/enabled", put(handle_skills_set_enabled))
         .route(
@@ -153,6 +158,12 @@ pub async fn start_server(state: AppState) {
             "/v1/skills/clawhub/install",
             post(handle_skills_clawhub_install),
         )
+        .route("/v1/cron", get(handle_cron_list))
+        .route("/v1/cron", post(handle_cron_create))
+        .route("/v1/cron/{id}", put(handle_cron_update))
+        .route("/v1/cron/{id}", delete(handle_cron_delete))
+        .route("/v1/cron/{id}/enabled", put(handle_cron_set_enabled))
+        .route("/v1/cron/{id}/test", post(handle_cron_test))
         .layer(cors)
         .with_state(state.clone());
 
@@ -1739,12 +1750,29 @@ pub struct SetSkillEnabledBody {
     pub enabled: bool,
 }
 
+#[derive(Deserialize)]
+pub struct SkillOrderBody {
+    pub slugs: Vec<String>,
+}
+
 async fn handle_skills_list(State(state): State<AppState>) -> Json<SkillsListResponse> {
     let skills = skills_service::list_skills(&state.store_path);
     let custom_dir = skills_service::custom_skills_dir(&state.store_path)
         .to_string_lossy()
         .to_string();
     Json(SkillsListResponse { skills, custom_dir })
+}
+
+async fn handle_skills_set_order(
+    State(state): State<AppState>,
+    Json(body): Json<SkillOrderBody>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ErrorResponse>)> {
+    skills_service::set_skill_slug_order(&state.store_path, &body.slugs)
+        .map_err(|e| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })))?;
+    state
+        .emit_log("skills", "skill display order updated")
+        .await;
+    Ok((StatusCode::OK, Json(serde_json::json!({ "ok": true }))))
 }
 
 async fn handle_skills_add(
@@ -1863,6 +1891,257 @@ async fn handle_skills_set_enabled(
         )
         .await;
     Ok((StatusCode::OK, Json(serde_json::json!({ "ok": true }))))
+}
+
+// ── Cron jobs ────────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct CronListResponse {
+    pub jobs: Vec<CronJob>,
+    pub last_chat_id: Option<i64>,
+}
+
+#[derive(Deserialize)]
+pub struct CronCreateBody {
+    pub name: String,
+    pub instruction: String,
+    #[serde(default)]
+    pub condition: String,
+    #[serde(default)]
+    pub skill_slugs: Vec<String>,
+    pub schedule: Schedule,
+    #[serde(default = "default_true_serde")]
+    pub enabled: bool,
+}
+
+#[derive(Deserialize)]
+pub struct CronUpdateBody {
+    pub name: String,
+    pub instruction: String,
+    #[serde(default)]
+    pub condition: String,
+    #[serde(default)]
+    pub skill_slugs: Vec<String>,
+    pub schedule: Schedule,
+    pub enabled: bool,
+}
+
+#[derive(Deserialize)]
+pub struct CronSetEnabledBody {
+    pub enabled: bool,
+}
+
+#[derive(Serialize)]
+pub struct CronTestResponse {
+    pub reply: String,
+    pub condition_met: bool,
+    /// True when the same reply was delivered to the last-known Telegram chat.
+    pub telegram_sent: bool,
+    /// Set when delivery was attempted but failed (e.g. bot disconnected).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub telegram_error: Option<String>,
+}
+
+async fn persist_cron(state: &AppState) -> Result<(), String> {
+    let jobs = state.cron_jobs.read().await.clone();
+    let last_chat_id = *state.last_chat_id.read().await;
+    let file = CronFile { jobs, last_chat_id };
+    cron_repository::save(&state.cron_path, &file)
+}
+
+fn bad_request(msg: impl Into<String>) -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ErrorResponse { error: msg.into() }),
+    )
+}
+
+fn not_found(msg: impl Into<String>) -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::NOT_FOUND,
+        Json(ErrorResponse { error: msg.into() }),
+    )
+}
+
+fn internal(msg: impl Into<String>) -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ErrorResponse { error: msg.into() }),
+    )
+}
+
+async fn handle_cron_list(State(state): State<AppState>) -> Json<CronListResponse> {
+    let jobs = state.cron_jobs.read().await.clone();
+    let last_chat_id = *state.last_chat_id.read().await;
+    Json(CronListResponse { jobs, last_chat_id })
+}
+
+async fn handle_cron_create(
+    State(state): State<AppState>,
+    Json(body): Json<CronCreateBody>,
+) -> Result<(StatusCode, Json<CronJob>), (StatusCode, Json<ErrorResponse>)> {
+    cron_service::validate(&body.name, &body.instruction, &body.schedule).map_err(bad_request)?;
+    let skill_slugs =
+        skills_service::canonicalize_skill_slug_list(&state.store_path, &body.skill_slugs);
+    let job = CronJob {
+        id: cron_service::new_job_id(),
+        name: body.name.trim().to_string(),
+        instruction: body.instruction.trim().to_string(),
+        condition: body.condition.trim().to_string(),
+        skill_slugs,
+        schedule: body.schedule,
+        enabled: body.enabled,
+        created_at: Utc::now(),
+        last_run_at: None,
+    };
+    {
+        let mut jobs = state.cron_jobs.write().await;
+        jobs.push(job.clone());
+    }
+    persist_cron(&state).await.map_err(internal)?;
+    state.cron_notify.notify_waiters();
+    state
+        .emit_log("cron", &format!("job '{}' created ({})", job.name, job.id))
+        .await;
+    Ok((StatusCode::OK, Json(job)))
+}
+
+async fn handle_cron_update(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<CronUpdateBody>,
+) -> Result<(StatusCode, Json<CronJob>), (StatusCode, Json<ErrorResponse>)> {
+    cron_service::validate(&body.name, &body.instruction, &body.schedule).map_err(bad_request)?;
+    let skill_slugs =
+        skills_service::canonicalize_skill_slug_list(&state.store_path, &body.skill_slugs);
+    let updated = {
+        let mut jobs = state.cron_jobs.write().await;
+        let Some(job) = jobs.iter_mut().find(|j| j.id == id) else {
+            return Err(not_found(format!("cron job '{id}' not found")));
+        };
+        job.name = body.name.trim().to_string();
+        job.instruction = body.instruction.trim().to_string();
+        job.condition = body.condition.trim().to_string();
+        job.skill_slugs = skill_slugs;
+        job.schedule = body.schedule;
+        job.enabled = body.enabled;
+        job.clone()
+    };
+    persist_cron(&state).await.map_err(internal)?;
+    state.cron_notify.notify_waiters();
+    state
+        .emit_log("cron", &format!("job '{}' updated ({id})", updated.name))
+        .await;
+    Ok((StatusCode::OK, Json(updated)))
+}
+
+async fn handle_cron_delete(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ErrorResponse>)> {
+    let removed = {
+        let mut jobs = state.cron_jobs.write().await;
+        let before = jobs.len();
+        jobs.retain(|j| j.id != id);
+        before != jobs.len()
+    };
+    if !removed {
+        return Err(not_found(format!("cron job '{id}' not found")));
+    }
+    persist_cron(&state).await.map_err(internal)?;
+    state.cron_notify.notify_waiters();
+    state.emit_log("cron", &format!("job '{id}' deleted")).await;
+    Ok((StatusCode::OK, Json(serde_json::json!({ "ok": true }))))
+}
+
+async fn handle_cron_set_enabled(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<CronSetEnabledBody>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ErrorResponse>)> {
+    let found = {
+        let mut jobs = state.cron_jobs.write().await;
+        let Some(job) = jobs.iter_mut().find(|j| j.id == id) else {
+            return Err(not_found(format!("cron job '{id}' not found")));
+        };
+        job.enabled = body.enabled;
+        true
+    };
+    if !found {
+        return Err(not_found(format!("cron job '{id}' not found")));
+    }
+    persist_cron(&state).await.map_err(internal)?;
+    state.cron_notify.notify_waiters();
+    state
+        .emit_log(
+            "cron",
+            &format!(
+                "job '{id}' {}",
+                if body.enabled { "enabled" } else { "disabled" }
+            ),
+        )
+        .await;
+    Ok((StatusCode::OK, Json(serde_json::json!({ "ok": true }))))
+}
+
+async fn handle_cron_test(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<(StatusCode, Json<CronTestResponse>), (StatusCode, Json<ErrorResponse>)> {
+    let job = {
+        let jobs = state.cron_jobs.read().await;
+        jobs.iter()
+            .find(|j| j.id == id)
+            .cloned()
+            .ok_or_else(|| not_found(format!("cron job '{id}' not found")))?
+    };
+    let prompt = cron_service::compose_prompt(&job);
+    state
+        .emit_log("cron", &format!("test run for '{}' ({})", job.name, job.id))
+        .await;
+    let skills_filter = if job.skill_slugs.is_empty() {
+        None
+    } else {
+        Some(job.skill_slugs.as_slice())
+    };
+    let turn = bot_agent::run_system_turn(&state, &prompt, skills_filter)
+        .await
+        .map_err(|e| internal(format!("agent error: {e}")))?;
+    let reply = turn.text;
+    let condition_met = !turn.suppress_telegram_reply && !cron_service::is_no_message_reply(&reply);
+
+    let (telegram_sent, telegram_error) = if turn.suppress_telegram_reply
+        || reply.trim().is_empty()
+        || cron_service::is_no_message_reply(&reply)
+    {
+        (false, None)
+    } else {
+        match cron_scheduler::send_to_last_chat(&state, &reply).await {
+            Ok(()) => {
+                state
+                    .emit_log("cron", "test run: reply sent to Telegram")
+                    .await;
+                (true, None)
+            }
+            Err(e) => {
+                let msg = e.clone();
+                state
+                    .emit_log("cron", &format!("test run: Telegram send failed: {e}"))
+                    .await;
+                (false, Some(msg))
+            }
+        }
+    };
+
+    Ok((
+        StatusCode::OK,
+        Json(CronTestResponse {
+            reply,
+            condition_met,
+            telegram_sent,
+            telegram_error,
+        }),
+    ))
 }
 
 async fn handle_logs_sse(

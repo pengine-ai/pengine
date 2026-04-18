@@ -37,6 +37,12 @@ pub struct Skill {
     /// `tests/skills_brave_gate.rs`).
     #[serde(default)]
     pub brave_allow_substrings: Vec<String>,
+    /// If non-empty, this skill is only injected into the system prompt when the user (or cron)
+    /// message matches at least one substring (same matching rules as `brave_allow_substrings`).
+    /// Cron jobs that **pin** skills ignore this gate. Slugs matching Austria’s `*.gv.at` portal
+    /// skills get a built-in default keyword list when this is empty.
+    #[serde(default)]
+    pub hint_allow_substrings: Vec<String>,
     #[serde(default)]
     pub origin: SkillOrigin,
     /// Optional extra rules from `mandatory.md` next to `SKILL.md` (also returned for custom skills in the API).

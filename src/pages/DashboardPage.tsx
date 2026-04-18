@@ -3,6 +3,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { getPengineHealth } from "../modules/bot/api";
 import { TerminalPreview } from "../modules/bot/components/TerminalPreview";
 import { useAppSessionStore } from "../modules/bot/store/appSessionStore";
+import { CronPanel } from "../modules/cron";
 import { McpToolsPanel } from "../modules/mcp/components/McpToolsPanel";
 import { fetchOllamaModels, setPreferredOllamaModel } from "../modules/ollama/api";
 import { SkillsPanel } from "../modules/skills";
@@ -216,6 +217,11 @@ export function DashboardPage() {
         {/* ── Tool Engine (container tools) ───────────────────────── */}
         <section className="mt-4 sm:mt-6">
           <ToolEnginePanel />
+        </section>
+
+        {/* ── Cron jobs (scheduled prompts) ────────────────────────── */}
+        <section className="mt-4 sm:mt-6">
+          <CronPanel />
         </section>
 
         {/* ── Skills (README-only context templates) ──────────────── */}

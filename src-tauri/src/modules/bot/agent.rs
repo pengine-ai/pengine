@@ -310,6 +310,34 @@ impl TurnResult {
 
 // ── Public entry point ─────────────────────────────────────────────
 
+/// Run one model turn for a system-originated prompt (e.g. cron job).
+/// Bypasses memory-session routing so scheduled tasks never land in diary/session
+/// logs, and never trigger session start/stop keywords.
+///
+/// `skills_slug_filter`: when [`Some`] and non-empty, only those skills are included in the
+/// system prompt; when [`None`] or empty slice, all enabled skills are included.
+pub async fn run_system_turn(
+    state: &AppState,
+    prompt: &str,
+    skills_slug_filter: Option<&[String]>,
+) -> Result<TurnResult, String> {
+    let think = decide_think(None, prompt).enabled();
+    let result = run_model_turn(state, prompt, think, skills_slug_filter).await?;
+    let body = result.text.trim();
+    if !body.is_empty() {
+        let tag = match result.source {
+            ReplySource::Tool => "tool",
+            ReplySource::Model => "model",
+        };
+        state
+            .emit_log("reply", &format!("[cron:{tag}] {body}"))
+            .await;
+    } else {
+        state.emit_log("reply", "[cron] (empty reply)").await;
+    }
+    Ok(result)
+}
+
 pub async fn run_turn(state: &AppState, user_message: &str) -> Result<TurnResult, String> {
     let (think_override, user_message) = parse_think_override(user_message);
 
@@ -333,7 +361,7 @@ pub async fn run_turn(state: &AppState, user_message: &str) -> Result<TurnResult
         .emit_log("run", &format!("think:{}", think.label()))
         .await;
 
-    let result = run_model_turn(state, user_message, think.enabled()).await?;
+    let result = run_model_turn(state, user_message, think.enabled(), None).await?;
     spawn_memory_save(state, user_message, &result.text).await;
     Ok(result)
 }
@@ -541,7 +569,13 @@ async fn spawn_append(state: &AppState, mem: &MemoryProvider, entity: &str, cont
 
 /// Assemble the static assistant preamble plus fs/memory/skills fragments.
 /// The order is stable turn-to-turn so Ollama can reuse its KV-cache prefix.
-async fn build_system_prompt(state: &AppState, has_tools: bool, has_memory: bool) -> String {
+async fn build_system_prompt(
+    state: &AppState,
+    user_message: &str,
+    has_tools: bool,
+    has_memory: bool,
+    skills_slug_filter: Option<&[String]>,
+) -> String {
     if !has_tools {
         return format!("{PENGINE_OUTPUT_CONTRACT_LEAD}Answer concisely.");
     }
@@ -570,7 +604,17 @@ async fn build_system_prompt(state: &AppState, has_tools: bool, has_memory: bool
         String::new()
     };
 
-    let skills_raw = skills::skills_prompt_hint(&state.store_path);
+    let weather_directive = if skills::user_message_suggests_weather(user_message) {
+        "\n\n**This turn is weather-related:** Follow **skill:weather** only (wttr.in / Open-Meteo via **`fetch`**). Do not cite or prioritize government-portal skills (e.g. oesterreich.gv.at) for forecasts or current conditions unless the user explicitly asked for public administration, forms, or law."
+    } else {
+        ""
+    };
+
+    let skills_raw = skills::skills_prompt_hint_for_turn(
+        &state.store_path,
+        Some(user_message),
+        skills_slug_filter,
+    );
     let skills_cap = *state.skills_hint_max_bytes.read().await as usize;
     let (skills_hint, skills_truncated) = skills::limit_skills_hint_bytes(skills_raw, skills_cap);
     if skills_truncated {
@@ -591,7 +635,7 @@ async fn build_system_prompt(state: &AppState, has_tools: bool, has_memory: bool
          After tool results, answer immediately. Be concise. \
          `brave_web_search` is only in the tool list when the user asked to search the open web (e.g. “search the internet”, “suche im Internet”, “suche nach …”) or a skill’s `requires` matches this turn — otherwise prefer **`fetch`** on any `http(s)` URL you have (including from the user). \
          At most one `brave_web_search` per user message when it is available. \
-         After an allowed search, the host may auto-`fetch` several top result URLs — use those excerpts and end with **Quellen** listing every source URL.{fs_hint}{mem_hint}{skills_hint}"
+         After an allowed search, the host may auto-`fetch` several top result URLs — use those excerpts and end with **Quellen** listing every source URL.{fs_hint}{mem_hint}{weather_directive}{skills_hint}"
     )
 }
 
@@ -599,6 +643,7 @@ async fn run_model_turn(
     state: &AppState,
     user_message: &str,
     think: bool,
+    skills_slug_filter: Option<&[String]>,
 ) -> Result<TurnResult, String> {
     let model = match state.preferred_ollama_model.read().await.clone() {
         Some(m) => m,
@@ -655,7 +700,14 @@ async fn run_model_turn(
         .await;
     state.record_tool_selection_ms(tool_ctx.select_ms).await;
 
-    let system = build_system_prompt(state, has_tools, has_memory).await;
+    let system = build_system_prompt(
+        state,
+        user_message,
+        has_tools,
+        has_memory,
+        skills_slug_filter,
+    )
+    .await;
 
     // Order matters for Ollama KV-cache reuse across turns: system message
     // first, user second. Changing fragment order would invalidate the cached
@@ -915,6 +967,12 @@ async fn run_model_turn(
 
     // Phase 2: summarize tool results if model didn't answer inline.
     if !tool_results.is_empty() {
+        state
+            .emit_log(
+                "run",
+                "agent: summarizing tool results (follow-up model step)",
+            )
+            .await;
         let mut data = String::new();
         for (name, content) in &tool_results {
             data.push_str(&format!("--- {name} ---\n{content}\n"));

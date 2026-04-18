@@ -1,4 +1,5 @@
 pub mod bot;
+pub mod cron;
 pub mod keywords;
 pub mod mcp;
 pub mod memory;

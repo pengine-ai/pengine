@@ -1,5 +1,6 @@
 use crate::infrastructure::http_server;
 use crate::modules::bot::{commands, repository, service as bot_service};
+use crate::modules::cron::{repository as cron_repository, scheduler as cron_scheduler};
 use crate::modules::mcp::service as mcp_service;
 use crate::modules::secure_store;
 use crate::shared::state::{AppState, ConnectionData};
@@ -78,6 +79,30 @@ pub fn run() {
             }
 
             app.manage(shared_state.clone());
+
+            // Load persisted cron jobs + last-known Telegram chat id before the scheduler spins up,
+            // so a scheduled job can fire on its first tick after restart.
+            {
+                let cron_state = shared_state.clone();
+                tauri::async_runtime::block_on(async move {
+                    match cron_repository::load(&cron_state.cron_path) {
+                        Ok(file) => {
+                            *cron_state.cron_jobs.write().await = file.jobs;
+                            *cron_state.last_chat_id.write().await = file.last_chat_id;
+                        }
+                        Err(e) => {
+                            cron_state
+                                .emit_log("cron", &format!("load cron.json failed: {e}"))
+                                .await;
+                        }
+                    }
+                });
+            }
+
+            let scheduler_state = shared_state.clone();
+            tauri::async_runtime::spawn(async move {
+                cron_scheduler::run(scheduler_state).await;
+            });
 
             // Connect MCP stdio servers in the background so window + HTTP API are not blocked by
             // slow starters (Podman containers, `npx`, etc.). The registry stays empty until connect

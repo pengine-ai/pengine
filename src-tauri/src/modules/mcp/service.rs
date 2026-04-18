@@ -269,6 +269,10 @@ fn default_config_value() -> serde_json::Value {
             "tool_manager": {
                 "type": "native",
                 "id": "tool_manager"
+            },
+            "cron_manager": {
+                "type": "native",
+                "id": "cron_manager"
             }
         }
     })
@@ -526,18 +530,19 @@ pub async fn rebuild_registry_into_state(
             }
         }
 
-        // Ensure tool_manager is always present (auto-add for existing configs).
-        if !cfg.servers.contains_key(native::TOOL_MANAGER_ID) {
-            cfg.servers.insert(
-                native::TOOL_MANAGER_ID.to_string(),
-                ServerEntry::Native {
-                    id: native::TOOL_MANAGER_ID.to_string(),
-                },
-            );
+        // Ensure built-in native tools are always present (auto-add for existing configs).
+        let mut inserted_any = false;
+        for id in [native::TOOL_MANAGER_ID, native::CRON_MANAGER_ID] {
+            if !cfg.servers.contains_key(id) {
+                cfg.servers
+                    .insert(id.to_string(), ServerEntry::Native { id: id.to_string() });
+                inserted_any = true;
+            }
+        }
+        if inserted_any {
             if let Err(e) = save_config(&state.mcp_config_path, &cfg) {
                 log::warn!(
-                    "failed to save mcp.json after auto-inserting native server {:?}: {} (path={})",
-                    native::TOOL_MANAGER_ID,
+                    "failed to save mcp.json after auto-inserting native servers: {} (path={})",
                     e,
                     state.mcp_config_path.display()
                 );

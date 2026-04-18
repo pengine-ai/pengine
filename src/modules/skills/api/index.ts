@@ -119,6 +119,27 @@ export async function setSkillEnabled(
   }
 }
 
+export async function putSkillSlugOrder(
+  slugs: string[],
+  timeoutMs = 5000,
+): Promise<{ ok: boolean; error?: string }> {
+  const { signal, cleanup } = makeTimeoutSignal(timeoutMs);
+  try {
+    const resp = await fetch(`${PENGINE_API_BASE}/v1/skills/order`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ slugs }),
+      signal,
+    });
+    if (resp.ok) return { ok: true };
+    return { ok: false, error: await parseApiError(resp) };
+  } catch (e) {
+    return { ok: false, error: fetchErrorMessage(e) };
+  } finally {
+    cleanup();
+  }
+}
+
 export type ClawHubSearchFilters = {
   highlighted?: boolean;
   nonSuspicious?: boolean;

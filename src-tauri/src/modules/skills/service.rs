@@ -30,6 +30,107 @@ const MAX_ZIP_BYTES: usize = 1024 * 1024;
 /// Disabled-slug registry lives next to the custom skills dir.
 const DISABLED_FILE: &str = ".disabled.json";
 
+/// Dashboard drag-and-drop order for the Skills list (also system-prompt hint order).
+const SKILL_ORDER_FILE: &str = ".skill_order.json";
+
+fn skill_order_path(store_path: &Path) -> PathBuf {
+    custom_skills_dir(store_path).join(SKILL_ORDER_FILE)
+}
+
+fn read_skill_order_slugs(store_path: &Path) -> Vec<String> {
+    let path = skill_order_path(store_path);
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    serde_json::from_str::<Vec<String>>(&raw).unwrap_or_default()
+}
+
+fn apply_user_skill_order(skills: &mut [Skill], store_path: &Path) {
+    let order = read_skill_order_slugs(store_path);
+    if order.is_empty() {
+        return;
+    }
+    let order_index: HashMap<String, usize> = order
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.to_lowercase(), i))
+        .collect();
+    skills.sort_by(|a, b| {
+        let ia = order_index.get(&a.slug.to_lowercase()).copied();
+        let ib = order_index.get(&b.slug.to_lowercase()).copied();
+        match (ia, ib) {
+            (Some(i), Some(j)) => i.cmp(&j),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => a.slug.cmp(&b.slug),
+        }
+    });
+}
+
+/// Bundled + custom skills, alphabetically sorted — does not apply `.skill_order.json`.
+pub(crate) fn gather_skills_sorted(store_path: &Path) -> Vec<Skill> {
+    let disabled = read_disabled_set(store_path);
+    let mut out: Vec<Skill> = Vec::new();
+
+    if let Some(dir) = bundled_skills_dir() {
+        out.extend(read_dir_skills(&dir, SkillOrigin::Bundled));
+    }
+
+    let custom = custom_skills_dir(store_path);
+    if custom.is_dir() {
+        for skill in read_dir_skills(&custom, SkillOrigin::Custom) {
+            if let Some(i) = out.iter().position(|s| s.slug == skill.slug) {
+                out.remove(i);
+            }
+            out.push(skill);
+        }
+    }
+
+    for skill in &mut out {
+        skill.enabled = !disabled.contains(&skill.slug);
+    }
+
+    out.sort_by(|a, b| a.slug.cmp(&b.slug));
+    out
+}
+
+/// Persists dashboard order; merges skills missing from `requested` at the end (A–Z).
+pub fn set_skill_slug_order(store_path: &Path, requested: &[String]) -> Result<(), String> {
+    let skills = gather_skills_sorted(store_path);
+    let by_lower: HashMap<String, String> = skills
+        .iter()
+        .map(|s| (s.slug.to_lowercase(), s.slug.clone()))
+        .collect();
+    let mut seen = HashSet::<String>::new();
+    let mut out: Vec<String> = Vec::new();
+    for r in requested {
+        let t = r.trim();
+        if t.is_empty() {
+            continue;
+        }
+        let k = t.to_lowercase();
+        if let Some(canon) = by_lower.get(&k) {
+            if seen.insert(k) {
+                out.push(canon.clone());
+            }
+        }
+    }
+    let mut missing: Vec<String> = skills
+        .iter()
+        .filter(|s| !seen.contains(&s.slug.to_lowercase()))
+        .map(|s| s.slug.clone())
+        .collect();
+    missing.sort();
+    out.extend(missing);
+
+    let dir = custom_skills_dir(store_path);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create skills dir: {e}"))?;
+    let json =
+        serde_json::to_string_pretty(&out).map_err(|e| format!("encode skill order: {e}"))?;
+    std::fs::write(skill_order_path(store_path), json)
+        .map_err(|e| format!("write {}: {e}", SKILL_ORDER_FILE))
+}
+
 /// `$APP_DATA/skills/`. Created on demand.
 pub fn custom_skills_dir(store_path: &Path) -> PathBuf {
     store_path
@@ -120,21 +221,167 @@ const SKILL_MANDATORY_HINT_CAP: usize = 1200;
 const SKILL_HINT_INTRO: &str = "\n\nSkills: follow each recipe exactly — \
 it lists WHICH URL and HOW MANY calls. Stop when you can answer; \
 don't probe alternate hosts. Unless a skill’s **`mandatory.md`** says otherwise, prefer **`fetch`** whenever you have a concrete URL; use **`brave_web_search`** when the recipe lists it in `requires` (and this turn matches that skill), when **`mandatory.md`** orders it, or when the user explicitly asked to search the open web.\n\
+**Weather, forecasts, temperature, precipitation:** use **skill:weather** (wttr.in / Open-Meteo) as the only recipe — never government-portal or “.gv.at” skills for those topics.\n\
 Portal- or government-specific skills you install yourself apply **only** when the user is clearly asking about that jurisdiction’s government, law, official forms, or public administration — \
-not for recipes, hobbies, general knowledge, software, or unrelated chit-chat. If the topic does not match the skill’s scope, ignore that recipe entirely.";
+not for recipes, hobbies, general knowledge, software, weather, or unrelated chit-chat. If the topic does not match the skill’s scope, ignore that recipe entirely.";
+
+/// True when the user (or cron) message is clearly about weather / forecast.
+pub fn user_message_suggests_weather(user_message: &str) -> bool {
+    const NEEDLES: &[&str] = &[
+        "wetter",
+        "weather",
+        "forecast",
+        "vorhersage",
+        "regenwahrscheinlichkeit",
+        "temperatur",
+        "gewitter",
+        "schnee",
+        "hagel",
+        "wind",
+        "niederschlag",
+        "wttr",
+        "bewölkt",
+        "bewoelkt",
+        "regen",
+        "luftdruck",
+        "hitze",
+        "kühl",
+        "kuehl",
+        "eisregen",
+    ];
+    NEEDLES
+        .iter()
+        .any(|n| user_message_needle_match(user_message, n))
+}
+
+/// Default “only when talking about AT public administration” needles for known portal skill slugs.
+pub fn default_hint_needles_for_slug(slug: &str) -> Option<&'static [&'static str]> {
+    let s = slug.to_lowercase();
+    let portal = s == "austria-gv-data"
+        || s == "austrian-gv"
+        || s == "austrian-gv-data"
+        || s.contains("austria-gv")
+        || s.contains("austrian-gv")
+        || s.contains("oesterreich-gv")
+        || (s.contains("oesterreich") && s.contains("gv"))
+        || (s.contains("austria") && s.contains("gv") && s.contains("data"));
+    if !portal {
+        return None;
+    }
+    Some(&[
+        "oesterreich.gv",
+        ".gv.at",
+        "oesterreich",
+        "bundesrecht",
+        "verwaltung",
+        "behörde",
+        "behoerde",
+        "formular",
+        "bürgerservice",
+        "buergerservice",
+        "e-government",
+        "egov",
+        "ministerium",
+        "amt",
+        "landesregierung",
+        "gemeinde",
+        "bescheid",
+        "verordnung",
+        "österreich",
+    ])
+}
+
+/// Whether `skill` may appear in the skills system-prompt fragment for this turn.
+/// `cron_pins_skills` is true when the caller already restricted to an explicit slug list (cron).
+fn skill_passes_hint_gate(
+    skill: &Skill,
+    user_message: Option<&str>,
+    cron_pins_skills: bool,
+) -> bool {
+    if cron_pins_skills {
+        return true;
+    }
+    if !skill.hint_allow_substrings.is_empty() {
+        return match user_message {
+            None => true,
+            Some(m) if m.trim().is_empty() => true,
+            Some(m) => skill
+                .hint_allow_substrings
+                .iter()
+                .any(|n| user_message_needle_match(m, n)),
+        };
+    }
+    if let Some(needles) = default_hint_needles_for_slug(&skill.slug) {
+        return match user_message {
+            None => true,
+            Some(m) if m.trim().is_empty() => true,
+            Some(m) => needles.iter().any(|n| user_message_needle_match(m, n)),
+        };
+    }
+    true
+}
 
 /// Build a system-prompt fragment describing the enabled skills so the agent
 /// knows when/how to invoke fetch tools for each. Returns `""` if there are
 /// none enabled.
-pub fn skills_prompt_hint(store_path: &Path) -> String {
-    let skills: Vec<Skill> = list_skills(store_path)
+///
+/// When `user_message` is [`Some`] and matches [`user_message_suggests_weather`], the
+/// **weather** skill block is moved to the top so it survives aggressive byte caps
+/// and is not buried after alphabetically earlier skills (e.g. government portals).
+///
+/// When `slug_filter` is [`Some`] and non-empty, only those enabled skills are included
+/// (e.g. cron jobs with a pinned skill list).
+pub fn skills_prompt_hint_for_turn(
+    store_path: &Path,
+    user_message: Option<&str>,
+    slug_filter: Option<&[String]>,
+) -> String {
+    let mut skills: Vec<Skill> = list_skills(store_path)
         .into_iter()
         .filter(|s| s.enabled)
         .collect();
+    let filtered_run = if let Some(want) = slug_filter {
+        if want.is_empty() {
+            false
+        } else {
+            let set: HashSet<String> = want.iter().map(|s| s.to_lowercase()).collect();
+            skills.retain(|s| set.contains(&s.slug.to_lowercase()));
+            let pos: HashMap<String, usize> = want
+                .iter()
+                .enumerate()
+                .map(|(i, s)| (s.to_lowercase(), i))
+                .collect();
+            skills.sort_by_key(|s| {
+                pos.get(&s.slug.to_lowercase())
+                    .copied()
+                    .unwrap_or(usize::MAX)
+            });
+            true
+        }
+    } else {
+        false
+    };
+    if !filtered_run {
+        skills.retain(|s| skill_passes_hint_gate(s, user_message, false));
+    }
     if skills.is_empty() {
         return String::new();
     }
+    if let Some(msg) = user_message {
+        if !filtered_run && user_message_suggests_weather(msg) {
+            let (mut w, rest): (Vec<Skill>, Vec<Skill>) = skills
+                .into_iter()
+                .partition(|s| s.slug.eq_ignore_ascii_case("weather"));
+            w.sort_by(|a, b| a.slug.cmp(&b.slug));
+            let mut rest = rest;
+            rest.sort_by(|a, b| a.slug.cmp(&b.slug));
+            skills = w.into_iter().chain(rest).collect();
+        }
+    }
     let mut out = String::from(SKILL_HINT_INTRO);
+    if filtered_run {
+        out.push_str("\n\n**(This scheduled run)** Use only the skills listed below; ignore other installed skills for this task.");
+    }
     for s in &skills {
         let trimmed = s.body.trim();
         let body = truncate_for_prompt(trimmed, SKILL_HINT_BODY_CAP);
@@ -150,6 +397,35 @@ pub fn skills_prompt_hint(store_path: &Path) -> String {
                 let m = truncate_for_prompt(m, SKILL_MANDATORY_HINT_CAP);
                 out.push_str("\n\n");
                 out.push_str(&m);
+            }
+        }
+    }
+    out
+}
+
+/// Same as [`skills_prompt_hint_for_turn`] without per-turn ordering (tests, callers without context).
+pub fn skills_prompt_hint(store_path: &Path) -> String {
+    skills_prompt_hint_for_turn(store_path, None, None)
+}
+
+/// Deduplicate `requested` and keep only slugs that exist on disk (bundled or custom).
+/// Preserves first-seen order using canonical slug spelling from [`list_skills`].
+pub fn canonicalize_skill_slug_list(store_path: &Path, requested: &[String]) -> Vec<String> {
+    let by_lower: HashMap<String, String> = list_skills(store_path)
+        .into_iter()
+        .map(|s| (s.slug.to_lowercase(), s.slug))
+        .collect();
+    let mut seen = HashSet::<String>::new();
+    let mut out = Vec::new();
+    for r in requested {
+        let t = r.trim();
+        if t.is_empty() {
+            continue;
+        }
+        let key = t.to_lowercase();
+        if let Some(canonical) = by_lower.get(&key).cloned() {
+            if seen.insert(key) {
+                out.push(canonical);
             }
         }
     }
@@ -183,30 +459,11 @@ fn truncate_for_prompt(s: &str, max: usize) -> String {
 }
 
 /// List every discoverable skill. Custom skills shadow bundled ones with the same slug.
+/// Order follows the Skills dashboard (`.skill_order.json` under the custom skills dir).
 pub fn list_skills(store_path: &Path) -> Vec<Skill> {
-    let disabled = read_disabled_set(store_path);
-    let mut out: Vec<Skill> = Vec::new();
-
-    if let Some(dir) = bundled_skills_dir() {
-        out.extend(read_dir_skills(&dir, SkillOrigin::Bundled));
-    }
-
-    let custom = custom_skills_dir(store_path);
-    if custom.is_dir() {
-        for skill in read_dir_skills(&custom, SkillOrigin::Custom) {
-            if let Some(i) = out.iter().position(|s| s.slug == skill.slug) {
-                out.remove(i);
-            }
-            out.push(skill);
-        }
-    }
-
-    for skill in &mut out {
-        skill.enabled = !disabled.contains(&skill.slug);
-    }
-
-    out.sort_by(|a, b| a.slug.cmp(&b.slug));
-    out
+    let mut v = gather_skills_sorted(store_path);
+    apply_user_skill_order(&mut v, store_path);
+    v
 }
 
 fn read_dir_skills(dir: &Path, origin: SkillOrigin) -> Vec<Skill> {
@@ -280,6 +537,7 @@ pub fn parse_skill(slug: &str, raw: &str, origin: SkillOrigin) -> Result<Skill, 
         license: fields.get("license").cloned(),
         requires: fields.get_list("requires"),
         brave_allow_substrings: fields.get_list("brave_allow_substrings"),
+        hint_allow_substrings: fields.get_list("hint_allow_substrings"),
         origin,
         mandatory_markdown: None,
         enabled: true,
@@ -355,6 +613,9 @@ fn skill_triggers_brave_web_search(skill: &Skill, user_message: &str) -> bool {
         .iter()
         .any(|r| r.eq_ignore_ascii_case("brave_web_search"))
     {
+        return false;
+    }
+    if !skill_passes_hint_gate(skill, Some(user_message), false) {
         return false;
     }
     let u = user_message.to_lowercase();
@@ -1037,5 +1298,133 @@ mod tests {
         let list = list_skills(&fake_store);
         let s = list.iter().find(|s| s.slug == "y").unwrap();
         assert_eq!(s.mandatory_markdown.as_deref(), Some("first"));
+    }
+
+    #[test]
+    fn user_message_suggests_weather_german_and_not_admin() {
+        assert!(user_message_suggests_weather(
+            "wie ist das wetter in der Breitenau"
+        ));
+        assert!(!user_message_suggests_weather(
+            "Formular auf oesterreich.gv.at runterladen"
+        ));
+    }
+
+    #[test]
+    fn skills_hint_orders_weather_before_alphabetically_earlier_slugs() {
+        let tmp = tempdir().unwrap();
+        let fake_store = tmp.path().join("connection.json");
+        let other = "---\nname: AAA\ndescription: o\ntags: []\n---\n\naaa\n";
+        let weather_md = "---\nname: weather\ndescription: w\ntags: []\n---\n\nww\n";
+        write_custom_skill(&fake_store, "arch-other", other, None).unwrap();
+        write_custom_skill(&fake_store, "weather", weather_md, None).unwrap();
+        let hint = skills_prompt_hint_for_turn(&fake_store, Some("Wetter in Wien"), None);
+        let pos_w = hint.find("── skill:weather").expect("weather block");
+        let pos_a = hint.find("── skill:arch-other").expect("arch-other block");
+        assert!(
+            pos_w < pos_a,
+            "weather should precede alphabetically earlier slugs:\n{hint}"
+        );
+    }
+
+    #[test]
+    fn skills_hint_respects_slug_filter() {
+        let tmp = tempdir().unwrap();
+        let fake_store = tmp.path().join("connection.json");
+        let a = "---\nname: A\ndescription: a\ntags: []\n---\n\nAAA\n";
+        let b = "---\nname: B\ndescription: b\ntags: []\n---\n\nBBB\n";
+        write_custom_skill(&fake_store, "skill-a", a, None).unwrap();
+        write_custom_skill(&fake_store, "skill-b", b, None).unwrap();
+        let filter = vec!["skill-b".to_string()];
+        let hint = skills_prompt_hint_for_turn(&fake_store, None, Some(&filter));
+        assert!(hint.contains("BBB"), "hint={hint}");
+        assert!(!hint.contains("AAA"), "hint={hint}");
+        assert!(
+            hint.contains("This scheduled run"),
+            "expected cron banner when filtered:\n{hint}"
+        );
+    }
+
+    #[test]
+    fn canonicalize_skill_slug_list_dedupes_and_matches_case() {
+        let tmp = tempdir().unwrap();
+        let fake_store = tmp.path().join("connection.json");
+        let md = "---\nname: Z\ndescription: d\ntags: []\n---\n\nz\n";
+        write_custom_skill(&fake_store, "my_skill", md, None).unwrap();
+        let out = canonicalize_skill_slug_list(
+            &fake_store,
+            &["MY_SKILL".into(), "nope".into(), "my_skill".into()],
+        );
+        assert_eq!(out, vec!["my_skill"]);
+    }
+
+    #[test]
+    fn portal_skill_hint_gated_without_admin_keywords() {
+        let tmp = tempdir().unwrap();
+        let fake_store = tmp.path().join("connection.json");
+        let gv = "---\nname: G\ndescription: d\ntags: []\n---\n\nGVONLY\n";
+        write_custom_skill(&fake_store, "austria-gv-data", gv, None).unwrap();
+        let hint = skills_prompt_hint_for_turn(&fake_store, Some("wie ist das wetter"), None);
+        assert!(!hint.contains("GVONLY"), "hint={hint}");
+        let hint2 =
+            skills_prompt_hint_for_turn(&fake_store, Some("Formular auf oesterreich.gv.at"), None);
+        assert!(hint2.contains("GVONLY"), "hint={hint2}");
+    }
+
+    #[test]
+    fn cron_slug_filter_includes_portal_skill_without_keywords() {
+        let tmp = tempdir().unwrap();
+        let fake_store = tmp.path().join("connection.json");
+        let gv = "---\nname: G\ndescription: d\ntags: []\n---\n\nGVONLY\n";
+        write_custom_skill(&fake_store, "austria-gv-data", gv, None).unwrap();
+        let f = vec!["austria-gv-data".to_string()];
+        let hint = skills_prompt_hint_for_turn(&fake_store, Some("weather only"), Some(&f));
+        assert!(hint.contains("GVONLY"), "hint={hint}");
+    }
+
+    #[test]
+    fn skills_hint_follows_slug_filter_order() {
+        let tmp = tempdir().unwrap();
+        let fake_store = tmp.path().join("connection.json");
+        let a = "---\nname: A\ndescription: d\ntags: []\n---\n\nFIRST\n";
+        let b = "---\nname: B\ndescription: d\ntags: []\n---\n\nSECOND\n";
+        write_custom_skill(&fake_store, "skill-a", a, None).unwrap();
+        write_custom_skill(&fake_store, "skill-b", b, None).unwrap();
+        let order = vec!["skill-b".into(), "skill-a".into()];
+        let hint = skills_prompt_hint_for_turn(&fake_store, None, Some(&order));
+        let p_first = hint.find("FIRST").expect("FIRST");
+        let p_second = hint.find("SECOND").expect("SECOND");
+        assert!(
+            p_second < p_first,
+            "expected skill-b (SECOND) before skill-a (FIRST):\n{hint}"
+        );
+    }
+
+    #[test]
+    fn hint_allow_substrings_in_frontmatter_gates_skill() {
+        let tmp = tempdir().unwrap();
+        let fake_store = tmp.path().join("connection.json");
+        let md = "---\nname: X\ndescription: d\ntags: []\nhint_allow_substrings: [zebra]\n---\n\nZ_BODY\n";
+        write_custom_skill(&fake_store, "gated-x", md, None).unwrap();
+        assert!(!skills_prompt_hint_for_turn(&fake_store, Some("hello"), None).contains("Z_BODY"));
+        assert!(
+            skills_prompt_hint_for_turn(&fake_store, Some("zebra facts"), None).contains("Z_BODY")
+        );
+    }
+
+    #[test]
+    fn skill_order_file_changes_list_order() {
+        let tmp = tempdir().unwrap();
+        let fake_store = tmp.path().join("connection.json");
+        let a = "---\nname: A\ndescription: d\ntags: []\n---\n\na\n";
+        let b = "---\nname: B\ndescription: d\ntags: []\n---\n\nb\n";
+        write_custom_skill(&fake_store, "skill-a", a, None).unwrap();
+        write_custom_skill(&fake_store, "skill-b", b, None).unwrap();
+        let alpha = list_skills(&fake_store);
+        assert_eq!(alpha[0].slug, "skill-a");
+        set_skill_slug_order(&fake_store, &["skill-b".into(), "skill-a".into()]).unwrap();
+        let re = list_skills(&fake_store);
+        assert_eq!(re[0].slug, "skill-b");
+        assert_eq!(re[1].slug, "skill-a");
     }
 }
