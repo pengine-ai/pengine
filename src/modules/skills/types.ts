@@ -13,7 +13,17 @@ export type Skill = {
   origin: SkillOrigin;
   enabled: boolean;
   body: string;
+  /** From optional `mandatory.md` next to SKILL.md (custom skills). */
+  mandatory_markdown?: string | null;
+  /** Same as `mandatory_markdown` when the API uses camelCase. */
+  mandatoryMarkdown?: string | null;
 };
+
+/** Resolved optional `mandatory.md` text from a skill row (GET /v1/skills). */
+export function skillMandatoryMarkdown(skill: Skill): string {
+  const v = skill.mandatory_markdown ?? skill.mandatoryMarkdown;
+  return typeof v === "string" ? v : "";
+}
 
 /** One row from ClawHub's `/api/search?q=<term>` response. */
 export type ClawHubSkill = {

@@ -266,8 +266,8 @@ export function LandingPage() {
                 </h2>
                 <p className="mt-4 subtle-copy">
                   Point Pengine at a Docker image, give it a friendly name, and it shows up in the
-                  dashboard next to everything else. Your agent picks up a new skill; you keep the
-                  checkbox that turns it off.
+                  dashboard next to everything else. Your agent picks up a new capability; you keep
+                  the checkbox that turns it off.
                 </p>
                 <p className="mt-3 subtle-copy">
                   No framework to learn, no plugin API to wrestle. If you can write a Dockerfile (or
@@ -310,6 +310,71 @@ export function LandingPage() {
                 <li className="flex gap-3">
                   <span className="text-(--yellow)">04</span>
                   <span>Your agent can use it on the next turn. No restart, no rebuild.</span>
+                </li>
+              </ol>
+            </div>
+          </div>
+        </section>
+
+        <section id="skills" className="pt-24">
+          <div className="panel bg-linear-to-br from-emerald-300/10 via-transparent to-fuchsia-300/10 p-8 sm:p-10">
+            <div className="grid gap-8 lg:grid-cols-[1.1fr_0.9fr] lg:items-center">
+              <div>
+                <p className="mono-label">Skills layer</p>
+                <h2 className="mt-3 text-3xl font-extrabold tracking-tight text-white sm:text-4xl">
+                  Teach the model with markdown,{" "}
+                  <span className="font-serif text-(--teal) italic">not microservices.</span>
+                </h2>
+                <p className="mt-4 subtle-copy">
+                  Skills are small <strong className="text-slate-200">SKILL.md</strong> bundles:
+                  YAML frontmatter plus a body with request examples, response shape, and when to
+                  use them. They ship as extra <strong className="text-slate-200">system</strong>{" "}
+                  context—cheap for tokens, easy to fork, and separate from Docker MCP tools.
+                </p>
+                <p className="mt-3 subtle-copy">
+                  Use the dashboard to enable or disable each skill, tune how much context they may
+                  consume, add your own markdown, or pull examples from ClawHub. When you need real
+                  execution on disk or in a container, that is what the tools guide is for.
+                </p>
+                <div className="mt-6 flex flex-wrap gap-3">
+                  <a
+                    href="https://github.com/pengine-ai/pengine/blob/main/doc/guides/skills.md"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="primary-button px-6"
+                  >
+                    Read the skills guide
+                  </a>
+                  <a
+                    href="https://github.com/pengine-ai/pengine/tree/main/tools/skills"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="secondary-button px-6"
+                  >
+                    Example bundled skills
+                  </a>
+                </div>
+              </div>
+              <ol className="space-y-3 font-mono text-sm text-(--mid)">
+                <li className="flex gap-3">
+                  <span className="text-(--teal)">01</span>
+                  <span>
+                    Frontmatter names the skill; the body is the recipe the model reads first.
+                  </span>
+                </li>
+                <li className="flex gap-3">
+                  <span className="text-(--teal)">02</span>
+                  <span>Optional mandatory.md adds rules without cluttering the main doc.</span>
+                </li>
+                <li className="flex gap-3">
+                  <span className="text-(--teal)">03</span>
+                  <span>Bundled samples are read-only; copy to your custom dir to iterate.</span>
+                </li>
+                <li className="flex gap-3">
+                  <span className="text-(--teal)">04</span>
+                  <span>
+                    Total injected text is capped—balance depth vs the context slider in the app.
+                  </span>
                 </li>
               </ol>
             </div>

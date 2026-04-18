@@ -22,6 +22,8 @@ const CLAWHUB_OPENCLAW_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Max SKILL.md size we are willing to fetch/write (skills are small by design).
 const MAX_SKILL_MD_BYTES: usize = 256 * 1024;
+/// Max `mandatory.md` size (optional per-skill rules).
+const MAX_MANDATORY_MD_BYTES: usize = 64 * 1024;
 /// Max zip size to accept from ClawHub before extracting.
 const MAX_ZIP_BYTES: usize = 1024 * 1024;
 
@@ -142,7 +144,7 @@ pub fn skills_prompt_hint(store_path: &Path) -> String {
             name = s.name,
             desc = s.description,
         ));
-        if let Some(m) = &s.mandatory_hint {
+        if let Some(m) = &s.mandatory_markdown {
             let m = m.trim();
             if !m.is_empty() {
                 let m = truncate_for_prompt(m, SKILL_MANDATORY_HINT_CAP);
@@ -234,7 +236,7 @@ fn read_dir_skills(dir: &Path, origin: SkillOrigin) -> Vec<Skill> {
         match parse_skill(&slug, &raw, origin) {
             Ok(mut s) => {
                 let mandatory_path = path.join("mandatory.md");
-                s.mandatory_hint = std::fs::read_to_string(&mandatory_path)
+                s.mandatory_markdown = std::fs::read_to_string(&mandatory_path)
                     .ok()
                     .map(|t| t.trim().to_string())
                     .filter(|t| !t.is_empty());
@@ -279,7 +281,7 @@ pub fn parse_skill(slug: &str, raw: &str, origin: SkillOrigin) -> Result<Skill, 
         requires: fields.get_list("requires"),
         brave_allow_substrings: fields.get_list("brave_allow_substrings"),
         origin,
-        mandatory_hint: None,
+        mandatory_markdown: None,
         enabled: true,
         body: body.trim_start_matches(['\n', '\r']).to_string(),
     })
@@ -484,7 +486,15 @@ fn validate_slug(slug: &str) -> Result<(), String> {
 }
 
 /// Create or overwrite a custom skill from its full `SKILL.md` markdown.
-pub fn write_custom_skill(store_path: &Path, slug: &str, markdown: &str) -> Result<Skill, String> {
+///
+/// `mandatory_update`: `None` = leave `mandatory.md` unchanged; `Some("")` = remove the file if present;
+/// `Some(text)` = write trimmed text (must be ≤ [`MAX_MANDATORY_MD_BYTES`]).
+pub fn write_custom_skill(
+    store_path: &Path,
+    slug: &str,
+    markdown: &str,
+    mandatory_update: Option<&str>,
+) -> Result<Skill, String> {
     validate_slug(slug)?;
     if markdown.len() > MAX_SKILL_MD_BYTES {
         return Err(format!(
@@ -493,17 +503,41 @@ pub fn write_custom_skill(store_path: &Path, slug: &str, markdown: &str) -> Resu
         ));
     }
 
-    let skill = parse_skill(slug, markdown, SkillOrigin::Custom)
+    let mut skill = parse_skill(slug, markdown, SkillOrigin::Custom)
         .map_err(|e| format!("invalid skill markdown: {e}"))?;
 
     let dir = custom_skills_dir(store_path).join(slug);
     std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
     let path = dir.join("SKILL.md");
     std::fs::write(&path, markdown).map_err(|e| format!("write {}: {e}", path.display()))?;
+
+    let mandatory_path = dir.join("mandatory.md");
+    if let Some(raw) = mandatory_update {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            let _ = std::fs::remove_file(&mandatory_path);
+            skill.mandatory_markdown = None;
+        } else if trimmed.len() > MAX_MANDATORY_MD_BYTES {
+            return Err(format!(
+                "mandatory.md exceeds {} byte limit",
+                MAX_MANDATORY_MD_BYTES
+            ));
+        } else {
+            std::fs::write(&mandatory_path, trimmed)
+                .map_err(|e| format!("write {}: {e}", mandatory_path.display()))?;
+            skill.mandatory_markdown = Some(trimmed.to_string());
+        }
+    } else {
+        skill.mandatory_markdown = std::fs::read_to_string(&mandatory_path)
+            .ok()
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty());
+    }
+
     Ok(skill)
 }
 
-/// Remove a custom skill's folder. Bundled skills cannot be deleted.
+/// Remove a custom skill's folder (including `SKILL.md` and optional `mandatory.md`). Bundled skills cannot be deleted.
 pub fn delete_custom_skill(store_path: &Path, slug: &str) -> Result<(), String> {
     validate_slug(slug)?;
     let dir = custom_skills_dir(store_path).join(slug);
@@ -833,7 +867,7 @@ pub async fn install_clawhub_skill(store_path: &Path, slug: &str) -> Result<Skil
     }
 
     let markdown = extract_skill_md(bytes.as_ref())?;
-    write_custom_skill(store_path, slug, &markdown)
+    write_custom_skill(store_path, slug, &markdown, None)
 }
 
 /// Find the first `SKILL.md` in `zip_bytes` and return it as a UTF-8 string.
@@ -906,15 +940,15 @@ mod tests {
     fn rejects_bad_slug() {
         let tmp = tempdir().unwrap();
         let fake_store = tmp.path().join("connection.json");
-        assert!(write_custom_skill(&fake_store, "bad slug!", SAMPLE).is_err());
-        assert!(write_custom_skill(&fake_store, "good-slug", SAMPLE).is_ok());
+        assert!(write_custom_skill(&fake_store, "bad slug!", SAMPLE, None).is_err());
+        assert!(write_custom_skill(&fake_store, "good-slug", SAMPLE, None).is_ok());
     }
 
     #[test]
     fn write_then_list_roundtrip() {
         let tmp = tempdir().unwrap();
         let fake_store = tmp.path().join("connection.json");
-        write_custom_skill(&fake_store, "demo", SAMPLE).unwrap();
+        write_custom_skill(&fake_store, "demo", SAMPLE, None).unwrap();
         let list = list_skills(&fake_store);
         assert!(list.iter().any(|s| s.slug == "demo"));
     }
@@ -923,7 +957,7 @@ mod tests {
     fn disabled_flag_roundtrips() {
         let tmp = tempdir().unwrap();
         let fake_store = tmp.path().join("connection.json");
-        write_custom_skill(&fake_store, "demo", SAMPLE).unwrap();
+        write_custom_skill(&fake_store, "demo", SAMPLE, None).unwrap();
         set_skill_enabled(&fake_store, "demo", false).unwrap();
 
         let list = list_skills(&fake_store);
@@ -940,7 +974,7 @@ mod tests {
     fn delete_removes_custom_skill() {
         let tmp = tempdir().unwrap();
         let fake_store = tmp.path().join("connection.json");
-        write_custom_skill(&fake_store, "demo", SAMPLE).unwrap();
+        write_custom_skill(&fake_store, "demo", SAMPLE, None).unwrap();
         delete_custom_skill(&fake_store, "demo").unwrap();
         assert!(delete_custom_skill(&fake_store, "demo").is_err());
     }
@@ -949,7 +983,7 @@ mod tests {
     fn delete_clears_disabled_entry() {
         let tmp = tempdir().unwrap();
         let fake_store = tmp.path().join("connection.json");
-        write_custom_skill(&fake_store, "demo", SAMPLE).unwrap();
+        write_custom_skill(&fake_store, "demo", SAMPLE, None).unwrap();
         set_skill_enabled(&fake_store, "demo", false).unwrap();
         delete_custom_skill(&fake_store, "demo").unwrap();
         assert!(!read_disabled_set(&fake_store).contains("demo"));
@@ -960,15 +994,8 @@ mod tests {
         let tmp = tempdir().unwrap();
         let fake_store = tmp.path().join("connection.json");
         let weather_md = "---\nname: weather\ndescription: test\ntags: []\n---\n\n# x\n";
-        write_custom_skill(&fake_store, "weather", weather_md).unwrap();
         let mandatory = "**MANDATORY for skill:weather:** use wttr.in; Open-Meteo retry with countryCode; see How to answer.\n";
-        std::fs::write(
-            custom_skills_dir(&fake_store)
-                .join("weather")
-                .join("mandatory.md"),
-            mandatory,
-        )
-        .unwrap();
+        write_custom_skill(&fake_store, "weather", weather_md, Some(mandatory)).unwrap();
         let hint = skills_prompt_hint(&fake_store);
         assert!(
             hint.contains("MANDATORY for skill:weather"),
@@ -980,5 +1007,35 @@ mod tests {
             hint.contains("How to answer"),
             "expected answer-style reminder in:\n{hint}"
         );
+    }
+
+    #[test]
+    fn mandatory_cleared_when_saved_as_empty() {
+        let tmp = tempdir().unwrap();
+        let fake_store = tmp.path().join("connection.json");
+        let md = "---\nname: x\ndescription: d\ntags: []\n---\n\nbody\n";
+        write_custom_skill(&fake_store, "x", md, Some("keep me")).unwrap();
+        let path = custom_skills_dir(&fake_store)
+            .join("x")
+            .join("mandatory.md");
+        assert!(path.is_file());
+        write_custom_skill(&fake_store, "x", md, Some("")).unwrap();
+        assert!(!path.exists());
+        let list = list_skills(&fake_store);
+        let s = list.iter().find(|s| s.slug == "x").unwrap();
+        assert!(s.mandatory_markdown.is_none());
+    }
+
+    #[test]
+    fn mandatory_unchanged_when_update_is_none() {
+        let tmp = tempdir().unwrap();
+        let fake_store = tmp.path().join("connection.json");
+        let md = "---\nname: y\ndescription: d\ntags: []\n---\n\nbody\n";
+        write_custom_skill(&fake_store, "y", md, Some("first")).unwrap();
+        let md2 = "---\nname: y\ndescription: d2\ntags: []\n---\n\nbody2\n";
+        write_custom_skill(&fake_store, "y", md2, None).unwrap();
+        let list = list_skills(&fake_store);
+        let s = list.iter().find(|s| s.slug == "y").unwrap();
+        assert_eq!(s.mandatory_markdown.as_deref(), Some("first"));
     }
 }

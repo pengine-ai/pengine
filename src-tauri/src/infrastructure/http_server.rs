@@ -1678,6 +1678,9 @@ pub struct SkillsListResponse {
 pub struct AddSkillBody {
     pub slug: String,
     pub markdown: String,
+    /// When omitted, existing `mandatory.md` is left unchanged. When present (including empty string), file is updated or removed.
+    #[serde(default)]
+    pub mandatory_markdown: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -1748,8 +1751,13 @@ async fn handle_skills_add(
     State(state): State<AppState>,
     Json(body): Json<AddSkillBody>,
 ) -> Result<(StatusCode, Json<Skill>), (StatusCode, Json<ErrorResponse>)> {
-    let skill = skills_service::write_custom_skill(&state.store_path, &body.slug, &body.markdown)
-        .map_err(|e| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })))?;
+    let skill = skills_service::write_custom_skill(
+        &state.store_path,
+        &body.slug,
+        &body.markdown,
+        body.mandatory_markdown.as_deref(),
+    )
+    .map_err(|e| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })))?;
     state
         .emit_log("skills", &format!("custom skill '{}' saved", skill.slug))
         .await;

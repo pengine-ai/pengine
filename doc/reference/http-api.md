@@ -59,8 +59,8 @@ Authoritative list: **`Router::new()`** in `http_server.rs`. Below: method, path
 
 | Method | Path | Notes |
 | --- | --- | --- |
-| GET | `/v1/skills` | List bundled + custom skills, enabled flags, paths. |
-| POST | `/v1/skills` | Create custom skill (slug + markdown body). |
+| GET | `/v1/skills` | List bundled + custom skills, enabled flags, `custom_dir`, bodies; optional JSON field `mandatoryMarkdown` when `mandatory.md` exists. |
+| POST | `/v1/skills` | Create/update custom skill: JSON `slug`, `markdown` (full `SKILL.md`), optional `mandatory_markdown` (omit to leave `mandatory.md` unchanged; empty string removes the file). |
 | DELETE | `/v1/skills/{slug}` | Delete custom skill. |
 | PUT | `/v1/skills/{slug}/enabled` | Toggle enabled (`.disabled.json`). |
 | GET | `/v1/skills/clawhub/plugins` | ClawHub plugin listing (paginated / search params as defined in handlers). |

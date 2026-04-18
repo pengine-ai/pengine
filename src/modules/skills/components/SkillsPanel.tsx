@@ -2,7 +2,7 @@ import * as Accordion from "@radix-ui/react-accordion";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchUserSettings, putUserSettings } from "../../settings";
 import { addSkill, deleteSkill, fetchSkills, setSkillEnabled } from "../api";
-import type { Skill } from "../types";
+import { type Skill, skillMandatoryMarkdown } from "../types";
 import { ClawHubBrowse } from "./ClawHubBrowse";
 import { SkillsContextBytesSlider } from "./SkillsContextBytesSlider";
 
@@ -75,6 +75,7 @@ export function SkillsPanel() {
   const [showAdd, setShowAdd] = useState(false);
   const [newSlug, setNewSlug] = useState("");
   const [newMarkdown, setNewMarkdown] = useState(TEMPLATE);
+  const [newMandatoryMarkdown, setNewMandatoryMarkdown] = useState("");
   const [editingSlug, setEditingSlug] = useState<string | null>(null);
   const [addBusy, setAddBusy] = useState(false);
   const [addError, setAddError] = useState<string | null>(null);
@@ -161,7 +162,7 @@ export function SkillsPanel() {
     const isEditing = editingSlug !== null;
     setAddBusy(true);
     setAddError(null);
-    const result = await addSkill(trimmedSlug, newMarkdown);
+    const result = await addSkill(trimmedSlug, newMarkdown, newMandatoryMarkdown);
     setAddBusy(false);
     if (result.ok) {
       setNotice(
@@ -172,6 +173,7 @@ export function SkillsPanel() {
       setShowAdd(false);
       setNewSlug("");
       setNewMarkdown(TEMPLATE);
+      setNewMandatoryMarkdown("");
       setEditingSlug(null);
       void load();
     } else {
@@ -210,12 +212,19 @@ export function SkillsPanel() {
     setShowBrowse(true);
   };
 
-  const handleEdit = (skill: Skill) => {
+  const handleEdit = async (skill: Skill) => {
+    const resp = await fetchSkills();
+    if (resp) {
+      setSkills(resp.skills);
+      setCustomDir(resp.custom_dir);
+    }
+    const fresh = resp?.skills.find((s) => s.slug === skill.slug) ?? skill;
     setShowAdd(true);
     setAddError(null);
-    setEditingSlug(skill.slug);
-    setNewSlug(skill.slug);
-    setNewMarkdown(composeSkillMarkdown(skill));
+    setEditingSlug(fresh.slug);
+    setNewSlug(fresh.slug);
+    setNewMarkdown(composeSkillMarkdown(fresh));
+    setNewMandatoryMarkdown(skillMandatoryMarkdown(fresh));
   };
 
   return (
@@ -239,6 +248,7 @@ export function SkillsPanel() {
                   setEditingSlug(null);
                   setNewSlug("");
                   setNewMarkdown(TEMPLATE);
+                  setNewMandatoryMarkdown("");
                 }
                 return !v;
               });
@@ -337,16 +347,36 @@ export function SkillsPanel() {
             disabled={editingSlug !== null}
             className="mt-1 w-full rounded-lg border border-white/10 bg-black/20 px-2 py-1 font-mono text-xs text-white outline-none focus:border-emerald-300/40"
           />
-          <label className="mt-3 block font-mono text-[10px] uppercase tracking-[0.14em] text-(--mid)">
-            SKILL.md
-          </label>
-          <textarea
-            value={newMarkdown}
-            onChange={(e) => setNewMarkdown(e.target.value)}
-            rows={14}
-            className="mt-1 w-full rounded-lg border border-white/10 bg-black/20 px-2 py-1.5 font-mono text-[11px] text-white outline-none focus:border-emerald-300/40"
-            spellCheck={false}
-          />
+          <div className="mt-3 space-y-4 border-t border-white/10 pt-3">
+            <div className="min-w-0">
+              <label className="block font-mono text-[10px] uppercase tracking-[0.14em] text-(--mid)">
+                SKILL.md
+              </label>
+              <textarea
+                value={newMarkdown}
+                onChange={(e) => setNewMarkdown(e.target.value)}
+                rows={editingSlug ? 22 : 14}
+                className="mt-1 max-h-[min(70vh,36rem)] w-full min-h-[12rem] resize-y rounded-lg border border-white/10 bg-black/20 px-2 py-1.5 font-mono text-[11px] text-white outline-none focus:border-emerald-300/40"
+                spellCheck={false}
+              />
+            </div>
+            <div className="min-w-0 rounded-lg border border-white/8 bg-black/10 px-2 py-2">
+              <label className="block font-mono text-[9px] uppercase tracking-[0.12em] text-(--mid)">
+                mandatory.md <span className="normal-case text-white/35">(optional)</span>
+              </label>
+              <p className="mt-0.5 font-mono text-[8px] leading-snug text-white/32">
+                Appended to the system prompt. Empty = none (removes file on save).
+              </p>
+              <textarea
+                value={newMandatoryMarkdown}
+                onChange={(e) => setNewMandatoryMarkdown(e.target.value)}
+                rows={3}
+                placeholder={"# Optional…"}
+                className="mt-1 w-full resize-y rounded-md border border-white/10 bg-black/25 px-1.5 py-1 font-mono text-[10px] leading-snug text-white outline-none focus:border-fuchsia-300/35"
+                spellCheck={false}
+              />
+            </div>
+          </div>
           {addError && (
             <p className="mt-2 font-mono text-[11px] text-rose-300" role="alert">
               {addError}
@@ -445,7 +475,7 @@ export function SkillsPanel() {
                     <>
                       <button
                         type="button"
-                        onClick={() => handleEdit(skill)}
+                        onClick={() => void handleEdit(skill)}
                         className="rounded-lg border border-white/15 bg-white/5 px-3 py-1 font-mono text-[11px] text-white/80 transition hover:bg-white/10"
                       >
                         Edit

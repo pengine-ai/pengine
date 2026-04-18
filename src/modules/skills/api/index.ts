@@ -1,5 +1,18 @@
 import { fetchErrorMessage, PENGINE_API_BASE } from "../../../shared/api/config";
-import type { ClawHubPlugin, ClawHubSkill, Skill } from "../types";
+import {
+  type ClawHubPlugin,
+  type ClawHubSkill,
+  type Skill,
+  skillMandatoryMarkdown,
+} from "../types";
+
+function normalizeSkillPayload(s: Skill): Skill {
+  const md = skillMandatoryMarkdown(s);
+  return {
+    ...s,
+    mandatory_markdown: md.length > 0 ? md : undefined,
+  };
+}
 
 export type SkillsListResponse = {
   skills: Skill[];
@@ -30,7 +43,11 @@ export async function fetchSkills(timeoutMs = 5000): Promise<SkillsListResponse 
   try {
     const resp = await fetch(`${PENGINE_API_BASE}/v1/skills`, { signal });
     if (!resp.ok) return null;
-    return (await resp.json()) as SkillsListResponse;
+    const data = (await resp.json()) as SkillsListResponse;
+    return {
+      custom_dir: data.custom_dir,
+      skills: data.skills.map((s) => normalizeSkillPayload(s)),
+    };
   } catch {
     return null;
   } finally {
@@ -41,6 +58,7 @@ export async function fetchSkills(timeoutMs = 5000): Promise<SkillsListResponse 
 export async function addSkill(
   slug: string,
   markdown: string,
+  mandatoryMarkdown: string,
   timeoutMs = 5000,
 ): Promise<{ ok: boolean; skill?: Skill; error?: string }> {
   const { signal, cleanup } = makeTimeoutSignal(timeoutMs);
@@ -48,10 +66,10 @@ export async function addSkill(
     const resp = await fetch(`${PENGINE_API_BASE}/v1/skills`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ slug, markdown }),
+      body: JSON.stringify({ slug, markdown, mandatory_markdown: mandatoryMarkdown }),
       signal,
     });
-    if (resp.ok) return { ok: true, skill: (await resp.json()) as Skill };
+    if (resp.ok) return { ok: true, skill: normalizeSkillPayload((await resp.json()) as Skill) };
     return { ok: false, error: await parseApiError(resp) };
   } catch (e) {
     return { ok: false, error: fetchErrorMessage(e) };
@@ -189,7 +207,7 @@ export async function installClawHubSkill(
       body: JSON.stringify({ slug }),
       signal,
     });
-    if (resp.ok) return { ok: true, skill: (await resp.json()) as Skill };
+    if (resp.ok) return { ok: true, skill: normalizeSkillPayload((await resp.json()) as Skill) };
     return { ok: false, error: await parseApiError(resp) };
   } catch (e) {
     return { ok: false, error: fetchErrorMessage(e) };

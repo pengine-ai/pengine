@@ -1,11 +1,33 @@
 # Adding custom MCP tools
 
-Pengine loads MCP servers from **`mcp.json`**. Each entry is either:
+This guide is for **operators and power users**: anyone wiring MCP servers into Pengine by hand, from the dashboard, or via the HTTP API. It complements [architecture/mcp.md](../architecture/mcp.md) (how the host talks to clients) and the in-app **MCP Tools** / **Tool Engine** panels.
 
-- **`stdio`** — a child process that speaks MCP over stdin/stdout (Node `npx` packages, a local binary, or `docker`/`podman run …`).
-- **`native`** — an in-process tool pack built into Pengine (`dice`, `tool_manager`).
+---
 
-The dashboard **Tools** column lists whatever is in `mcp.json`. Use **+ Add custom tool** (paste JSON or manual form), edit an existing **stdio** entry, or edit the file directly.
+## Concepts in one minute
+
+| Piece | What it is |
+|-------|------------|
+| **`mcp.json`** | Single source of truth for MCP servers, workspace roots, and Tool Engine metadata. |
+| **`stdio` server** | A subprocess: Pengine spawns it and speaks MCP over stdin/stdout. |
+| **`native` server** | Compiled into the app; no separate process. |
+| **Tool Engine** | Curated Docker/Podman images: install from the dashboard → a `te_…` **stdio** entry is generated for you. |
+| **Custom container tool** | Any image you trust, registered via **`POST /v1/toolengine/custom`** → `te_custom_<key>`. |
+
+**MCP tools** are real runtime capabilities (containers, processes, native packs). They are **not** the same as [Skills](./skills.md) (markdown hints in the system prompt). Use MCP when the agent needs a long-lived protocol, side effects on disk, or a packaged binary you do not want to re-describe in prose.
+
+---
+
+## Dashboard vs file vs API
+
+| Approach | Best when |
+|----------|-----------|
+| **Dashboard → MCP Tools** | Edit names, env, filesystem paths, `direct_return`, or paste a single server JSON. Good for interactive tweaks. |
+| **Dashboard → Tool Engine** | Install catalog tools with one click; secrets and workspace mounts are guided. |
+| **Edit `mcp.json` directly** | You use version control, templating, or CI to ship the same config to many machines. |
+| **`POST /v1/toolengine/custom`** | Automating custom images without opening the UI. |
+
+After any change, Pengine reloads MCP configuration (watch the log for `mcp` lines). If something fails to start, the server usually disappears from the tool list until the next successful spawn.
 
 ---
 
@@ -71,6 +93,24 @@ Requirements:
 - Node/npm must be on `PATH` for the process that starts Pengine (the Tauri app or your terminal if you test manually).
 
 After saving `mcp.json` (or using the dashboard save), Pengine reconnects MCP servers; check the in-app log for `mcp` lines.
+
+### `stdio` fields (quick reference)
+
+| Field | Required | Notes |
+|-------|----------|--------|
+| `type` | Yes | `stdio` or `native`. |
+| `command` | For `stdio` | Executable on `PATH` for the Pengine process (Tauri app or `pengine` server). |
+| `args` | No | List of argv tokens after `command`. |
+| `env` | No | Plain strings; treat values as secrets if they are API keys. |
+| `direct_return` | No | If `true`, tool results can bypass an extra model summarization step (when the stack supports it). |
+| `private_host_path` | No | Used by some Tool Engine tools for bind-mounted data dirs (see Tool Engine panel). |
+
+### Common issues
+
+- **`npx` / `node` not found** — The user or service account that launches Pengine must have the same `PATH` you use in a terminal. On macOS GUI apps often have a minimal `PATH`; prefer absolute paths to `node`/`npx` in `command` if needed.
+- **Filesystem MCP shows no folders** — Ensure **`workspace_roots`** (or dashboard “allowed folders”) includes host paths; the server argv often lists those paths after the `server-filesystem` package line.
+- **Container never sees your project** — For Tool Engine installs, enable workspace mount options when registering the custom tool, or add explicit `-v` binds in a hand-written `docker run` argv.
+- **Image pulls hang** — Pulls run on the host; disk, network, and registry auth are all outside Pengine. Check Docker/Podman CLI manually with the same image ref.
 
 ---
 
@@ -200,5 +240,6 @@ Under **+ Add custom tool → Paste JSON**, you can paste either:
 ## See also
 
 - [architecture/mcp.md](../architecture/mcp.md) — host/client flow and Ollama bridge (details also in `src-tauri/src/modules/mcp/`).
+- [guides/skills.md](./skills.md) — markdown “skills” in the system prompt vs MCP tools.
 - [README.md](../README.md) — doc index and `/v1` API list.
 - [tool-engine/manual-publish.md](../tool-engine/manual-publish.md) — publishing catalog tools (maintainers).
