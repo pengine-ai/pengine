@@ -106,9 +106,10 @@ pub fn set_skill_enabled(store_path: &Path, slug: &str, enabled: bool) -> Result
 /// front-load the critical scope gate / URL / recipe at the top of `SKILL.md`.
 pub const SKILL_HINT_BODY_CAP: usize = 2200;
 
-/// Hard cap for the full skills fragment (intro + every enabled skill body + mandatory snippets).
-/// Runtime value comes from [`crate::shared::user_settings`] / dashboard; this matches the default file cap.
-pub const MAX_TOTAL_SKILL_HINT_BYTES: usize =
+/// Default cap for the full skills fragment (intro + bodies + mandatory snippets), aligned with
+/// [`crate::shared::user_settings::DEFAULT_SKILLS_HINT_MAX_BYTES`]. The **runtime** limit is
+/// [`crate::shared::state::AppState::skills_hint_max_bytes`] (see `bot::agent` turns).
+pub const DEFAULT_SKILL_HINT_BYTES: usize =
     crate::shared::user_settings::DEFAULT_SKILLS_HINT_MAX_BYTES as usize;
 
 /// `mandatory.md` is still high-signal but must not balloon the system prompt unchecked.
@@ -299,10 +300,28 @@ fn german_ascii_fold(lower: &str) -> String {
     o
 }
 
-/// `needle` is already lowercased. Matches direct substring or after German fold on both sides.
-fn user_text_covers_token(user_lower: &str, user_folded: &str, needle_lower: &str) -> bool {
+fn alphanumeric_token_match(haystack_lower: &str, needle_lower: &str) -> bool {
+    haystack_lower
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .any(|t| t == needle_lower)
+}
+
+/// `needle` is already lowercased. Short needles use alphanumeric token equality (avoids `rss` ⊆
+/// `progress`); longer needles match as substring, with a German-fold fallback path.
+pub(crate) fn user_text_covers_token(
+    user_lower: &str,
+    user_folded: &str,
+    needle_lower: &str,
+) -> bool {
     if needle_lower.is_empty() {
         return false;
+    }
+    if needle_lower.len() <= 4 {
+        let needle_folded = german_ascii_fold(needle_lower);
+        return alphanumeric_token_match(user_lower, needle_lower)
+            || (!needle_folded.is_empty()
+                && alphanumeric_token_match(user_folded, &needle_folded));
     }
     if user_lower.contains(needle_lower) {
         return true;
@@ -311,8 +330,19 @@ fn user_text_covers_token(user_lower: &str, user_folded: &str, needle_lower: &st
     user_folded.contains(&needle_folded)
 }
 
+/// Lowercase + fold helper for callers outside this module (e.g. MCP tool ranking).
+pub(crate) fn user_message_needle_match(user_message: &str, needle: &str) -> bool {
+    let needle_lower = needle.trim().to_lowercase();
+    if needle_lower.is_empty() {
+        return false;
+    }
+    let u = user_message.to_lowercase();
+    let u_fold = german_ascii_fold(&u);
+    user_text_covers_token(&u, &u_fold, &needle_lower)
+}
+
 /// Tags this generic must not alone enable billed web search (e.g. "news" ⊆ "gameinformer news").
-const BRAVE_TAG_DENYLIST: &[&str] = &[
+pub(crate) const BRAVE_TAG_DENYLIST: &[&str] = &[
     "news", "info", "help", "guide", "tips", "blog", "home", "page", "data", "list", "links",
     "link", "tool", "tools", "apps", "app", "media", "site", "sites", "world", "daily", "live",
 ];

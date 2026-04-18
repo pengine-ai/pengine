@@ -24,15 +24,71 @@ pub fn persist(path: &Path, data: &ConnectionMetadata) -> Result<(), String> {
 /// sync/filesystem-only and has no access to the bus).
 pub fn load(path: &Path, migration_log: &mut Vec<String>) -> Option<ConnectionMetadata> {
     let json = std::fs::read_to_string(path).ok()?;
-    let value: serde_json::Value = serde_json::from_str(&json).ok()?;
-    let obj = value.as_object()?;
+    let value: serde_json::Value = match serde_json::from_str(&json) {
+        Ok(v) => v,
+        Err(e) => {
+            migration_log.push(format!(
+                "Malformed connection.json: invalid JSON ({e}); expected connection metadata"
+            ));
+            return None;
+        }
+    };
+    let Some(obj) = value.as_object() else {
+        migration_log.push(
+            "Malformed connection.json: root is not a JSON object; file parsed as JSON but does \
+             not contain expected connection metadata"
+                .to_string(),
+        );
+        return None;
+    };
 
-    let bot_id = obj.get("bot_id")?.as_str()?.to_string();
-    let bot_username = obj.get("bot_username")?.as_str()?.to_string();
+    let mut field_issues: Vec<String> = Vec::new();
+    match obj.get("bot_id") {
+        None => field_issues.push("`bot_id` missing".into()),
+        Some(v) if v.as_str().is_none() => field_issues.push("`bot_id` is not a string".into()),
+        _ => {}
+    }
+    match obj.get("bot_username") {
+        None => field_issues.push("`bot_username` missing".into()),
+        Some(v) if v.as_str().is_none() => {
+            field_issues.push("`bot_username` is not a string".into())
+        }
+        _ => {}
+    }
+    match obj.get("connected_at") {
+        None => field_issues.push("`connected_at` missing".into()),
+        Some(v) => match v.as_str() {
+            None => field_issues.push("`connected_at` is not a string".into()),
+            Some(s) if chrono::DateTime::parse_from_rfc3339(s).is_err() => {
+                field_issues.push("`connected_at` is not a valid RFC3339 timestamp string".into())
+            }
+            Some(_) => {}
+        },
+    }
+    if !field_issues.is_empty() {
+        migration_log.push(format!(
+            "Malformed connection.json: missing or invalid field(s) — {}; file parsed as JSON but \
+             does not contain expected connection metadata",
+            field_issues.join("; ")
+        ));
+        return None;
+    }
+
+    let bot_id = obj
+        .get("bot_id")
+        .and_then(|v| v.as_str())
+        .unwrap()
+        .to_string();
+    let bot_username = obj
+        .get("bot_username")
+        .and_then(|v| v.as_str())
+        .unwrap()
+        .to_string();
     let connected_at = obj
-        .get("connected_at")?
-        .as_str()
-        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())?
+        .get("connected_at")
+        .and_then(|v| v.as_str())
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .unwrap()
         .with_timezone(&chrono::Utc);
 
     if let Some(token) = obj

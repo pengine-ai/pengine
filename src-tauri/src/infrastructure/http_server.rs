@@ -2,7 +2,7 @@ use crate::infrastructure::bot_lifecycle;
 use crate::modules::bot::{repository, service as bot_service};
 use crate::modules::mcp::service as mcp_service;
 use crate::modules::ollama::service as ollama_service;
-use crate::modules::secure_store;
+use crate::modules::secure_store::{self, SecureStoreError};
 use crate::modules::skills::service as skills_service;
 use crate::modules::skills::types::{ClawHubPluginSummary, ClawHubSkill, Skill};
 use crate::modules::tool_engine::{runtime as te_runtime, service as te_service};
@@ -1144,6 +1144,59 @@ async fn handle_toolengine_private_folder_put(
     Ok((StatusCode::OK, Json(serde_json::json!({ "ok": true }))))
 }
 
+fn rollback_passthrough_keychain_ops(tool_id: &str, applied: &[(String, Option<String>)]) {
+    for (k, prev) in applied.iter().rev() {
+        match prev {
+            Some(s) => {
+                if let Err(e) = secure_store::save_mcp_secret(tool_id, k, s) {
+                    log::warn!(
+                        "passthrough keychain rollback: could not restore {tool_id}/{k}: {e}"
+                    );
+                }
+            }
+            None => {
+                if let Err(e) = secure_store::delete_mcp_secret(tool_id, k) {
+                    log::warn!(
+                        "passthrough keychain rollback: could not delete {tool_id}/{k}: {e}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+async fn rollback_passthrough_config_keys(
+    state: &AppState,
+    tool_id: &str,
+    keys: &[String],
+    catalog: &crate::modules::tool_engine::types::ToolCatalog,
+    bot_id: Option<String>,
+) -> Result<(), String> {
+    let _guard = state.mcp_config_mutex.lock().await;
+    let mut cfg = mcp_service::load_or_init_config(&state.mcp_config_path)?;
+    let srv_key = te_service::server_key(tool_id);
+    let Some(crate::modules::mcp::types::ServerEntry::Stdio {
+        catalog_passthrough_keys,
+        ..
+    }) = cfg.servers.get_mut(&srv_key)
+    else {
+        return Err("rollback: tool server missing or not stdio".into());
+    };
+    catalog_passthrough_keys.clear();
+    catalog_passthrough_keys.extend(keys.iter().cloned());
+    catalog_passthrough_keys.sort();
+    catalog_passthrough_keys.dedup();
+    let host_paths = mcp_service::filesystem_allowed_paths(&cfg);
+    te_service::sync_workspace_mounted_tools_for_catalog(
+        &mut cfg,
+        &host_paths,
+        catalog,
+        &state.mcp_config_path,
+        bot_id,
+    )?;
+    mcp_service::save_config(&state.mcp_config_path, &cfg)
+}
+
 async fn handle_toolengine_passthrough_env_put(
     State(state): State<AppState>,
     Json(body): Json<PutToolPassthroughEnvBody>,
@@ -1210,7 +1263,34 @@ async fn handle_toolengine_passthrough_env_put(
         .as_ref()
         .map(|c| c.bot_id.clone());
 
-    {
+    let mut env_pairs: Vec<(String, String)> = body
+        .env
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    env_pairs.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut prior: HashMap<String, Option<String>> = HashMap::new();
+    for (k, _) in &env_pairs {
+        match secure_store::load_mcp_secret(&tool_id, k) {
+            Ok(s) => {
+                prior.insert(k.clone(), Some(s));
+            }
+            Err(SecureStoreError::NotFound) => {
+                prior.insert(k.clone(), None);
+            }
+            Err(e) => {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: format!("read existing passthrough secret {k}: {e}"),
+                    }),
+                ));
+            }
+        }
+    }
+
+    let keys_before: Vec<String> = {
         let _guard = state.mcp_config_mutex.lock().await;
         let mut cfg = mcp_service::load_or_init_config(&state.mcp_config_path).map_err(|e| {
             (
@@ -1229,44 +1309,24 @@ async fn handle_toolengine_passthrough_env_put(
             ));
         };
 
-        match server_ent {
+        let keys_before = match server_ent {
             crate::modules::mcp::types::ServerEntry::Stdio {
                 catalog_passthrough_keys,
                 ..
             } => {
-                // Mutate the keychain first; only update the on-disk key list for entries that
-                // the OS store accepted, so a failed save doesn't leave a dangling reference.
-                for (k, v) in &body.env {
+                let keys_before = catalog_passthrough_keys.clone();
+                let mut new_keys = keys_before.clone();
+                for (k, v) in &env_pairs {
                     if v.trim().is_empty() {
-                        if let Err(e) = secure_store::delete_mcp_secret(&tool_id, k) {
-                            return Err((
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                Json(ErrorResponse {
-                                    error: format!(
-                                        "delete passthrough secret {k} from OS keychain: {e}"
-                                    ),
-                                }),
-                            ));
-                        }
-                        catalog_passthrough_keys.retain(|stored| stored != k);
-                    } else {
-                        if let Err(e) = secure_store::save_mcp_secret(&tool_id, k, v) {
-                            return Err((
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                Json(ErrorResponse {
-                                    error: format!(
-                                        "save passthrough secret {k} to OS keychain: {e}"
-                                    ),
-                                }),
-                            ));
-                        }
-                        if !catalog_passthrough_keys.iter().any(|stored| stored == k) {
-                            catalog_passthrough_keys.push(k.clone());
-                        }
+                        new_keys.retain(|stored| stored != k);
+                    } else if !new_keys.iter().any(|stored| stored == k) {
+                        new_keys.push(k.clone());
                     }
                 }
-                catalog_passthrough_keys.sort();
-                catalog_passthrough_keys.dedup();
+                new_keys.sort();
+                new_keys.dedup();
+                *catalog_passthrough_keys = new_keys;
+                keys_before
             }
             _ => {
                 return Err((
@@ -1276,7 +1336,7 @@ async fn handle_toolengine_passthrough_env_put(
                     }),
                 ));
             }
-        }
+        };
 
         let host_paths = mcp_service::filesystem_allowed_paths(&cfg);
         te_service::sync_workspace_mounted_tools_for_catalog(
@@ -1284,7 +1344,7 @@ async fn handle_toolengine_passthrough_env_put(
             &host_paths,
             &catalog,
             &state.mcp_config_path,
-            bot_id,
+            bot_id.clone(),
         )
         .map_err(|e| {
             (
@@ -1299,6 +1359,61 @@ async fn handle_toolengine_passthrough_env_put(
                 Json(ErrorResponse { error: e }),
             )
         })?;
+
+        keys_before
+    };
+
+    let mut applied: Vec<(String, Option<String>)> = Vec::new();
+    for (k, v) in &env_pairs {
+        let prev = prior.get(k).cloned().unwrap_or(None);
+        if v.trim().is_empty() {
+            if let Err(e) = secure_store::delete_mcp_secret(&tool_id, k) {
+                rollback_passthrough_keychain_ops(&tool_id, &applied);
+                if let Err(rb) = rollback_passthrough_config_keys(
+                    &state,
+                    &tool_id,
+                    &keys_before,
+                    &catalog,
+                    bot_id.clone(),
+                )
+                .await
+                {
+                    log::error!(
+                        "passthrough env: keychain delete failed ({e}); config rollback also failed: {rb}"
+                    );
+                }
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: format!("delete passthrough secret {k} from OS keychain: {e}"),
+                    }),
+                ));
+            }
+            applied.push((k.clone(), prev));
+        } else if let Err(e) = secure_store::save_mcp_secret(&tool_id, k, v) {
+            rollback_passthrough_keychain_ops(&tool_id, &applied);
+            if let Err(rb) = rollback_passthrough_config_keys(
+                &state,
+                &tool_id,
+                &keys_before,
+                &catalog,
+                bot_id.clone(),
+            )
+            .await
+            {
+                log::error!(
+                    "passthrough env: keychain save failed ({e}); config rollback also failed: {rb}"
+                );
+            }
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("save passthrough secret {k} to OS keychain: {e}"),
+                }),
+            ));
+        } else {
+            applied.push((k.clone(), prev));
+        }
     }
 
     state

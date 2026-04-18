@@ -140,17 +140,39 @@ fn migrate_legacy_catalog_passthrough(raw: &mut serde_json::Value) -> Result<boo
             continue;
         }
 
+        let entries: Vec<(String, serde_json::Value)> = legacy_map
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let mut remaining = serde_json::Map::new();
         let mut migrated_keys: Vec<String> = Vec::new();
-        for (env_key, env_val) in legacy_map {
+        for (env_key, env_val) in entries {
             let Some(val_str) = env_val.as_str() else {
+                remaining.insert(env_key, env_val);
                 continue;
             };
             if val_str.trim().is_empty() {
+                remaining.insert(env_key, serde_json::Value::String(val_str.to_string()));
                 continue;
             }
-            secure_store::save_mcp_secret(&tool_id, env_key, val_str)
-                .map_err(|e| format!("migrate {tool_id}/{env_key} into OS keychain: {e}"))?;
-            migrated_keys.push(env_key.clone());
+            match secure_store::save_mcp_secret(&tool_id, &env_key, val_str) {
+                Ok(()) => migrated_keys.push(env_key),
+                Err(e) => {
+                    log::warn!(
+                        "migrate legacy catalog_passthrough: could not save {tool_id}/{env_key} \
+                         into OS keychain: {e}"
+                    );
+                    remaining.insert(env_key, serde_json::Value::String(val_str.to_string()));
+                }
+            }
+        }
+
+        let legacy_reinserted = !remaining.is_empty();
+        if legacy_reinserted {
+            obj.insert(
+                "catalog_passthrough".to_string(),
+                serde_json::Value::Object(remaining),
+            );
         }
 
         if let Some(args) = obj.get_mut("args").and_then(|v| v.as_array_mut()) {
@@ -180,6 +202,10 @@ fn migrate_legacy_catalog_passthrough(raw: &mut serde_json::Value) -> Result<boo
                         .collect(),
                 ),
             );
+            any_migrated = true;
+        } else if legacy_reinserted && migrated_keys.is_empty() {
+            // Legacy map was rewritten (e.g. non-string values coalesced) even though nothing
+            // reached the keychain.
             any_migrated = true;
         }
     }

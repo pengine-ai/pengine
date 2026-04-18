@@ -22,15 +22,20 @@ export async function fetchUserSettings(timeoutMs: number): Promise<UserSettings
 export async function putUserSettings(
   skills_hint_max_bytes: number,
 ): Promise<{ ok: true; settings: UserSettings } | { ok: false; error: string }> {
-  const resp = await fetch(SETTINGS_URL, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ skills_hint_max_bytes }),
-    signal: AbortSignal.timeout(8000),
-  });
-  const data = (await resp.json()) as UserSettings & { error?: string };
-  if (!resp.ok) {
-    return { ok: false, error: data.error ?? `HTTP ${resp.status}` };
+  try {
+    const resp = await fetch(SETTINGS_URL, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ skills_hint_max_bytes }),
+      signal: AbortSignal.timeout(8000),
+    });
+    const data = (await resp.json()) as UserSettings & { error?: string };
+    if (!resp.ok) {
+      return { ok: false, error: data.error ?? `HTTP ${resp.status}` };
+    }
+    return { ok: true, settings: data as UserSettings };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: message };
   }
-  return { ok: true, settings: data as UserSettings };
 }

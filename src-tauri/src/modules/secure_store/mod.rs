@@ -323,16 +323,20 @@ pub fn preload_mcp_passthrough_secrets(
 }
 
 pub fn save_token(bot_id: &str, token: &str) -> Result<(), SecureStoreError> {
-    let mut guard = lock_secrets()?;
-    let s = match guard.as_mut() {
-        Some(x) => x,
-        None => {
-            *guard = Some(load_unified_from_keychain()?);
-            guard.as_mut().unwrap()
-        }
+    let snapshot = {
+        let guard = lock_secrets()?;
+        let base = match guard.as_ref() {
+            Some(x) => x.clone(),
+            None => load_unified_from_keychain()?,
+        };
+        let mut next = base;
+        next.bots.insert(bot_id.to_string(), token.to_string());
+        next
     };
-    s.bots.insert(bot_id.to_string(), token.to_string());
-    save_unified_to_keychain(s)
+    save_unified_to_keychain(&snapshot)?;
+    let mut guard = lock_secrets()?;
+    *guard = Some(snapshot);
+    Ok(())
 }
 
 pub fn load_token(bot_id: &str) -> Result<String, SecureStoreError> {
@@ -356,30 +360,38 @@ pub fn load_token(bot_id: &str) -> Result<String, SecureStoreError> {
 }
 
 pub fn delete_token(bot_id: &str) -> Result<(), SecureStoreError> {
-    let mut guard = lock_secrets()?;
-    let s = match guard.as_mut() {
-        Some(x) => x,
-        None => {
-            *guard = Some(load_unified_from_keychain()?);
-            guard.as_mut().unwrap()
-        }
+    let snapshot = {
+        let guard = lock_secrets()?;
+        let base = match guard.as_ref() {
+            Some(x) => x.clone(),
+            None => load_unified_from_keychain()?,
+        };
+        let mut next = base;
+        next.bots.remove(bot_id);
+        next
     };
-    s.bots.remove(bot_id);
-    save_unified_to_keychain(s)
+    save_unified_to_keychain(&snapshot)?;
+    let mut guard = lock_secrets()?;
+    *guard = Some(snapshot);
+    Ok(())
 }
 
 pub fn save_mcp_secret(tool_id: &str, env_key: &str, value: &str) -> Result<(), SecureStoreError> {
     let ck = composite_key(tool_id, env_key);
-    let mut guard = lock_secrets()?;
-    let s = match guard.as_mut() {
-        Some(x) => x,
-        None => {
-            *guard = Some(load_unified_from_keychain()?);
-            guard.as_mut().unwrap()
-        }
+    let snapshot = {
+        let guard = lock_secrets()?;
+        let base = match guard.as_ref() {
+            Some(x) => x.clone(),
+            None => load_unified_from_keychain()?,
+        };
+        let mut next = base;
+        next.mcp.insert(ck, value.to_string());
+        next
     };
-    s.mcp.insert(ck, value.to_string());
-    save_unified_to_keychain(s)
+    save_unified_to_keychain(&snapshot)?;
+    let mut guard = lock_secrets()?;
+    *guard = Some(snapshot);
+    Ok(())
 }
 
 pub fn load_mcp_secret(tool_id: &str, env_key: &str) -> Result<String, SecureStoreError> {
@@ -402,22 +414,28 @@ pub fn load_mcp_secret(tool_id: &str, env_key: &str) -> Result<String, SecureSto
 
 pub fn delete_mcp_secret(tool_id: &str, env_key: &str) -> Result<(), SecureStoreError> {
     let ck = composite_key(tool_id, env_key);
-    let mut guard = lock_secrets()?;
-    let s = match guard.as_mut() {
-        Some(x) => x,
-        None => {
-            *guard = Some(load_unified_from_keychain()?);
-            guard.as_mut().unwrap()
-        }
+    let snapshot = {
+        let guard = lock_secrets()?;
+        let base = match guard.as_ref() {
+            Some(x) => x.clone(),
+            None => load_unified_from_keychain()?,
+        };
+        let mut next = base;
+        next.mcp.remove(&ck);
+        next
     };
-    s.mcp.remove(&ck);
-    save_unified_to_keychain(s)
+    save_unified_to_keychain(&snapshot)?;
+    let mut guard = lock_secrets()?;
+    *guard = Some(snapshot);
+    Ok(())
 }
 
 #[derive(Debug)]
 pub enum SecureStoreError {
     NotFound,
     UserCancelled,
+    /// Keychain rejected access (e.g. locked, auth failed) without an explicit user cancel.
+    AuthFailed,
     Unsupported,
     Backend(String),
 }
@@ -427,6 +445,7 @@ impl std::fmt::Display for SecureStoreError {
         match self {
             Self::NotFound => write!(f, "secret not found"),
             Self::UserCancelled => write!(f, "user cancelled authentication"),
+            Self::AuthFailed => write!(f, "keychain authentication failed (locked or denied)"),
             Self::Unsupported => write!(f, "secure store not supported on this platform yet"),
             Self::Backend(msg) => write!(f, "secure store error: {msg}"),
         }

@@ -1,42 +1,7 @@
-import * as ScrollArea from "@radix-ui/react-scroll-area";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { installClawHubSkill, searchClawHub, searchClawHubPlugins } from "../api";
 import type { ClawHubPlugin, ClawHubSkill } from "../types";
-
-function formatClawHubUpdated(ms: number): string {
-  const d = new Date(ms);
-  if (Number.isNaN(d.getTime())) return "—";
-  return d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
-}
-
-function clawHubSkillDetailUrl(slug: string): string {
-  return `https://clawhub.ai/openclaw/${encodeURIComponent(slug)}`;
-}
-
-/** Match ClawHub list-style compact numbers (e.g. 39.1k). */
-function fmtCompact(n: number): string {
-  if (!Number.isFinite(n)) return "—";
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
-  if (n >= 100_000) return `${Math.round(n / 1000)}k`;
-  if (n >= 1000) return `${(n / 1000).toFixed(1).replace(/\.0$/, "")}k`;
-  return String(n);
-}
-
-function formatClawHubStatsPrimary(entry: ClawHubSkill): string {
-  const parts: string[] = [];
-  if (entry.downloads != null) parts.push(fmtCompact(entry.downloads));
-  if (entry.stars != null) parts.push(`★ ${entry.stars}`);
-  if (entry.versionCount != null) parts.push(`${entry.versionCount} v`);
-  return parts.length > 0 ? parts.join(" · ") : "—";
-}
-
-function formatClawHubStatsInstalls(entry: ClawHubSkill): string | null {
-  if (entry.installsCurrent == null && entry.installsAllTime == null) return null;
-  const bits: string[] = [];
-  if (entry.installsCurrent != null) bits.push(`${fmtCompact(entry.installsCurrent)} cur`);
-  if (entry.installsAllTime != null) bits.push(`${fmtCompact(entry.installsAllTime)} all`);
-  return bits.join(" · ");
-}
+import { ClawHubPluginsResultsSection, ClawHubSkillsResultsSection } from "./ClawHubBrowseParts";
 
 const CLAW_SORT_OPTIONS = [
   { value: "downloads", label: "Downloads" },
@@ -48,8 +13,6 @@ const CLAW_SORT_OPTIONS = [
 ] as const;
 
 const SEARCH_PAGE_SIZE = 30;
-/** Approximate ClawHub plugin registry size (for UI copy); list still loads until `nextCursor` ends. */
-const CLAWHUB_PLUGINS_CATALOG_ESTIMATE = 55_561;
 
 function FilterChip({
   active,
@@ -194,7 +157,7 @@ export function ClawHubBrowse({ onClose, onAfterSkillInstall }: ClawHubBrowsePro
     const t = pluginTagFilter.trim().toLowerCase();
     if (!t) return pluginResults;
     return pluginResults.filter((p) =>
-      p.capabilityTags.some((tag) => tag.toLowerCase().includes(t)),
+      p.capabilityTags.some((tag: string) => tag.toLowerCase().includes(t)),
     );
   }, [pluginResults, pluginTagFilter]);
 
@@ -394,223 +357,29 @@ export function ClawHubBrowse({ onClose, onAfterSkillInstall }: ClawHubBrowsePro
         </p>
       )}
 
-      {clawRegistry === "skills" && results && results.length === 0 && !browseLoading && (
-        <p className="mt-3 subtle-copy">No matches.</p>
-      )}
-      {clawRegistry === "skills" && results && results.length > 0 && (
-        <p className="mt-2 font-mono text-[10px] text-white/40">
-          {results.length} skill{results.length === 1 ? "" : "s"} shown
-          <span className="text-white/32"> · author &amp; stats from ClawHub when available</span>
-        </p>
-      )}
-      {clawRegistry === "skills" && results && results.length > 0 && (
-        <ScrollArea.Root className="mt-2 h-[440px] overflow-hidden rounded-lg border border-white/10 bg-black/10">
-          <ScrollArea.Viewport ref={listViewportRef} className="h-full w-full">
-            <div className="hidden min-w-[44rem] grid-cols-[minmax(0,1.1fr)_minmax(0,2.2fr)_5.5rem_minmax(0,7.5rem)_5.5rem] gap-x-2 border-b border-white/10 bg-white/[0.04] px-3 py-1.5 font-mono text-[9px] uppercase tracking-[0.12em] text-white/45 md:grid">
-              <div>Skill</div>
-              <div>Summary</div>
-              <div>Author</div>
-              <div>Stats</div>
-              <div className="text-right"> </div>
-            </div>
-            <div className="min-w-0 divide-y divide-white/10">
-              {results.map((entry) => {
-                const installsSub = formatClawHubStatsInstalls(entry);
-                return (
-                  <div
-                    key={entry.slug}
-                    role="row"
-                    className="min-w-[44rem] px-3 py-2.5 md:grid md:grid-cols-[minmax(0,1.1fr)_minmax(0,2.2fr)_5.5rem_minmax(0,7.5rem)_5.5rem] md:items-start md:gap-x-2 md:py-2"
-                  >
-                    <div className="min-w-0 md:pt-0.5">
-                      <p className="break-words text-sm font-semibold text-white">
-                        {entry.displayName}
-                      </p>
-                      <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1">
-                        {entry.isHighlighted === true && (
-                          <span className="rounded-full border border-amber-300/30 bg-amber-300/10 px-1.5 py-px font-mono text-[8px] font-medium text-amber-200/95">
-                            Highlighted
-                          </span>
-                        )}
-                        {entry.isOfficial === true && (
-                          <span className="rounded-full border border-cyan-300/25 bg-cyan-300/10 px-1.5 py-px font-mono text-[8px] font-medium text-cyan-200/90">
-                            Official
-                          </span>
-                        )}
-                        {entry.version != null && entry.version !== "" && (
-                          <span className="font-mono text-[9px] text-white/50">
-                            v{entry.version}
-                          </span>
-                        )}
-                      </div>
-                      <p className="mt-0.5 break-all font-mono text-[9px] text-white/35">
-                        {entry.slug}
-                      </p>
-                      {(entry.updatedAt != null ||
-                        (entry.score != null && Number.isFinite(entry.score))) && (
-                        <p className="mt-1 font-mono text-[8px] leading-relaxed text-white/32">
-                          {entry.updatedAt != null && (
-                            <>Upd {formatClawHubUpdated(entry.updatedAt)}</>
-                          )}
-                          {entry.updatedAt != null &&
-                            entry.score != null &&
-                            Number.isFinite(entry.score) &&
-                            " · "}
-                          {entry.score != null && Number.isFinite(entry.score) && (
-                            <>score {entry.score.toFixed(2)}</>
-                          )}
-                        </p>
-                      )}
-                    </div>
-                    <div className="mt-2 min-w-0 md:mt-0 md:pt-0.5">
-                      <p className="break-words text-[11px] leading-snug text-(--mid)">
-                        {entry.summary}
-                      </p>
-                    </div>
-                    <div className="mt-2 font-mono text-[10px] text-white/55 md:mt-0 md:pt-1">
-                      <span className="text-white/35 md:hidden">Author </span>
-                      {entry.ownerHandle ? (
-                        <span className="break-all text-cyan-200/85">@{entry.ownerHandle}</span>
-                      ) : (
-                        <span className="text-white/30">—</span>
-                      )}
-                    </div>
-                    <div className="mt-1 min-w-0 font-mono text-[10px] tabular-nums text-white/65 md:mt-0 md:pt-1">
-                      <span className="text-white/35 md:hidden">Stats </span>
-                      <span className="break-words">{formatClawHubStatsPrimary(entry)}</span>
-                      {installsSub && (
-                        <span className="mt-0.5 block break-words text-[9px] text-white/40">
-                          {installsSub}
-                          {entry.commentsCount != null ? ` · ${entry.commentsCount} comments` : ""}
-                        </span>
-                      )}
-                      {!installsSub && entry.commentsCount != null && (
-                        <span className="mt-0.5 block text-[9px] text-white/40">
-                          {entry.commentsCount} comments
-                        </span>
-                      )}
-                    </div>
-                    <div className="mt-2 flex shrink-0 flex-col gap-1.5 md:mt-0 md:items-end md:pt-0.5">
-                      <button
-                        type="button"
-                        onClick={() => void handleInstall(entry)}
-                        disabled={installingSlug !== null}
-                        className="w-full rounded-lg border border-emerald-300/20 bg-emerald-300/10 px-2.5 py-1 font-mono text-[10px] text-emerald-300 transition hover:bg-emerald-300/20 disabled:opacity-40 md:w-auto"
-                      >
-                        {installingSlug === entry.slug ? "Installing…" : "Install"}
-                      </button>
-                      <a
-                        href={clawHubSkillDetailUrl(entry.slug)}
-                        target="_blank"
-                        rel="noreferrer"
-                        title="Open full skill page on ClawHub (OpenClaw registry)"
-                        className="w-full rounded-lg border border-white/15 bg-white/8 px-2.5 py-1 text-center font-mono text-[10px] text-white/85 transition hover:bg-white/14 md:w-auto"
-                      >
-                        Details
-                      </a>
-                    </div>
-                  </div>
-                );
-              })}
-              {(hasMoreSkills || loadingMore) && (
-                <div
-                  ref={loadMoreRef}
-                  className="py-2 text-center font-mono text-[10px] text-white/45"
-                >
-                  {loadingMore ? "Loading more…" : "Scroll for more"}
-                </div>
-              )}
-            </div>
-          </ScrollArea.Viewport>
-          <ScrollArea.Scrollbar
-            orientation="vertical"
-            className="flex w-2.5 touch-none select-none border-l border-l-white/5 bg-white/5 p-0.5"
-          >
-            <ScrollArea.Thumb className="relative flex-1 rounded-full bg-white/20" />
-          </ScrollArea.Scrollbar>
-          <ScrollArea.Corner className="bg-white/5" />
-        </ScrollArea.Root>
-      )}
+      <ClawHubSkillsResultsSection
+        active={clawRegistry === "skills"}
+        browseLoading={browseLoading}
+        results={results}
+        listViewportRef={listViewportRef}
+        loadMoreRef={loadMoreRef}
+        hasMoreSkills={hasMoreSkills}
+        loadingMore={loadingMore}
+        installingSlug={installingSlug}
+        onInstallSkill={handleInstall}
+      />
 
-      {clawRegistry === "plugins" &&
-        visiblePlugins &&
-        visiblePlugins.length === 0 &&
-        !browseLoading && (
-          <p className="mt-3 subtle-copy">
-            {pluginResults?.length ? "No plugins match this tag filter." : "No matches."}
-          </p>
-        )}
-      {clawRegistry === "plugins" && pluginResults && (
-        <p className="mt-2 font-mono text-[10px] text-white/40">
-          {pluginResults.length.toLocaleString()} loaded
-          {hasMorePlugins ? " · scroll for more" : " · end of list"}
-          {!pluginTagFilter.trim() ? (
-            <span className="text-white/32">
-              {" "}
-              · ~{CLAWHUB_PLUGINS_CATALOG_ESTIMATE.toLocaleString()} in registry
-            </span>
-          ) : null}
-          {pluginTagFilter.trim() && visiblePlugins && pluginResults.length > 0 ? (
-            <span className="text-white/32">
-              {" "}
-              · {visiblePlugins.length.toLocaleString()} match tag filter
-            </span>
-          ) : null}
-        </p>
-      )}
-      {clawRegistry === "plugins" && visiblePlugins && visiblePlugins.length > 0 && (
-        <ScrollArea.Root className="mt-2 h-[440px] overflow-hidden rounded-lg border border-white/10 bg-black/10">
-          <ScrollArea.Viewport ref={listViewportRef} className="h-full w-full">
-            <div className="grid min-w-0 gap-2 p-2">
-              {visiblePlugins.map((p) => (
-                <div
-                  key={p.name}
-                  className="flex min-w-0 flex-col gap-3 rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 sm:flex-row sm:items-start sm:justify-between sm:gap-3"
-                >
-                  <div className="min-w-0 flex-1">
-                    <p className="break-words text-sm font-semibold text-white">{p.displayName}</p>
-                    <p className="mt-0.5 break-all font-mono text-[10px] text-(--mid)">
-                      {p.name}
-                      {p.ownerHandle ? ` · @${p.ownerHandle}` : ""}
-                    </p>
-                    <p className="mt-1 break-words text-[11px] leading-snug text-(--mid)">
-                      {p.summary}
-                    </p>
-                    {p.capabilityTags.length > 0 && (
-                      <p className="mt-1.5 break-words font-mono text-[9px] leading-snug text-white/40">
-                        {p.capabilityTags.join(" · ")}
-                      </p>
-                    )}
-                  </div>
-                  <a
-                    href={`https://clawhub.ai/plugins/${encodeURIComponent(p.name)}`}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="shrink-0 self-stretch rounded-lg border border-white/15 bg-white/8 px-3 py-1 text-center font-mono text-[11px] text-white/85 transition hover:bg-white/14 sm:self-auto"
-                  >
-                    Open
-                  </a>
-                </div>
-              ))}
-              {(hasMorePlugins || loadingMore) && (
-                <div
-                  ref={loadMoreRef}
-                  className="py-1 text-center font-mono text-[10px] text-white/45"
-                >
-                  {loadingMore ? "Loading more…" : "Scroll for more"}
-                </div>
-              )}
-            </div>
-          </ScrollArea.Viewport>
-          <ScrollArea.Scrollbar
-            orientation="vertical"
-            className="flex w-2.5 touch-none select-none border-l border-l-white/5 bg-white/5 p-0.5"
-          >
-            <ScrollArea.Thumb className="relative flex-1 rounded-full bg-white/20" />
-          </ScrollArea.Scrollbar>
-          <ScrollArea.Corner className="bg-white/5" />
-        </ScrollArea.Root>
-      )}
+      <ClawHubPluginsResultsSection
+        active={clawRegistry === "plugins"}
+        browseLoading={browseLoading}
+        pluginResults={pluginResults}
+        visiblePlugins={visiblePlugins}
+        pluginTagFilter={pluginTagFilter}
+        listViewportRef={listViewportRef}
+        loadMoreRef={loadMoreRef}
+        hasMorePlugins={hasMorePlugins}
+        loadingMore={loadingMore}
+      />
     </div>
   );
 }

@@ -13,6 +13,8 @@ import {
   envToOtherLinesText,
   extractPrimarySecretEnvKey,
 } from "../mcpEnvHelpers";
+import { FolderHelper } from "./McpServerCardFolderHelper";
+import { TeFileManagerMountPanel, TePrivateDataFolderPanel } from "./McpServerCardTePanels";
 
 /** `pengine/memory` → `te_pengine-memory` (matches Rust `server_key`). */
 function teServerKeyForToolId(toolId: string): string {
@@ -465,97 +467,29 @@ function InlineEditForm({
 
       <div className="grid gap-3">
         {isTeFileManager && (
-          <div className="rounded-lg border border-emerald-300/15 bg-emerald-300/5 p-3">
-            <p className="mb-2 font-mono text-[10px] uppercase tracking-wider text-emerald-200/80">
-              Shared folders (File Manager container mounts)
-            </p>
-            <p className="mb-2 text-[11px] leading-snug text-(--mid)">
-              After File Manager is installed, add paths here (or install it first from Tool Engine
-              with an empty list). Each folder mounts as{" "}
-              <code className="text-white/70">/app/&lt;name&gt;</code>. Apply updates{" "}
-              <code className="text-white/70">workspace_roots</code> in{" "}
-              <code className="text-white/70">mcp.json</code> and closes the editor.
-            </p>
-            {tePaths.length > 0 && (
-              <ul className="mb-2 list-inside list-disc font-mono text-[10px] leading-relaxed text-emerald-100/80">
-                {tePaths.map((p, i) => (
-                  <li key={`${p}-${i}`}>
-                    <span className="text-white/90">{teAppMounts[i] ?? ""}</span>
-                    <span className="text-(--mid)"> ← </span>
-                    <span className="break-all text-white/70">{p}</span>
-                  </li>
-                ))}
-              </ul>
-            )}
-            <FolderHelper
-              paths={tePaths}
-              pickError={tePickError}
-              onAdd={addTePath}
-              onRemove={removeTePath}
-              onPickFolder={() => void pickTeFolder()}
-            />
-            {teApplyError && (
-              <p className="mt-2 font-mono text-[11px] text-rose-300" role="alert">
-                {teApplyError}
-              </p>
-            )}
-            <button
-              type="button"
-              disabled={teApplyBusy}
-              onClick={() => void applyTeFolders()}
-              className="mt-3 rounded-lg border border-emerald-300/30 bg-emerald-300/15 px-3 py-1.5 font-mono text-[11px] text-emerald-100 hover:bg-emerald-300/25 disabled:opacity-40"
-            >
-              {teApplyBusy ? "Applying…" : "Apply folders"}
-            </button>
-          </div>
+          <TeFileManagerMountPanel
+            tePaths={tePaths}
+            teAppMounts={teAppMounts}
+            tePickError={tePickError}
+            teApplyError={teApplyError}
+            teApplyBusy={teApplyBusy}
+            onAddPath={addTePath}
+            onRemovePath={removeTePath}
+            onPickFolder={() => void pickTeFolder()}
+            onApply={() => void applyTeFolders()}
+          />
         )}
 
         {tePrivateToolId && (
-          <div className="rounded-lg border border-fuchsia-300/15 bg-fuchsia-300/5 p-3">
-            <p className="mb-2 font-mono text-[10px] uppercase tracking-wider text-fuchsia-200/80">
-              Private data folder (host)
-            </p>
-            <p className="mb-2 text-[11px] leading-snug text-(--mid)">
-              This tool keeps state on disk in a single host directory (bind-mounted into the
-              container). Use Choose folder or paste a path, then Apply — same idea as File
-              Manager&apos;s shared folders, but only for this tool&apos;s data file(s).
-            </p>
-            {tePrivatePickError && (
-              <p className="mb-2 font-mono text-[11px] text-rose-300/90" role="alert">
-                {tePrivatePickError}
-              </p>
-            )}
-            <div className="flex gap-1.5">
-              <input
-                type="text"
-                value={tePrivatePathInput}
-                onChange={(e) => setTePrivatePathInput(e.target.value)}
-                placeholder="/path/to/memory-data"
-                className="min-w-0 flex-1 rounded-md border border-white/15 bg-white/5 px-2 py-1.5 font-mono text-[11px] text-white outline-none placeholder:text-white/20 focus:border-white/30"
-              />
-              <button
-                type="button"
-                onClick={() => void pickTePrivateFolder()}
-                className="shrink-0 rounded-md border border-fuchsia-300/25 bg-fuchsia-300/10 px-2 py-1.5 font-mono text-[10px] text-fuchsia-100/90 hover:bg-fuchsia-300/20"
-                title="Choose folder (desktop only)"
-              >
-                Choose folder
-              </button>
-            </div>
-            {tePrivateApplyError && (
-              <p className="mt-2 font-mono text-[11px] text-rose-300" role="alert">
-                {tePrivateApplyError}
-              </p>
-            )}
-            <button
-              type="button"
-              disabled={tePrivateApplyBusy}
-              onClick={() => void applyTePrivateFolder()}
-              className="mt-3 rounded-lg border border-fuchsia-300/30 bg-fuchsia-300/15 px-3 py-1.5 font-mono text-[11px] text-fuchsia-100 hover:bg-fuchsia-300/25 disabled:opacity-40"
-            >
-              {tePrivateApplyBusy ? "Applying…" : "Apply data folder"}
-            </button>
-          </div>
+          <TePrivateDataFolderPanel
+            pathInput={tePrivatePathInput}
+            onPathChange={setTePrivatePathInput}
+            pickError={tePrivatePickError}
+            applyError={tePrivateApplyError}
+            applyBusy={tePrivateApplyBusy}
+            onPickFolder={() => void pickTePrivateFolder()}
+            onApply={() => void applyTePrivateFolder()}
+          />
         )}
 
         {/* Filesystem folder helper (npx server-filesystem) */}
@@ -716,103 +650,6 @@ function InlineEditForm({
           className="rounded-lg border border-white/15 bg-transparent px-3 py-1.5 text-xs text-(--mid) hover:text-white"
         >
           Cancel
-        </button>
-      </div>
-    </div>
-  );
-}
-
-// ── Folder path helper (visual add/remove for filesystem paths) ─────
-
-export function FolderHelper({
-  paths,
-  pickError,
-  onAdd,
-  onRemove,
-  onPickFolder,
-}: {
-  paths: string[];
-  pickError: string | null;
-  onAdd: (p: string) => void;
-  onRemove: (path: string) => void;
-  onPickFolder: () => void;
-}) {
-  const [newPath, setNewPath] = useState("");
-
-  const handleAdd = () => {
-    if (newPath.trim()) {
-      onAdd(newPath);
-      setNewPath("");
-    }
-  };
-
-  return (
-    <div className="rounded-lg border border-white/10 bg-black/20 p-3">
-      <p className="mb-2 font-mono text-[10px] uppercase tracking-wider text-(--mid)">
-        Allowed folders
-      </p>
-
-      {paths.length === 0 && <p className="mb-2 text-xs text-white/30 italic">No folders yet</p>}
-
-      {pickError && (
-        <p className="mb-2 font-mono text-[11px] text-rose-300/90" role="alert">
-          {pickError}
-        </p>
-      )}
-
-      {paths.length > 0 && (
-        <div className="mb-2 grid gap-1">
-          {paths.map((p, i) => (
-            <div
-              key={`${p}-${i}`}
-              className="flex items-center gap-2 rounded-md border border-white/8 bg-white/5 px-2 py-1"
-            >
-              <p className="min-w-0 flex-1 truncate font-mono text-[11px] text-white/80" title={p}>
-                {p}
-              </p>
-              <button
-                type="button"
-                onClick={() => onRemove(p)}
-                aria-label={`Remove allowed folder ${p}`}
-                title="Remove folder"
-                className="shrink-0 font-mono text-[10px] text-rose-300/50 hover:text-rose-200"
-              >
-                x
-              </button>
-            </div>
-          ))}
-        </div>
-      )}
-
-      <div className="flex gap-1.5">
-        <input
-          type="text"
-          value={newPath}
-          onChange={(e) => setNewPath(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && newPath.trim()) {
-              e.preventDefault();
-              handleAdd();
-            }
-          }}
-          placeholder="/path/to/folder"
-          className="min-w-0 flex-1 rounded-md border border-white/15 bg-white/5 px-2 py-1.5 font-mono text-[11px] text-white outline-none placeholder:text-white/20 focus:border-white/30"
-        />
-        <button
-          type="button"
-          disabled={!newPath.trim()}
-          onClick={handleAdd}
-          className="shrink-0 rounded-md border border-white/15 bg-white/8 px-2 py-1.5 font-mono text-[10px] text-white/70 hover:bg-white/15 hover:text-white disabled:opacity-30"
-        >
-          add
-        </button>
-        <button
-          type="button"
-          onClick={onPickFolder}
-          className="shrink-0 rounded-md border border-white/15 bg-transparent px-2 py-1.5 font-mono text-[10px] text-(--mid) hover:border-white/25 hover:text-white"
-          title="Choose folder (desktop only)"
-        >
-          browse
         </button>
       </div>
     </div>

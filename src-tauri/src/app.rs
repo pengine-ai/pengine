@@ -28,25 +28,42 @@ pub fn run() {
             // Warm unified secrets once before MCP rebuild and bot resume (avoids parallel prompts).
             // If legacy per-bot / per-MCP items still exist, migration may touch the keychain again
             // (a second prompt on first launch after upgrade is normal).
+            //
+            // Run on a plain `std::thread` (not `tokio::task::spawn_blocking` + `block_on`): during
+            // Tao's `did_finish_launching` the Tokio runtime may not accept blocking tasks yet; that
+            // combination panicked with `panic_cannot_unwind` on macOS and aborted the process.
             {
-                let mut warm_mig: Vec<String> = Vec::new();
-                let meta_for_warm = repository::load(&path, &mut warm_mig);
-                for line in warm_mig {
-                    log::info!("{line}");
-                }
-                let bot_ids: Vec<String> = meta_for_warm
-                    .as_ref()
-                    .map(|m| vec![m.bot_id.clone()])
-                    .unwrap_or_default();
-                let mcp_pairs = match mcp_service::load_or_init_config(&mcp_path) {
-                    Ok(cfg) => mcp_service::catalog_passthrough_key_pairs(&cfg),
-                    Err(e) => {
-                        log::warn!("warm_app_secrets: skipped mcp pairs ({e})");
-                        Vec::new()
+                let path_w = path.clone();
+                let mcp_path_w = mcp_path.clone();
+                match std::thread::Builder::new()
+                    .name("pengine-warm-secrets".into())
+                    .spawn(move || {
+                        let mut warm_mig: Vec<String> = Vec::new();
+                        let meta_for_warm = repository::load(&path_w, &mut warm_mig);
+                        for line in warm_mig {
+                            log::info!("{line}");
+                        }
+                        let bot_ids: Vec<String> = meta_for_warm
+                            .as_ref()
+                            .map(|m| vec![m.bot_id.clone()])
+                            .unwrap_or_default();
+                        let mcp_pairs = match mcp_service::load_or_init_config(&mcp_path_w) {
+                            Ok(cfg) => mcp_service::catalog_passthrough_key_pairs(&cfg),
+                            Err(e) => {
+                                log::warn!("warm_app_secrets: skipped mcp pairs ({e})");
+                                Vec::new()
+                            }
+                        };
+                        if let Err(e) = secure_store::warm_app_secrets(&bot_ids, &mcp_pairs) {
+                            log::warn!("warm_app_secrets failed: {e}");
+                        }
+                    }) {
+                    Ok(handle) => {
+                        if let Err(e) = handle.join() {
+                            log::error!("warm_app_secrets thread panicked: {e:?}");
+                        }
                     }
-                };
-                if let Err(e) = secure_store::warm_app_secrets(&bot_ids, &mcp_pairs) {
-                    log::warn!("warm_app_secrets failed: {e}");
+                    Err(e) => log::warn!("warm_app_secrets: could not spawn thread ({e})"),
                 }
             }
 

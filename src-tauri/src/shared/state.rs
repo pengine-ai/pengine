@@ -1,6 +1,7 @@
 use crate::modules::mcp::registry::ToolRegistry;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::Emitter;
@@ -12,12 +13,23 @@ const TOOL_CTX_LATENCY_CAP: usize = 128;
 /// In-memory connection record. Holds the plaintext bot token while the bot runs.
 /// Not serializable on purpose — the token must never reach disk. Use
 /// `ConnectionMetadata` for anything persisted to `connection.json`.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ConnectionData {
     pub bot_token: String,
     pub bot_id: String,
     pub bot_username: String,
     pub connected_at: DateTime<Utc>,
+}
+
+impl fmt::Debug for ConnectionData {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ConnectionData")
+            .field("bot_token", &"<redacted>")
+            .field("bot_id", &self.bot_id)
+            .field("bot_username", &self.bot_username)
+            .field("connected_at", &self.connected_at)
+            .finish()
+    }
 }
 
 /// Persisted shape of `connection.json`. The bot token lives in the OS keychain and

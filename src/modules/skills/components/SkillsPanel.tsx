@@ -4,6 +4,7 @@ import { fetchUserSettings, putUserSettings } from "../../settings";
 import { addSkill, deleteSkill, fetchSkills, setSkillEnabled } from "../api";
 import type { Skill } from "../types";
 import { ClawHubBrowse } from "./ClawHubBrowse";
+import { SkillsContextBytesSlider } from "./SkillsContextBytesSlider";
 
 function formatContextKiB(bytes: number): string {
   const kb = bytes / 1024;
@@ -89,6 +90,7 @@ export function SkillsPanel() {
   const [ctxLoaded, setCtxLoaded] = useState(false);
   const [ctxSaving, setCtxSaving] = useState(false);
   const [ctxErr, setCtxErr] = useState<string | null>(null);
+  const [ctxSettingsErr, setCtxSettingsErr] = useState<string | null>(null);
 
   const cancelledRef = useRef(false);
 
@@ -117,7 +119,15 @@ export function SkillsPanel() {
     let gone = false;
     (async () => {
       const us = await fetchUserSettings(4000);
-      if (gone || !us) return;
+      if (gone) return;
+      if (!us) {
+        setCtxSettingsErr(
+          "Could not load settings from Pengine (offline or server error). Using built-in defaults for the slider limits.",
+        );
+        setCtxLoaded(true);
+        return;
+      }
+      setCtxSettingsErr(null);
       setCtxBytes(us.skills_hint_max_bytes);
       setCtxSaved(us.skills_hint_max_bytes);
       setCtxMin(us.skills_hint_max_bytes_min);
@@ -254,15 +264,13 @@ export function SkillsPanel() {
             </span>
           </div>
           <div className="flex min-w-0 flex-1 flex-col gap-1">
-            <input
-              type="range"
+            <SkillsContextBytesSlider
               min={ctxMin}
               max={ctxMax}
               step={1024}
-              value={Math.min(ctxMax, Math.max(ctxMin, ctxBytes))}
+              value={ctxBytes}
               disabled={!ctxLoaded || ctxSaving}
-              onChange={(e) => setCtxBytes(Number(e.target.value))}
-              className="h-1.5 w-full cursor-pointer accent-cyan-400 disabled:opacity-40"
+              onValueChange={setCtxBytes}
               aria-label="Skills context size in bytes"
             />
             <p className="font-mono text-[9px] text-white/35">
@@ -290,6 +298,11 @@ export function SkillsPanel() {
             </button>
           </div>
         </div>
+        {ctxSettingsErr && (
+          <p className="mt-1.5 font-mono text-[10px] text-amber-200/90" role="status">
+            {ctxSettingsErr}
+          </p>
+        )}
         {ctxErr && (
           <p className="mt-1.5 font-mono text-[10px] text-rose-300" role="alert">
             {ctxErr}

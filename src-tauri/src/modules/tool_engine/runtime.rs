@@ -32,8 +32,12 @@ async fn try_runtime(binary_name: &str, kind: RuntimeKind) -> Option<RuntimeInfo
 }
 
 async fn try_runtime_at(path: &Path, kind: RuntimeKind) -> Option<RuntimeInfo> {
+    // Use `--version` instead of `version --format=…`: `podman version` talks to the machine
+    // socket and fails with "Cannot connect to Podman" when the VM is stopped, even though the
+    // CLI is installed. `docker version` can also exit non-zero when the daemon is down while
+    // still printing the client version. `--version` is client-only and succeeds if the binary exists.
     let output = tokio::process::Command::new(path)
-        .args(["version", "--format", "{{.Client.Version}}"])
+        .arg("--version")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .output()
@@ -44,7 +48,8 @@ async fn try_runtime_at(path: &Path, kind: RuntimeKind) -> Option<RuntimeInfo> {
         return None;
     }
 
-    let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let version = parse_dash_version(kind, &raw)?.to_string();
     if version.is_empty() {
         return None;
     }
@@ -64,6 +69,33 @@ async fn try_runtime_at(path: &Path, kind: RuntimeKind) -> Option<RuntimeInfo> {
     })
 }
 
+/// Parse `podman --version` / `docker --version` stdout into a semver-ish version token.
+fn parse_dash_version(kind: RuntimeKind, stdout: &str) -> Option<&str> {
+    let line = stdout.lines().next()?.trim();
+    let mut parts = line.split_whitespace();
+    match kind {
+        RuntimeKind::Podman => {
+            if parts.next()? != "podman" {
+                return None;
+            }
+            if parts.next()? != "version" {
+                return None;
+            }
+            parts.next()
+        }
+        RuntimeKind::Docker => {
+            if !parts.next()?.eq_ignore_ascii_case("docker") {
+                return None;
+            }
+            if !parts.next()?.eq_ignore_ascii_case("version") {
+                return None;
+            }
+            let ver = parts.next()?;
+            Some(ver.trim_end_matches(','))
+        }
+    }
+}
+
 async fn check_docker_rootless(binary: &Path) -> bool {
     let output = tokio::process::Command::new(binary)
         .args(["info", "--format", "{{.SecurityOptions}}"])
@@ -76,4 +108,39 @@ async fn check_docker_rootless(binary: &Path) -> bool {
     output
         .map(|o| String::from_utf8_lossy(&o.stdout).contains("rootless"))
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_dash_version_podman() {
+        assert_eq!(
+            parse_dash_version(RuntimeKind::Podman, "podman version 5.8.1\n"),
+            Some("5.8.1")
+        );
+        assert_eq!(
+            parse_dash_version(RuntimeKind::Podman, "Docker version 29.0.0\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_dash_version_docker() {
+        assert_eq!(
+            parse_dash_version(
+                RuntimeKind::Docker,
+                "Docker version 29.3.1, build c2be9ccfc3\n"
+            ),
+            Some("29.3.1")
+        );
+        assert_eq!(
+            parse_dash_version(
+                RuntimeKind::Docker,
+                "docker version 24.0.6, build ed223bc\n"
+            ),
+            Some("24.0.6")
+        );
+    }
 }

@@ -653,7 +653,6 @@ fn route_tools(
 }
 
 fn message_suggests_url_fetch(msg: &str) -> bool {
-    let lower = msg.to_lowercase();
     const HINTS: &[&str] = &[
         "wetter",
         "weather",
@@ -703,7 +702,9 @@ fn message_suggests_url_fetch(msg: &str) -> bool {
         "gameinformer",
         "game informer",
     ];
-    HINTS.iter().any(|h| lower.contains(h))
+    HINTS
+        .iter()
+        .any(|h| crate::modules::skills::service::user_message_needle_match(msg, h))
 }
 
 fn score_tool_combined(
