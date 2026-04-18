@@ -17,6 +17,8 @@ doc/
 
 Product overview: [../README.md](../README.md).
 
+**Coding assistants:** Repo root **[../AGENTS.md](../AGENTS.md)** points here and lists a **task → doc → source file** reading order. Use it so changes respect DDD boundaries (`architecture/README.md` before moving code).
+
 ---
 
 ## Topics
@@ -50,8 +52,8 @@ Product overview: [../README.md](../README.md).
 
 | Doc | Purpose |
 | --- | --- |
-| [guides/skills.md](guides/skills.md) | Skill format, ClawHub, bundled vs custom dirs |
-| [guides/custom-mcp-tools.md](guides/custom-mcp-tools.md) | `mcp.json`, stdio/native servers, Docker/custom tools, HTTP snippets |
+| [guides/skills.md](guides/skills.md) | Skills vs MCP, Dashboard behavior, `SKILL.md` / `mandatory.md`, context cap, troubleshooting |
+| [guides/custom-mcp-tools.md](guides/custom-mcp-tools.md) | Concepts, dashboard vs API, `mcp.json` paths, stdio fields, Docker/custom tools, pitfalls |
 
 ### Tool Engine (maintainers)
 

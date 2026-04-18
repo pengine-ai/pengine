@@ -21,7 +21,7 @@ Pengine is a local-first agent runtime: you talk to it from **Telegram** while i
 
 ## Documentation
 
-Developer and AI-oriented reference: **[doc/README.md](doc/README.md)** — topic index (`architecture/`, `agent/`, `platform/`, `reference/`, `guides/`, `tool-engine/`), feature map, and API pointers.
+Developer and AI-oriented reference: **[doc/README.md](doc/README.md)** — topic index (`architecture/`, `agent/`, `platform/`, `reference/`, `guides/`, `tool-engine/`), feature map, and API pointers. **AI coding assistants:** start with **[AGENTS.md](AGENTS.md)** (reading order and boundaries).
 
 ## Project layout
 
