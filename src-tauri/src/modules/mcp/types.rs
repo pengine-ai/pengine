@@ -39,10 +39,12 @@ pub enum ServerEntry {
         /// into the container. Defaults to `$APP_DATA/tool-data/<slug>/`; user overrides land here.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         private_host_path: Option<String>,
-        /// Persisted values for catalog `passthrough_env` keys (injected into `args` as
-        /// `podman|docker run --env=…`). Not applied to the host `podman` process via `env`.
-        #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-        catalog_passthrough: HashMap<String, String>,
+        /// Catalog `passthrough_env` keys whose secret values are stored in the OS keychain
+        /// (service `com.maximedogawa.pengine.mcp_passthrough`, account `<tool_id>::<key>`).
+        /// Injected into `args` as `--env=KEY=VAL` at spawn time in `connect_one_server`;
+        /// **never** written back to `mcp.json` alongside their values.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        catalog_passthrough_keys: Vec<String>,
     },
 }
 

@@ -421,10 +421,46 @@ const ROUTING_STOPWORDS: &[&str] = &[
     "about",
 ];
 
-/// Tools exposed on every turn regardless of routing. Keeps the model from
-/// getting stuck when keyword matching misses (short queries, non-English
-/// intent words, typos) — a tiny token cost for a big correctness win.
+/// Tools exposed on most routed turns when keyword matching is weak or the user
+/// may still need network/time without saying so explicitly. Omitted for short,
+/// high-confidence ranked picks (e.g. “roll a dice” → `roll_dice` only) to keep
+/// the Ollama `tools` payload small — see [`should_skip_always_on_tools`].
 const ALWAYS_ON_TOOL_NAMES: &[&str] = &["fetch", "time"];
+
+/// After ranked tools are chosen, skip appending `fetch`/`time` when the user
+/// message is short, at least one tool already matched, and nothing suggests
+/// URL fetch, weather, or memory — so trivial native calls stay a single tool.
+fn should_skip_always_on_tools(
+    user_message: &str,
+    recent_tool_names: &[String],
+    tools: &[ToolDef],
+    memory_server: Option<&str>,
+    chat_session_recording: bool,
+    ranked_nonempty: bool,
+) -> bool {
+    if !ranked_nonempty {
+        return false;
+    }
+    if chat_session_recording {
+        return false;
+    }
+    if memory_tools_relevant(
+        user_message,
+        recent_tool_names,
+        tools,
+        memory_server,
+        chat_session_recording,
+    ) {
+        return false;
+    }
+    if message_suggests_url_fetch(user_message) {
+        return false;
+    }
+    if user_message.split_whitespace().count() > 12 {
+        return false;
+    }
+    true
+}
 
 fn filter_brave_web_search(mut tools: Vec<ToolDef>, allow: bool) -> Vec<ToolDef> {
     if allow {
@@ -589,7 +625,17 @@ fn route_tools(
         }
     }
 
-    push_always_on_tools(tools, &mut selected, &mut seen);
+    let ranked_nonempty = !selected.is_empty();
+    if !should_skip_always_on_tools(
+        user_message,
+        recent_tool_names,
+        tools,
+        memory_server,
+        chat_session_recording,
+        ranked_nonempty,
+    ) {
+        push_always_on_tools(tools, &mut selected, &mut seen);
+    }
     if memory_tools_relevant(
         user_message,
         recent_tool_names,
@@ -607,7 +653,6 @@ fn route_tools(
 }
 
 fn message_suggests_url_fetch(msg: &str) -> bool {
-    let lower = msg.to_lowercase();
     const HINTS: &[&str] = &[
         "wetter",
         "weather",
@@ -642,8 +687,24 @@ fn message_suggests_url_fetch(msg: &str) -> bool {
         "readme",
         "oesterreich.gv",
         "bundesrecht",
+        // Short “news / headlines” queries often need `fetch`; without these,
+        // `should_skip_always_on_tools` can leave only an unrelated tool whose
+        // description happens to contain “news”.
+        "news",
+        "headlines",
+        "headline",
+        "breaking",
+        "rss",
+        "nachrichten",
+        "schlagzeilen",
+        "zeitung",
+        "presse",
+        "gameinformer",
+        "game informer",
     ];
-    HINTS.iter().any(|h| lower.contains(h))
+    HINTS
+        .iter()
+        .any(|h| crate::modules::skills::service::user_message_needle_match(msg, h))
 }
 
 fn score_tool_combined(
@@ -899,6 +960,102 @@ mod tests {
         let recent = vec!["beta".into(), "alpha".into()];
         let s = super::recent_tool_score(&t, &recent);
         assert!(s > 0);
+    }
+
+    #[test]
+    fn routing_gameinformer_news_includes_fetch_even_if_other_tools_match_news_token() {
+        let mut tools: Vec<ToolDef> = (0..12)
+            .map(|i| ToolDef {
+                server_name: "srv".into(),
+                name: format!("misc_{i}"),
+                description: None,
+                input_schema: json!({}),
+                direct_return: false,
+                category: None,
+                risk: ToolRisk::Low,
+            })
+            .collect();
+        for name in ["fetch", "time"] {
+            tools.push(ToolDef {
+                server_name: "srv".into(),
+                name: name.into(),
+                description: None,
+                input_schema: json!({}),
+                direct_return: false,
+                category: None,
+                risk: ToolRisk::Low,
+            });
+        }
+        tools.push(ToolDef {
+            server_name: "alerts".into(),
+            name: "push_news_digest".into(),
+            description: Some("Configure breaking news alerts and digest frequency.".into()),
+            input_schema: json!({"type": "object"}),
+            direct_return: false,
+            category: None,
+            risk: ToolRisk::Low,
+        });
+        let plan = super::route_tools(&tools, "gameinformer news", &[], None, false);
+        match plan {
+            super::ToolRoutePlan::Subset {
+                tools: sel,
+                routing,
+            } => {
+                assert_eq!(routing, "ranked");
+                assert!(
+                    sel.iter().any(|t| t.name == "fetch"),
+                    "fetch must be present so the model can load the site; got {sel:?}"
+                );
+            }
+            super::ToolRoutePlan::FullCatalog => panic!("expected ranked subset"),
+        }
+    }
+
+    #[test]
+    fn routing_roll_dice_short_query_skips_always_on_tools() {
+        let mut tools: Vec<ToolDef> = (0..12)
+            .map(|i| ToolDef {
+                server_name: "srv".into(),
+                name: format!("misc_{i}"),
+                description: None,
+                input_schema: json!({}),
+                direct_return: false,
+                category: None,
+                risk: ToolRisk::Low,
+            })
+            .collect();
+        for name in ["fetch", "time"] {
+            tools.push(ToolDef {
+                server_name: "srv".into(),
+                name: name.into(),
+                description: None,
+                input_schema: json!({}),
+                direct_return: false,
+                category: None,
+                risk: ToolRisk::Low,
+            });
+        }
+        tools.push(ToolDef {
+            server_name: "dice".into(),
+            name: "roll_dice".into(),
+            description: Some("Roll a die with the given number of sides.".into()),
+            input_schema: json!({"type": "object"}),
+            direct_return: true,
+            category: None,
+            risk: ToolRisk::Low,
+        });
+        let plan = super::route_tools(&tools, "roll a dice", &[], None, false);
+        match plan {
+            super::ToolRoutePlan::Subset {
+                tools: sel,
+                routing,
+            } => {
+                assert_eq!(routing, "ranked");
+                assert_eq!(sel.len(), 1, "{sel:?}");
+                assert_eq!(sel[0].name, "roll_dice");
+            }
+            super::ToolRoutePlan::FullCatalog => panic!("expected ranked subset"),
+        }
     }
 
     #[test]

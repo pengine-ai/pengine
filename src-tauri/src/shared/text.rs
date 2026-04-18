@@ -63,7 +63,8 @@ pub const PENGINE_POST_TOOL_REMINDER: &str = "\
 You have tool output. Respond in the user's language. REQUIRED: put ONLY the user-visible answer inside \
 <pengine_reply>...</pengine_reply>. Put any English or meta reasoning ONLY inside <pengine_plan>...</pengine_plan>. \
 Do not narrate tool usage, skills, or planning in plain text; no sentences outside those tags. \
-If several `fetch` results are present, some may show robots.txt or User-Agent blocks — still use any successful excerpts; do not tell the user that nothing could be retrieved when other blocks contain usable text.";
+If several `fetch` results are present, some may show robots.txt or User-Agent blocks — still use any successful excerpts; do not tell the user that nothing could be retrieved when other blocks contain usable text. \
+Do not call `fetch` again for the same URL in this turn; if you already have an excerpt for a URL, answer from it or pick a different URL.";
 
 fn looks_like_english_scratchpad(s: &str) -> bool {
     s.contains("Okay, let's")

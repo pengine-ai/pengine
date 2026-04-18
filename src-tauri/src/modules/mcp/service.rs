@@ -5,7 +5,7 @@ use super::client::McpClient;
 use super::native;
 use super::registry::{Provider, ToolRegistry};
 use super::types::{McpConfig, ServerEntry};
-use std::collections::HashMap;
+use crate::modules::secure_store;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::Emitter;
@@ -48,15 +48,168 @@ pub fn resolve_mcp_config_path(store_path: &Path) -> (PathBuf, &'static str) {
 
 pub fn read_config(path: &Path) -> Result<McpConfig, String> {
     let raw = std::fs::read_to_string(path).map_err(|e| format!("read mcp.json: {e}"))?;
-    let mut cfg: McpConfig = serde_json::from_str(&raw).map_err(|e| {
+    let mut value: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
         format!(
             "parse mcp.json: {e} — every server entry needs a \"type\" field (\"native\" or \"stdio\")"
         )
     })?;
-    if migrate_legacy_npx_filesystem(&mut cfg) {
+
+    // Must run before serde deserialises into `ServerEntry::Stdio` — the old field name
+    // (`catalog_passthrough`) no longer exists on the struct, so a plain `from_value` would
+    // silently drop any pre-migration secrets that are still sitting in `mcp.json`.
+    let migrated_passthrough = migrate_legacy_catalog_passthrough(&mut value)?;
+
+    let mut cfg: McpConfig = serde_json::from_value(value).map_err(|e| {
+        format!(
+            "parse mcp.json: {e} — every server entry needs a \"type\" field (\"native\" or \"stdio\")"
+        )
+    })?;
+    let migrated_npx = migrate_legacy_npx_filesystem(&mut cfg);
+    if migrated_passthrough || migrated_npx {
         save_config(path, &cfg)?;
     }
     Ok(cfg)
+}
+
+/// Derive a catalog tool id from its `mcp.json` server key (inverse of
+/// `tool_engine::service::server_key`). Returns `None` for non-catalog keys (`te_custom_*`,
+/// bare native entries, etc.) where there are no passthrough secrets to migrate or inject.
+fn tool_id_from_catalog_server_key(server_key: &str) -> Option<String> {
+    let rest = server_key.strip_prefix("te_")?;
+    if rest.starts_with("custom_") {
+        return None;
+    }
+    Some(rest.replacen('-', "/", 1))
+}
+
+/// Every `(catalog tool id, passthrough env key)` configured in `mcp.json` — used to warm the
+/// OS keychain blob once before connecting stdio servers (one unlock instead of N).
+pub fn catalog_passthrough_key_pairs(cfg: &McpConfig) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for (server_key, entry) in &cfg.servers {
+        let ServerEntry::Stdio {
+            catalog_passthrough_keys,
+            ..
+        } = entry
+        else {
+            continue;
+        };
+        let Some(tool_id) = tool_id_from_catalog_server_key(server_key) else {
+            continue;
+        };
+        if catalog_passthrough_keys.is_empty() {
+            continue;
+        }
+        for k in catalog_passthrough_keys {
+            let t = k.trim();
+            if !t.is_empty() {
+                out.push((tool_id.clone(), t.to_string()));
+            }
+        }
+    }
+    out
+}
+
+/// Move pre-migration `catalog_passthrough: {KEY: VAL}` secrets from `mcp.json` into the OS
+/// keychain, strip any `--env=KEY=VAL` in the stored argv for those keys, and replace the field
+/// with `catalog_passthrough_keys: [KEY, …]`. Operates on raw JSON so the serde model can drop
+/// the legacy field cleanly — serde would otherwise silently discard the secrets.
+fn migrate_legacy_catalog_passthrough(raw: &mut serde_json::Value) -> Result<bool, String> {
+    let Some(servers) = raw.get_mut("servers").and_then(|v| v.as_object_mut()) else {
+        return Ok(false);
+    };
+
+    let mut any_migrated = false;
+    for (server_key, server) in servers.iter_mut() {
+        let Some(tool_id) = tool_id_from_catalog_server_key(server_key) else {
+            continue;
+        };
+        let Some(obj) = server.as_object_mut() else {
+            continue;
+        };
+        if obj.get("type").and_then(|v| v.as_str()) != Some("stdio") {
+            continue;
+        }
+        let Some(legacy_val) = obj.remove("catalog_passthrough") else {
+            continue;
+        };
+        let Some(legacy_map) = legacy_val.as_object() else {
+            continue;
+        };
+        if legacy_map.is_empty() {
+            continue;
+        }
+
+        let entries: Vec<(String, serde_json::Value)> = legacy_map
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let mut remaining = serde_json::Map::new();
+        let mut migrated_keys: Vec<String> = Vec::new();
+        for (env_key, env_val) in entries {
+            let Some(val_str) = env_val.as_str() else {
+                remaining.insert(env_key, env_val);
+                continue;
+            };
+            if val_str.trim().is_empty() {
+                remaining.insert(env_key, serde_json::Value::String(val_str.to_string()));
+                continue;
+            }
+            match secure_store::save_mcp_secret(&tool_id, &env_key, val_str) {
+                Ok(()) => migrated_keys.push(env_key),
+                Err(e) => {
+                    log::warn!(
+                        "migrate legacy catalog_passthrough: could not save {tool_id}/{env_key} \
+                         into OS keychain: {e}"
+                    );
+                    remaining.insert(env_key, serde_json::Value::String(val_str.to_string()));
+                }
+            }
+        }
+
+        let legacy_reinserted = !remaining.is_empty();
+        if legacy_reinserted {
+            obj.insert(
+                "catalog_passthrough".to_string(),
+                serde_json::Value::Object(remaining),
+            );
+        }
+
+        if let Some(args) = obj.get_mut("args").and_then(|v| v.as_array_mut()) {
+            args.retain(|arg| {
+                let Some(s) = arg.as_str() else {
+                    return true;
+                };
+                let Some(rest) = s.strip_prefix("--env=") else {
+                    return true;
+                };
+                let Some((name, _)) = rest.split_once('=') else {
+                    return true;
+                };
+                !migrated_keys.iter().any(|k| k == name)
+            });
+        }
+
+        if !migrated_keys.is_empty() {
+            migrated_keys.sort();
+            migrated_keys.dedup();
+            obj.insert(
+                "catalog_passthrough_keys".to_string(),
+                serde_json::Value::Array(
+                    migrated_keys
+                        .into_iter()
+                        .map(serde_json::Value::String)
+                        .collect(),
+                ),
+            );
+            any_migrated = true;
+        } else if legacy_reinserted && migrated_keys.is_empty() {
+            // Legacy map was rewritten (e.g. non-string values coalesced) even though nothing
+            // reached the keychain.
+            any_migrated = true;
+        }
+    }
+    Ok(any_migrated)
 }
 
 pub fn save_config(path: &Path, cfg: &McpConfig) -> Result<(), String> {
@@ -121,150 +274,57 @@ fn default_config_value() -> serde_json::Value {
     })
 }
 
-fn redact_podman_docker_env_argv(args: &[String]) -> Vec<String> {
-    args.iter()
-        .map(|a| {
-            let Some(rest) = a.strip_prefix("--env=") else {
-                return a.clone();
-            };
-            let Some((name, val)) = rest.split_once('=') else {
-                return a.clone();
-            };
-            if val.is_empty() {
-                return a.clone();
-            }
-            format!("--env={name}=********")
-        })
-        .collect()
-}
-
-fn command_is_podman_or_docker(command: &str) -> bool {
-    let cmd_trim = command.trim();
-    std::path::Path::new(cmd_trim)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .map(|b| b == "podman" || b == "docker")
-        .unwrap_or(cmd_trim == "podman" || cmd_trim == "docker")
-}
-
-/// Removes stored catalog secrets and masks `--env=…` values in `podman|docker run` argv before
-/// returning `mcp.json` over HTTP (GET `/v1/mcp/servers`).
-pub fn redact_mcp_server_entry_for_list_response(entry: &ServerEntry) -> ServerEntry {
-    match entry {
-        ServerEntry::Native { .. } => entry.clone(),
-        ServerEntry::Stdio {
-            command,
-            args,
-            env,
-            direct_return,
-            private_host_path,
-            ..
-        } => {
-            let args = if command_is_podman_or_docker(command) {
-                redact_podman_docker_env_argv(args)
-            } else {
-                args.clone()
-            };
-            ServerEntry::Stdio {
-                command: command.clone(),
-                args,
-                env: env.clone(),
-                direct_return: *direct_return,
-                private_host_path: private_host_path.clone(),
-                catalog_passthrough: HashMap::new(),
-            }
+/// Resolve a catalog passthrough value: host `std::env` first (if set), then OS keychain.
+///
+/// Env-first avoids touching the keychain when running tests or when developers export a key
+/// for one-off runs; in normal GUI use the variable is usually unset and the keychain path runs
+/// after [`crate::modules::secure_store::warm_app_secrets`] (in-memory cache, no per-request unlock).
+fn resolve_passthrough_value(tool_id: &str, env_key: &str) -> Option<String> {
+    if let Ok(v) = std::env::var(env_key) {
+        let v = v.trim().to_string();
+        if !v.is_empty() {
+            return Some(v);
+        }
+    }
+    match secure_store::load_mcp_secret(tool_id, env_key) {
+        Ok(v) if !v.trim().is_empty() => Some(v),
+        Ok(_) => None,
+        Err(secure_store::SecureStoreError::NotFound) => None,
+        Err(e) => {
+            log::warn!("mcp passthrough: keychain load failed for {tool_id}/{env_key}: {e}");
+            None
         }
     }
 }
 
-const REDACTED_ENV_VALUE_PLACEHOLDER: &str = "********";
-
-fn is_redacted_podman_env_arg(token: &str) -> bool {
-    let Some(rest) = token.strip_prefix("--env=") else {
-        return false;
-    };
-    let Some((_name, val)) = rest.split_once('=') else {
-        return false;
-    };
-    val == REDACTED_ENV_VALUE_PLACEHOLDER
-}
-
-/// Restores real `podman|docker run --env=…` argv and `catalog_passthrough` when the client PUTs
-/// a stdio entry that came from [`redact_mcp_server_entry_for_list_response`] (dashboard round-trip,
-/// e.g. toggling `direct_return`), so secrets are not replaced with `********` on disk.
-pub fn merge_stdio_entry_preserving_redacted_secrets(
-    old_entry: Option<&ServerEntry>,
-    entry: ServerEntry,
-) -> ServerEntry {
-    let ServerEntry::Stdio {
-        command,
-        mut args,
-        env,
-        direct_return,
-        private_host_path,
-        mut catalog_passthrough,
-    } = entry
-    else {
-        return entry;
-    };
-
-    let Some(ServerEntry::Stdio {
-        args: old_args,
-        catalog_passthrough: old_cp,
-        ..
-    }) = old_entry
-    else {
-        return ServerEntry::Stdio {
-            command,
-            args,
-            env,
-            direct_return,
-            private_host_path,
-            catalog_passthrough,
-        };
-    };
-
-    if !command_is_podman_or_docker(&command) {
-        return ServerEntry::Stdio {
-            command,
-            args,
-            env,
-            direct_return,
-            private_host_path,
-            catalog_passthrough,
-        };
+/// Splice `--env=KEY=VAL` flags for each passthrough key into `podman|docker run` argv at the
+/// slot just before the image reference (first non-flag arg after `run`). Keys that resolve to
+/// no value are skipped silently so the spawn still gets a chance to succeed with other env.
+fn splice_passthrough_env_into_argv(
+    argv: &[String],
+    tool_id: &str,
+    keys: &[String],
+) -> Vec<String> {
+    if keys.is_empty() {
+        return argv.to_vec();
     }
+    let insert_at = argv
+        .iter()
+        .enumerate()
+        .skip_while(|(_, a)| a.as_str() == "run")
+        .find(|(_, a)| !a.starts_with('-'))
+        .map(|(i, _)| i)
+        .unwrap_or(argv.len());
 
-    let mut restored_any_env = false;
-    for new_a in &mut args {
-        if !is_redacted_podman_env_arg(new_a.as_str()) {
-            continue;
-        }
-        let Some(rest) = new_a.strip_prefix("--env=") else {
-            continue;
-        };
-        let Some((name, _)) = rest.split_once('=') else {
-            continue;
-        };
-        let prefix = format!("--env={name}=");
-        if let Some(old_a) = old_args.iter().find(|a| a.starts_with(&prefix)) {
-            *new_a = old_a.clone();
-            restored_any_env = true;
+    let mut out: Vec<String> = Vec::with_capacity(argv.len() + keys.len());
+    out.extend_from_slice(&argv[..insert_at]);
+    for key in keys {
+        if let Some(val) = resolve_passthrough_value(tool_id, key) {
+            out.push(format!("--env={key}={val}"));
         }
     }
-
-    if restored_any_env && catalog_passthrough.is_empty() && !old_cp.is_empty() {
-        catalog_passthrough = old_cp.clone();
-    }
-
-    ServerEntry::Stdio {
-        command,
-        args,
-        env,
-        direct_return,
-        private_host_path,
-        catalog_passthrough,
-    }
+    out.extend_from_slice(&argv[insert_at..]);
+    out
 }
 
 pub fn load_or_init_config(path: &Path) -> Result<McpConfig, String> {
@@ -305,25 +365,34 @@ pub async fn connect_one_server(
             args,
             env,
             direct_return,
+            catalog_passthrough_keys,
             ..
-        } => match McpClient::connect(
-            server_key.to_string(),
-            command.clone(),
-            args.clone(),
-            env.clone(),
-            *direct_return,
-        )
-        .await
-        {
-            Ok(client) => {
-                let n = client.tools().len();
-                let cmd_word = if n == 1 { "command" } else { "commands" };
-                let dr = if *direct_return { " direct_return" } else { "" };
-                let msg = format!("{server_key} stdio ({n} {cmd_word}{dr})");
-                (Some(Provider::Mcp(Arc::new(client))), msg)
+        } => {
+            let spawn_args = match tool_id_from_catalog_server_key(server_key) {
+                Some(tool_id) if !catalog_passthrough_keys.is_empty() => {
+                    splice_passthrough_env_into_argv(args, &tool_id, catalog_passthrough_keys)
+                }
+                _ => args.clone(),
+            };
+            match McpClient::connect(
+                server_key.to_string(),
+                command.clone(),
+                spawn_args,
+                env.clone(),
+                *direct_return,
+            )
+            .await
+            {
+                Ok(client) => {
+                    let n = client.tools().len();
+                    let cmd_word = if n == 1 { "command" } else { "commands" };
+                    let dr = if *direct_return { " direct_return" } else { "" };
+                    let msg = format!("{server_key} stdio ({n} {cmd_word}{dr})");
+                    (Some(Provider::Mcp(Arc::new(client))), msg)
+                }
+                Err(e) => (None, format!("{server_key} stdio failed: {e}")),
             }
-            Err(e) => (None, format!("{server_key} stdio failed: {e}")),
-        },
+        }
     }
 }
 
@@ -331,6 +400,11 @@ pub async fn connect_one_server(
 /// Used by tests and as a one-shot rebuild path; the live runtime uses
 /// [`rebuild_registry_into_state`] which publishes incrementally.
 pub async fn build_mcp_providers(cfg: &McpConfig) -> (Vec<Provider>, Vec<String>) {
+    let pairs = catalog_passthrough_key_pairs(cfg);
+    if let Err(e) = secure_store::preload_mcp_passthrough_secrets(&pairs) {
+        log::warn!("mcp passthrough: keychain preload failed: {e}");
+    }
+
     let mut providers = Vec::new();
     let mut status = Vec::new();
 
@@ -473,6 +547,11 @@ pub async fn rebuild_registry_into_state(
         cfg
     };
 
+    let passthrough_pairs = catalog_passthrough_key_pairs(&cfg);
+    if let Err(e) = secure_store::preload_mcp_passthrough_secrets(&passthrough_pairs) {
+        log::warn!("mcp passthrough: keychain preload failed: {e}");
+    }
+
     *state.cached_filesystem_paths.write().await = filesystem_allowed_paths(&cfg);
 
     // Publish the registry after each *successful* connect so native tools (e.g. dice) are usable
@@ -561,76 +640,58 @@ mod tests {
     }
 
     #[test]
-    fn list_response_redacts_podman_env_args_and_catalog_passthrough() {
-        let entry = ServerEntry::Stdio {
-            command: "podman".into(),
-            args: vec![
-                "run".into(),
-                "--rm".into(),
-                "--env=BRAVE_API_KEY=super-secret".into(),
-            ],
-            env: HashMap::new(),
-            direct_return: false,
-            private_host_path: None,
-            catalog_passthrough: HashMap::from([("BRAVE_API_KEY".into(), "super-secret".into())]),
-        };
-        let r = redact_mcp_server_entry_for_list_response(&entry);
-        let ServerEntry::Stdio {
-            args,
-            catalog_passthrough,
-            ..
-        } = r
-        else {
-            panic!("expected stdio");
-        };
-        assert!(
-            args.iter().any(|a| a == "--env=BRAVE_API_KEY=********"),
-            "args={args:?}"
+    fn splice_passthrough_env_inserts_before_image_ref() {
+        // Stored argv (from disk) has no passthrough --env=; the image ref is the first
+        // non-flag arg after `run`.
+        let argv = vec![
+            "run".into(),
+            "--rm".into(),
+            "-i".into(),
+            "ghcr.io/example/tool:latest".into(),
+            "--ignore-robots-txt".into(),
+        ];
+
+        std::env::set_var("TEST_PASSTHROUGH_SPLICE_KEY", "host-value");
+        let spliced = splice_passthrough_env_into_argv(
+            &argv,
+            "pengine/nonexistent-tool",
+            &["TEST_PASSTHROUGH_SPLICE_KEY".into()],
         );
-        assert!(catalog_passthrough.is_empty());
+        std::env::remove_var("TEST_PASSTHROUGH_SPLICE_KEY");
+
+        assert_eq!(
+            spliced,
+            vec![
+                "run".to_string(),
+                "--rm".into(),
+                "-i".into(),
+                "--env=TEST_PASSTHROUGH_SPLICE_KEY=host-value".into(),
+                "ghcr.io/example/tool:latest".into(),
+                "--ignore-robots-txt".into(),
+            ],
+            "passthrough --env must land directly before the image reference"
+        );
     }
 
     #[test]
-    fn merge_stdio_restores_redacted_env_argv_and_catalog_passthrough() {
-        let old = ServerEntry::Stdio {
-            command: "podman".into(),
-            args: vec![
-                "run".into(),
-                "--rm".into(),
-                "--env=BRAVE_API_KEY=real-secret".into(),
-            ],
-            env: HashMap::new(),
-            direct_return: false,
-            private_host_path: None,
-            catalog_passthrough: HashMap::from([("BRAVE_API_KEY".into(), "real-secret".into())]),
-        };
-        let new = ServerEntry::Stdio {
-            command: "podman".into(),
-            args: vec![
-                "run".into(),
-                "--rm".into(),
-                "--env=BRAVE_API_KEY=********".into(),
-            ],
-            env: HashMap::new(),
-            direct_return: true,
-            private_host_path: None,
-            catalog_passthrough: HashMap::new(),
-        };
-        let merged = merge_stdio_entry_preserving_redacted_secrets(Some(&old), new);
-        let ServerEntry::Stdio {
-            args,
-            catalog_passthrough,
-            direct_return,
-            ..
-        } = merged
-        else {
-            panic!("expected stdio");
-        };
-        assert_eq!(args[2], "--env=BRAVE_API_KEY=real-secret");
-        assert_eq!(
-            catalog_passthrough.get("BRAVE_API_KEY").map(String::as_str),
-            Some("real-secret")
+    fn splice_passthrough_env_is_noop_when_no_value_resolvable() {
+        let argv = vec!["run".into(), "--rm".into(), "img:tag".into()];
+        // Guaranteed-missing env var; keychain will also miss under the test-only tool id.
+        let spliced = splice_passthrough_env_into_argv(
+            &argv,
+            "pengine/nonexistent-tool",
+            &["DEFINITELY_NOT_SET_IN_ENV_ZZZ".into()],
         );
-        assert!(direct_return);
+        assert_eq!(spliced, argv);
+    }
+
+    #[test]
+    fn tool_id_from_catalog_server_key_skips_custom_and_native() {
+        assert_eq!(
+            tool_id_from_catalog_server_key("te_pengine-brave-search").as_deref(),
+            Some("pengine/brave-search")
+        );
+        assert_eq!(tool_id_from_catalog_server_key("te_custom_my-tool"), None);
+        assert_eq!(tool_id_from_catalog_server_key("dice"), None);
     }
 }

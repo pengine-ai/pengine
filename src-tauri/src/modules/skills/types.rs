@@ -30,8 +30,11 @@ pub struct Skill {
     pub license: Option<String>,
     #[serde(default)]
     pub requires: Vec<String>,
-    /// If `requires` lists `brave_web_search`, optional substrings (case-insensitive) that must
-    /// appear in the user message before that tool is exposed — in addition to `tags` (length ≥4).
+    /// If `requires` lists `brave_web_search`, optional substrings (case-insensitive; ä/ö/ü/ß
+    /// folded for matching) that must appear in the user message before that tool is exposed —
+    /// in addition to `tags` (length ≥6, not in [`super::service::BRAVE_TAG_DENYLIST`] in
+    /// `skills/service.rs`, used by `skill_triggers_brave_web_search` and covered in
+    /// `tests/skills_brave_gate.rs`).
     #[serde(default)]
     pub brave_allow_substrings: Vec<String>,
     #[serde(default)]

@@ -31,7 +31,6 @@ export function DashboardPage() {
     { name: "Ollama", status: "checking", detail: "Checking…" },
   ]);
   const [disconnectError, setDisconnectError] = useState<string | null>(null);
-
   const refreshStatus = useCallback(async () => {
     let botUser = botUsername ?? "unknown";
     const health = await getPengineHealth(3000);

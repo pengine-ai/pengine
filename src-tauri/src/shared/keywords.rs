@@ -2,8 +2,9 @@
 //!
 //! Feature modules declare their own [`KeywordGroup`]s next to the domain that
 //! owns them (e.g. memory-session commands live in `modules/memory`, AI-model
-//! control cues in `modules/ollama/keywords.rs`). This module only provides
-//! the shape and the matcher — no domain knowledge.
+//! control cues in `modules/ollama/keywords.rs`, Brave gating phrases in
+//! `modules/skills/keywords.rs`). This module only provides the shape and the
+//! matcher — no domain knowledge.
 //!
 //! Translation guide: each group carries one `(lang, &[phrases])` row per
 //! language. To add Spanish phrases, add them to the `("es", &[...])` entry

@@ -11,6 +11,7 @@ use crate::shared::text::{
 };
 use chrono::Utc;
 use serde_json::json;
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 /// Tool rounds + at least one completion-only step. Research flows (sitemap + several
@@ -24,6 +25,9 @@ const MAX_BRAVE_WEB_SEARCH_PER_USER_MESSAGE: u32 = 1;
 
 const BRAVE_WEB_SEARCH_LIMIT_MSG: &str = "Pengine policy: at most one `brave_web_search` call per user message (cost control). \
 Use the previous search result, answer without another search, or ask the user to narrow the query.";
+
+const FETCH_DUPLICATE_URL_MSG: &str = "Pengine policy: this URL was already fetched successfully in this user message. \
+Do not call `fetch` again for the same URL. Answer from the prior tool output (or use a different URL if the excerpt was insufficient).";
 
 /// After tool results (agent step ≥1), cap completion tokens. The model should
 /// put the user-visible answer in `<pengine_reply>` (see system prompt); this
@@ -90,6 +94,21 @@ fn tool_name_is_fetch(name: &str) -> bool {
             .is_some_and(|(_, tail)| tail.eq_ignore_ascii_case("fetch"))
 }
 
+fn fetch_url_from_tool_args(args: &serde_json::Value) -> Option<String> {
+    args.get("url")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(std::string::ToString::to_string)
+}
+
+/// Stable key so `https://Host/path/` and `https://host/path#x` count as one URL.
+fn fetch_url_dedup_key(url: &str) -> String {
+    let t = url.trim();
+    let no_frag = t.split('#').next().unwrap_or(t).trim_end_matches('/');
+    no_frag.to_lowercase()
+}
+
 /// After `brave_web_search`, prefetch this many distinct result URLs (one search per message; extra bandwidth here is `fetch` only).
 const AUTO_FETCH_TOP_URLS: usize = search_followup::DEFAULT_AUTO_FETCH_CAP;
 
@@ -98,9 +117,20 @@ async fn append_host_prefetch_after_brave_search(
     messages: &mut serde_json::Value,
     tool_results: &mut Vec<(String, String)>,
     search_blob: &str,
+    fetch_urls_success: &mut HashSet<String>,
 ) {
     let urls = search_followup::extract_fetchable_urls(search_blob, AUTO_FETCH_TOP_URLS);
     for url in urls {
+        let key = fetch_url_dedup_key(&url);
+        if fetch_urls_success.contains(&key) {
+            state
+                .emit_log(
+                    "tool",
+                    &format!("[host] auto-fetch skip (already fetched): {url}"),
+                )
+                .await;
+            continue;
+        }
         state
             .emit_log("tool", &format!("[host] auto-fetch {url}"))
             .await;
@@ -115,6 +145,9 @@ async fn append_host_prefetch_after_brave_search(
             Ok(t) => t,
             Err(e) => format!("ERROR: {e}"),
         };
+        if !text.trim_start().starts_with("ERROR:") {
+            fetch_urls_success.insert(key);
+        }
         let compacted = compact_tool_output(&text);
         let for_model = truncate_for_model(&compacted, TOOL_OUTPUT_CHAR_CAP);
         let block_name = format!("fetch (auto: {url})");
@@ -538,8 +571,8 @@ async fn build_system_prompt(state: &AppState, has_tools: bool, has_memory: bool
     };
 
     let skills_raw = skills::skills_prompt_hint(&state.store_path);
-    let (skills_hint, skills_truncated) =
-        skills::limit_skills_hint_bytes(skills_raw, skills::MAX_TOTAL_SKILL_HINT_BYTES);
+    let skills_cap = *state.skills_hint_max_bytes.read().await as usize;
+    let (skills_hint, skills_truncated) = skills::limit_skills_hint_bytes(skills_raw, skills_cap);
     if skills_truncated {
         state
             .emit_log(
@@ -547,7 +580,7 @@ async fn build_system_prompt(state: &AppState, has_tools: bool, has_memory: bool
                 &format!(
                     "skills hint truncated to {} bytes (cap {})",
                     skills_hint.len(),
-                    skills::MAX_TOTAL_SKILL_HINT_BYTES
+                    skills_cap
                 ),
             )
             .await;
@@ -641,6 +674,8 @@ async fn run_model_turn(
     // re-enters step 0 with a fresh catalog, so it must not be treated as a
     // post-tool continuation (no reminder, keep user's think/num_predict).
     let mut tool_rounds: usize = 0;
+    // URLs already fetched successfully this user message (model + host auto-fetch).
+    let mut fetch_urls_success: HashSet<String> = HashSet::new();
 
     for step in 0..MAX_STEPS {
         let t0 = Instant::now();
@@ -762,6 +797,25 @@ async fn run_model_turn(
             }
         }
 
+        {
+            let mut batch_fetch_keys = HashSet::<String>::new();
+            for (name, res) in prepared.iter_mut() {
+                if !tool_name_is_fetch(name) {
+                    continue;
+                }
+                let Ok((_, _, _, ref args)) = res else {
+                    continue;
+                };
+                let Some(raw) = fetch_url_from_tool_args(args) else {
+                    continue;
+                };
+                let key = fetch_url_dedup_key(&raw);
+                if fetch_urls_success.contains(&key) || !batch_fetch_keys.insert(key) {
+                    *res = Err(FETCH_DUPLICATE_URL_MSG.to_string());
+                }
+            }
+        }
+
         let invoked_names: Vec<String> = prepared.iter().map(|(n, _)| n.clone()).collect();
         state.note_tools_used(&invoked_names).await;
 
@@ -812,6 +866,15 @@ async fn run_model_turn(
             }
             let compacted = compact_tool_output(&text);
             let for_model = truncate_for_model(&compacted, TOOL_OUTPUT_CHAR_CAP);
+            if tool_name_is_fetch(name) {
+                if let Ok((_, _, _, args)) = resolved {
+                    if let Some(raw) = fetch_url_from_tool_args(args) {
+                        if !text.trim_start().starts_with("ERROR:") {
+                            fetch_urls_success.insert(fetch_url_dedup_key(&raw));
+                        }
+                    }
+                }
+            }
             if name.eq_ignore_ascii_case("brave_web_search")
                 && !for_model.trim_start().starts_with("ERROR:")
             {
@@ -831,8 +894,14 @@ async fn run_model_turn(
         tool_rounds += 1;
 
         if let Some(blob) = last_brave_search_blob {
-            append_host_prefetch_after_brave_search(state, &mut messages, &mut tool_results, &blob)
-                .await;
+            append_host_prefetch_after_brave_search(
+                state,
+                &mut messages,
+                &mut tool_results,
+                &blob,
+                &mut fetch_urls_success,
+            )
+            .await;
         }
 
         if !direct_replies.is_empty() {
@@ -950,5 +1019,17 @@ mod tests {
         assert!(tool_name_is_fetch("fetch"));
         assert!(tool_name_is_fetch("te_pengine-fetch.fetch"));
         assert!(!tool_name_is_fetch("roll_dice"));
+    }
+
+    #[test]
+    fn fetch_url_dedup_key_ignores_fragment_and_trailing_slash() {
+        assert_eq!(
+            fetch_url_dedup_key("https://WWW.Example.COM/path/#frag"),
+            fetch_url_dedup_key("https://www.example.com/path")
+        );
+        assert_eq!(
+            fetch_url_dedup_key("https://a.example/page/"),
+            fetch_url_dedup_key("HTTPS://A.EXAMPLE/page")
+        );
     }
 }

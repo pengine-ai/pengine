@@ -5,6 +5,7 @@
 
 use crate::modules::memory;
 use crate::modules::ollama;
+use crate::modules::skills;
 use crate::shared::keywords::KeywordGroup;
 
 pub fn all_keyword_groups() -> Vec<&'static KeywordGroup> {
@@ -14,6 +15,7 @@ pub fn all_keyword_groups() -> Vec<&'static KeywordGroup> {
         &memory::DIARY_START,
         &memory::DIARY_END,
         &ollama::keywords::THINK_ON,
+        &skills::keywords::EXPLICIT_WEB_SEARCH,
     ]
 }
 

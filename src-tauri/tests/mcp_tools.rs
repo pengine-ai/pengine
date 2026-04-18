@@ -1,5 +1,7 @@
 //! Integration tests for MCP tooling.
 
+mod common;
+
 use pengine_lib::modules::mcp::registry::ToolRegistry;
 use pengine_lib::modules::mcp::{native, service};
 use serde_json::json;

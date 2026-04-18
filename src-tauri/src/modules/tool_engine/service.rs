@@ -30,38 +30,19 @@ const TE_CUSTOM_PREFIX: &str = "te_custom_";
 /// In-image workspace stub when no host folders are mounted yet.
 pub const EMPTY_WORKSPACE_CONTAINER_ROOT: &str = "/tmp";
 
-fn filter_stored_catalog_passthrough(
-    entry: &ToolEntry,
-    stored: &HashMap<String, String>,
-) -> HashMap<String, String> {
-    let mut out = HashMap::new();
-    for name in &entry.passthrough_env {
-        if let Some(v) = stored.get(name) {
-            if !v.trim().is_empty() {
-                out.insert(name.clone(), v.clone());
-            }
+/// Keep only the passthrough keys that the catalog still declares (sorted, deduped).
+/// Called after loading stored `catalog_passthrough_keys` from `mcp.json` so we drop keys the
+/// catalog has removed; the associated keychain entries are purged on uninstall.
+fn filter_catalog_passthrough_keys(entry: &ToolEntry, stored: &[String]) -> Vec<String> {
+    let declared: HashSet<&str> = entry.passthrough_env.iter().map(String::as_str).collect();
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut out: Vec<String> = Vec::new();
+    for name in stored {
+        if declared.contains(name.as_str()) && seen.insert(name.as_str()) {
+            out.push(name.clone());
         }
     }
-    out
-}
-
-/// Values for `podman|docker run --env=…`: `mcp.json` `catalog_passthrough` first, else host `std::env`.
-fn merged_passthrough_for_container(
-    entry: &ToolEntry,
-    stored: &HashMap<String, String>,
-) -> HashMap<String, String> {
-    let filtered = filter_stored_catalog_passthrough(entry, stored);
-    let mut out = HashMap::new();
-    for name in &entry.passthrough_env {
-        if let Some(v) = filtered.get(name) {
-            out.insert(name.clone(), v.clone());
-        } else if let Ok(v) = std::env::var(name) {
-            let t = v.trim().to_string();
-            if !t.is_empty() {
-                out.insert(name.clone(), t);
-            }
-        }
-    }
+    out.sort();
     out
 }
 
@@ -282,7 +263,7 @@ fn catalog_tool_stdio_eq(a: &ServerEntry, b: &ServerEntry) -> bool {
                 env: e1,
                 direct_return: d1,
                 private_host_path: p1,
-                catalog_passthrough: t1,
+                catalog_passthrough_keys: t1,
             },
             ServerEntry::Stdio {
                 command: c2,
@@ -290,7 +271,7 @@ fn catalog_tool_stdio_eq(a: &ServerEntry, b: &ServerEntry) -> bool {
                 env: e2,
                 direct_return: d2,
                 private_host_path: p2,
-                catalog_passthrough: t2,
+                catalog_passthrough_keys: t2,
             },
         ) => c1 == c2 && a1 == a2 && e1 == e2 && d1 == d2 && p1 == p2 && t1 == t2,
         _ => false,
@@ -298,8 +279,9 @@ fn catalog_tool_stdio_eq(a: &ServerEntry, b: &ServerEntry) -> bool {
 }
 
 /// Rebuild argv for one installed catalog tool from `mcp.json` + catalog entry.
-/// Container env for catalog tools is baked into argv via `podman run --env=…`. User-provided
-/// secrets live in `catalog_passthrough`; `env` is for legacy stdio (e.g. `npx`) only.
+/// Container env for catalog tools (workspace binds, private-folder bind + path env) is baked into
+/// argv here. Passthrough secrets are **not** baked in — they live in the OS keychain and are
+/// injected at spawn time by `connect_one_server`.
 fn rebuild_installed_catalog_tool_stdio(
     entry: &ToolEntry,
     host_paths: &[String],
@@ -311,7 +293,7 @@ fn rebuild_installed_catalog_tool_stdio(
         command,
         direct_return,
         private_host_path,
-        catalog_passthrough,
+        catalog_passthrough_keys,
         ..
     } = prev
     else {
@@ -336,9 +318,7 @@ fn rebuild_installed_catalog_tool_stdio(
         _ => None,
     };
 
-    let stored = filter_stored_catalog_passthrough(entry, catalog_passthrough);
-    let merged = merged_passthrough_for_container(entry, &stored);
-    let args = podman_run_argv_for_tool(entry, host_paths, private_bind.as_ref(), &merged)?;
+    let args = podman_run_argv_for_tool(entry, host_paths, private_bind.as_ref())?;
 
     Ok(Some(ServerEntry::Stdio {
         command: command.clone(),
@@ -346,7 +326,7 @@ fn rebuild_installed_catalog_tool_stdio(
         env: HashMap::new(),
         direct_return: *direct_return,
         private_host_path: private_host_path.clone(),
-        catalog_passthrough: stored,
+        catalog_passthrough_keys: filter_catalog_passthrough_keys(entry, catalog_passthrough_keys),
     }))
 }
 
@@ -393,11 +373,14 @@ pub fn workspace_app_bind_pairs(host_paths: &[String]) -> Vec<(String, String)> 
 
 /// Full `podman|docker run …` argv (excluding the runtime binary) for a catalog tool entry.
 /// The image reference is `image@digest` (digest-pinned).
+///
+/// Passthrough-env secrets are **not** emitted here. They live in the OS keychain and are
+/// spliced in as `--env=KEY=VAL` at spawn time by `mcp::service::connect_one_server` — see
+/// [`splice_passthrough_env_into_argv`] for the exact insertion point.
 pub fn podman_run_argv_for_tool(
     entry: &ToolEntry,
     host_paths: &[String],
     private_bind: Option<&PrivateBind<'_>>,
-    passthrough: &HashMap<String, String>,
 ) -> Result<Vec<String>, String> {
     if entry.append_workspace_roots && !entry.mount_workspace {
         return Err("catalog: append_workspace_roots requires mount_workspace".into());
@@ -449,10 +432,6 @@ pub fn podman_run_argv_for_tool(
         ));
         let (k, v) = private_folder_container_env(pb.config, pb.bot_id);
         args.push(format!("--env={k}={v}"));
-    }
-
-    for (name, value) in passthrough {
-        args.push(format!("--env={name}={value}"));
     }
 
     args.push(image_ref);
@@ -759,26 +738,25 @@ pub async fn install_tool(
     };
 
     let key = server_key(tool_id);
-    let stored = cfg
+    let stored_keys: Vec<String> = cfg
         .servers
         .get(&key)
         .and_then(|e| {
             if let ServerEntry::Stdio {
-                catalog_passthrough,
+                catalog_passthrough_keys,
                 ..
             } = e
             {
-                Some(filter_stored_catalog_passthrough(
+                Some(filter_catalog_passthrough_keys(
                     entry,
-                    catalog_passthrough,
+                    catalog_passthrough_keys,
                 ))
             } else {
                 None
             }
         })
         .unwrap_or_default();
-    let merged = merged_passthrough_for_container(entry, &stored);
-    let args = podman_run_argv_for_tool(entry, &host_paths, private_bind.as_ref(), &merged)?;
+    let args = podman_run_argv_for_tool(entry, &host_paths, private_bind.as_ref())?;
 
     let server_entry = ServerEntry::Stdio {
         command: runtime.binary.clone(),
@@ -786,7 +764,7 @@ pub async fn install_tool(
         env: HashMap::new(),
         direct_return: entry.direct_return,
         private_host_path: None,
-        catalog_passthrough: stored,
+        catalog_passthrough_keys: stored_keys,
     };
 
     cfg.servers.insert(key, server_entry);
@@ -862,18 +840,34 @@ pub async fn uninstall_tool(
 ) -> Result<(), String> {
     let key = server_key(tool_id);
     let mut installed_image_ref: Option<String> = None;
+    let mut passthrough_keys_to_purge: Vec<String> = Vec::new();
     if mcp_config_path.exists() {
         let _cfg_guard = mcp_cfg_lock.lock().await;
         let mut cfg = mcp_service::read_config(mcp_config_path)?;
-        if let Some(ServerEntry::Stdio { args, .. }) = cfg.servers.get(&key) {
+        if let Some(ServerEntry::Stdio {
+            args,
+            catalog_passthrough_keys,
+            ..
+        }) = cfg.servers.get(&key)
+        {
             installed_image_ref = args
                 .iter()
                 .skip_while(|a| *a == "run")
                 .find(|a| !a.starts_with('-'))
                 .cloned();
+            passthrough_keys_to_purge = catalog_passthrough_keys.clone();
         }
         cfg.servers.remove(&key);
         mcp_service::save_config(mcp_config_path, &cfg)?;
+    }
+
+    // Remove any keychain secrets associated with this tool's passthrough_env.
+    // Non-fatal: a stale keychain entry after uninstall is a minor cleanup issue,
+    // not a reason to fail the user-visible uninstall.
+    for env_key in &passthrough_keys_to_purge {
+        if let Err(e) = crate::modules::secure_store::delete_mcp_secret(tool_id, env_key) {
+            log::warn!("uninstall: could not delete keychain secret for {tool_id}/{env_key}: {e}");
+        }
     }
 
     let image_ref = match installed_image_ref {
@@ -1028,7 +1022,7 @@ pub async fn add_custom_tool(
         env: HashMap::new(),
         direct_return: entry.direct_return,
         private_host_path: None,
-        catalog_passthrough: HashMap::new(),
+        catalog_passthrough_keys: Vec::new(),
     };
 
     cfg.servers
@@ -1076,7 +1070,7 @@ pub fn sync_custom_tools_if_installed(cfg: &mut McpConfig, host_paths: &[String]
             env,
             direct_return,
             private_host_path,
-            catalog_passthrough,
+            catalog_passthrough_keys,
         }) = cfg.servers.get(&key)
         else {
             continue;
@@ -1093,7 +1087,7 @@ pub fn sync_custom_tools_if_installed(cfg: &mut McpConfig, host_paths: &[String]
             env: env.clone(),
             direct_return: *direct_return,
             private_host_path: private_host_path.clone(),
-            catalog_passthrough: catalog_passthrough.clone(),
+            catalog_passthrough_keys: catalog_passthrough_keys.clone(),
         };
         cfg.servers.insert(key, new_entry);
         changed = true;
@@ -1104,7 +1098,6 @@ pub fn sync_custom_tools_if_installed(cfg: &mut McpConfig, host_paths: &[String]
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
     use tempfile::tempdir;
 
     #[test]
@@ -1172,7 +1165,7 @@ mod tests {
             .find(|v| v.version == fm.current)
             .unwrap();
         assert_eq!(ver.digest, "sha256:placeholder");
-        let argv = podman_run_argv_for_tool(fm, &[], None, &HashMap::new()).expect("argv");
+        let argv = podman_run_argv_for_tool(fm, &[], None).expect("argv");
         let tagged = format!("{}:{}", fm.image, fm.current);
         let image_ref = argv
             .iter()
@@ -1205,7 +1198,7 @@ mod tests {
             config: pf,
             bot_id: "12345",
         };
-        let argv = podman_run_argv_for_tool(mem, &[], Some(&pb), &HashMap::new()).expect("argv");
+        let argv = podman_run_argv_for_tool(mem, &[], Some(&pb)).expect("argv");
 
         let want_mount = format!(
             "-v={}:/mcp/data:rw",

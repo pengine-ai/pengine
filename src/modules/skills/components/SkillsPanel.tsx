@@ -1,8 +1,18 @@
 import * as Accordion from "@radix-ui/react-accordion";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { fetchUserSettings, putUserSettings } from "../../settings";
 import { addSkill, deleteSkill, fetchSkills, setSkillEnabled } from "../api";
 import type { Skill } from "../types";
 import { ClawHubBrowse } from "./ClawHubBrowse";
+import { SkillsContextBytesSlider } from "./SkillsContextBytesSlider";
+
+function formatContextKiB(bytes: number): string {
+  const kb = bytes / 1024;
+  if (kb >= 1024 && kb % 1024 === 0) return `${kb / 1024} MiB`;
+  if (kb >= 100) return `${Math.round(kb)} KiB`;
+  if (kb >= 10) return `${kb.toFixed(1)} KiB`;
+  return `${kb.toFixed(2)} KiB`;
+}
 
 const TEMPLATE = `---
 name: my-skill
@@ -72,6 +82,16 @@ export function SkillsPanel() {
   const [showBrowse, setShowBrowse] = useState(false);
   const [browseKey, setBrowseKey] = useState(0);
 
+  const [ctxBytes, setCtxBytes] = useState(10 * 1024);
+  const [ctxSaved, setCtxSaved] = useState(10 * 1024);
+  const [ctxMin, setCtxMin] = useState(4 * 1024);
+  const [ctxMax, setCtxMax] = useState(256 * 1024);
+  const [ctxDefault, setCtxDefault] = useState(10 * 1024);
+  const [ctxLoaded, setCtxLoaded] = useState(false);
+  const [ctxSaving, setCtxSaving] = useState(false);
+  const [ctxErr, setCtxErr] = useState<string | null>(null);
+  const [ctxSettingsErr, setCtxSettingsErr] = useState<string | null>(null);
+
   const cancelledRef = useRef(false);
 
   const load = useCallback(async () => {
@@ -94,6 +114,47 @@ export function SkillsPanel() {
       cancelledRef.current = true;
     };
   }, [load]);
+
+  useEffect(() => {
+    let gone = false;
+    (async () => {
+      const us = await fetchUserSettings(4000);
+      if (gone) return;
+      if (!us) {
+        setCtxSettingsErr(
+          "Could not load settings from Pengine (offline or server error). Using built-in defaults for the slider limits.",
+        );
+        setCtxLoaded(true);
+        return;
+      }
+      setCtxSettingsErr(null);
+      setCtxBytes(us.skills_hint_max_bytes);
+      setCtxSaved(us.skills_hint_max_bytes);
+      setCtxMin(us.skills_hint_max_bytes_min);
+      setCtxMax(us.skills_hint_max_bytes_max);
+      setCtxDefault(us.skills_hint_max_bytes_default);
+      setCtxLoaded(true);
+    })();
+    return () => {
+      gone = true;
+    };
+  }, []);
+
+  const ctxDirty = ctxLoaded && ctxBytes !== ctxSaved;
+
+  const saveContextBytes = async (bytes: number) => {
+    setCtxErr(null);
+    setCtxSaving(true);
+    const result = await putUserSettings(bytes);
+    setCtxSaving(false);
+    if (result.ok) {
+      const v = result.settings.skills_hint_max_bytes;
+      setCtxBytes(v);
+      setCtxSaved(v);
+      return;
+    }
+    setCtxErr(result.error);
+  };
 
   const handleAdd = async () => {
     const trimmedSlug = newSlug.trim();
@@ -187,6 +248,66 @@ export function SkillsPanel() {
             {showAdd ? "Cancel" : "Add custom skill"}
           </button>
         </div>
+      </div>
+
+      <div
+        className="mt-3 rounded-lg border border-white/8 bg-white/2 px-2.5 py-2 sm:px-3"
+        title="Max UTF-8 bytes for the combined skills block in the system prompt (enabled skills + mandatory). Lower = less context for the first model step; higher = more recipe text before truncation."
+      >
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
+          <div className="flex min-w-0 shrink-0 items-baseline gap-2 sm:w-36">
+            <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-(--mid)">
+              Context
+            </span>
+            <span className="font-mono text-xs tabular-nums text-cyan-200/90">
+              {ctxLoaded ? formatContextKiB(ctxBytes) : "…"}
+            </span>
+          </div>
+          <div className="flex min-w-0 flex-1 flex-col gap-1">
+            <SkillsContextBytesSlider
+              min={ctxMin}
+              max={ctxMax}
+              step={1024}
+              value={ctxBytes}
+              disabled={!ctxLoaded || ctxSaving}
+              onValueChange={setCtxBytes}
+              aria-label="Skills context size in bytes"
+            />
+            <p className="font-mono text-[9px] text-white/35">
+              {ctxLoaded
+                ? `${formatContextKiB(ctxMin)}–${formatContextKiB(ctxMax)} · default ${formatContextKiB(ctxDefault)}`
+                : "Loading limits…"}
+            </p>
+          </div>
+          <div className="flex shrink-0 items-center justify-end gap-1.5 sm:justify-start">
+            <button
+              type="button"
+              disabled={!ctxDirty || ctxSaving || !ctxLoaded}
+              onClick={() => void saveContextBytes(ctxBytes)}
+              className="rounded-md border border-cyan-300/25 bg-cyan-300/10 px-2 py-1 font-mono text-[10px] text-cyan-100 transition hover:bg-cyan-300/15 disabled:pointer-events-none disabled:opacity-35"
+            >
+              {ctxSaving ? "…" : "Save"}
+            </button>
+            <button
+              type="button"
+              disabled={ctxSaving || !ctxLoaded || ctxBytes === ctxDefault}
+              onClick={() => void saveContextBytes(ctxDefault)}
+              className="rounded-md border border-white/12 bg-transparent px-2 py-1 font-mono text-[10px] text-white/45 transition hover:border-white/20 hover:text-white/65 disabled:pointer-events-none disabled:opacity-35"
+            >
+              Default
+            </button>
+          </div>
+        </div>
+        {ctxSettingsErr && (
+          <p className="mt-1.5 font-mono text-[10px] text-amber-200/90" role="status">
+            {ctxSettingsErr}
+          </p>
+        )}
+        {ctxErr && (
+          <p className="mt-1.5 font-mono text-[10px] text-rose-300" role="alert">
+            {ctxErr}
+          </p>
+        )}
       </div>
 
       <p className="mt-2 font-mono text-[10px] text-white/40" title={customDir}>

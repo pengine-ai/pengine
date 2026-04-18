@@ -105,6 +105,40 @@ ollama pull qwen3:8b`}</code>
           tool-calling support.
         </p>
 
+        <p className="mt-5 font-mono text-xs uppercase tracking-[0.14em] text-(--mid)">
+          Start Ollama when you log in
+        </p>
+        <p className="mt-2 text-xs text-white/50">
+          After a reboot, Pengine needs the Ollama API on{" "}
+          <span className="font-mono text-[11px] text-white/70">{OLLAMA_API_BASE}</span> again. Pick
+          the option that matches how you installed Ollama.
+        </p>
+        <ul className="mt-2 list-inside list-disc space-y-1.5 text-xs text-white/50">
+          <li>
+            <span className="text-white/70">macOS (Ollama.app):</span> System Settings → General →
+            Login Items &amp; Extensions → Open at Login → add{" "}
+            <span className="text-white/70">Ollama</span>.
+          </li>
+          <li>
+            <span className="text-white/70">macOS (Homebrew):</span> run{" "}
+            <span className="font-mono text-[11px] text-white/70">brew services start ollama</span>{" "}
+            so the service restarts at login.
+          </li>
+          <li>
+            <span className="text-white/70">Linux:</span> if{" "}
+            <span className="font-mono text-[11px] text-white/70">systemctl status ollama</span>{" "}
+            works, run{" "}
+            <span className="font-mono text-[11px] text-white/70">
+              sudo systemctl enable --now ollama
+            </span>
+            .
+          </li>
+          <li>
+            <span className="text-white/70">Windows:</span> Settings → Apps → Startup → enable{" "}
+            <span className="text-white/70">Ollama</span>.
+          </li>
+        </ul>
+
         {ollamaChecking && (
           <p className="mt-4 font-mono text-xs text-yellow-300">Detecting Ollama…</p>
         )}
@@ -208,6 +242,55 @@ podman machine start
 # Linux (Debian/Ubuntu)
 sudo apt install podman`}</code>
             </pre>
+            <p className="mt-4 font-mono text-xs uppercase tracking-[0.14em] text-(--mid)">
+              Optional — start Podman Machine on login (macOS)
+            </p>
+            <p className="mt-2 text-xs text-white/50">
+              The Podman Linux VM does not start by itself after you reboot. You can use a
+              LaunchAgent so <span className="text-white/70">podman machine start</span> runs when
+              you sign in. Edit the <span className="text-white/70">podman</span> path if you use
+              Intel Homebrew (<span className="text-white/70">/usr/local/bin/podman</span>).
+            </p>
+            <pre className="mt-2 overflow-x-auto rounded-2xl border border-white/10 bg-slate-950/70 p-4 font-mono text-[11px] leading-relaxed text-emerald-200 sm:text-xs">
+              <code>{`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+ "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>io.podman.machine.start</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/podman</string>
+    <string>machine</string>
+    <string>start</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+</dict>
+</plist>`}</code>
+            </pre>
+            <pre className="mt-2 overflow-x-auto rounded-2xl border border-white/10 bg-slate-950/70 p-4 font-mono text-sm text-emerald-200">
+              <code>{`mkdir -p ~/Library/LaunchAgents
+# Save the XML above as ~/Library/LaunchAgents/io.podman.machine.start.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/io.podman.machine.start.plist`}</code>
+            </pre>
+            <p className="mt-2 text-xs text-white/50">
+              Signing out and back in also loads new LaunchAgents. To stop autostart:{" "}
+              <span className="font-mono text-[11px] text-white/70">
+                launchctl bootout gui/$(id -u)/io.podman.machine.start
+              </span>
+              .
+            </p>
+            <p className="mt-3 text-xs text-white/50">
+              <span className="text-white/70">Linux:</span> most installs talk to the host kernel
+              directly (no Podman Machine). If you use a rootless API socket, your distro may
+              document{" "}
+              <span className="font-mono text-[11px] text-white/70">
+                systemctl --user enable --now podman.socket
+              </span>
+              .
+            </p>
           </div>
 
           <div>
@@ -220,6 +303,13 @@ sudo apt install podman`}</code>
 # or use the convenience script:
 curl -fsSL https://get.docker.com | sh`}</code>
             </pre>
+            <p className="mt-3 text-xs text-white/50">
+              Docker Desktop can start on login from{" "}
+              <span className="text-white/70">
+                Settings → General → Start Docker Desktop when you log in
+              </span>
+              .
+            </p>
           </div>
         </div>
 
@@ -322,6 +412,36 @@ export function WizardStepPengineLocal(props: {
           The Pengine desktop app must be running on this machine. It hosts the bot service on
           localhost so messages keep flowing even after you close this browser tab.
         </p>
+
+        <p className="mt-5 font-mono text-xs uppercase tracking-[0.14em] text-(--mid)">
+          Open Pengine when you log in
+        </p>
+        <p className="mt-2 text-xs text-white/50">
+          The local HTTP server runs inside the desktop app. If you reboot and only open this
+          browser tab, Telegram will stay disconnected until the app is running again.
+        </p>
+        <ul className="mt-2 list-inside list-disc space-y-1.5 text-xs text-white/50">
+          <li>
+            <span className="text-white/70">macOS:</span> System Settings → General → Login Items
+            &amp; Extensions → Open at Login → add <span className="text-white/70">pengine</span>{" "}
+            from Applications (the bundle is{" "}
+            <span className="font-mono text-[11px] text-white/70">pengine.app</span>
+            ).
+          </li>
+          <li>
+            <span className="text-white/70">Linux:</span> use your desktop environment&apos;s{" "}
+            <span className="text-white/70">Startup Applications</span> (or{" "}
+            <span className="font-mono text-[11px] text-white/70">~/.config/autostart/</span>) to
+            run the <span className="text-white/70">pengine</span> binary or the{" "}
+            <span className="font-mono text-[11px] text-white/70">.desktop</span> file from your
+            install.
+          </li>
+          <li>
+            <span className="text-white/70">Windows:</span> Settings → Apps → Startup → enable{" "}
+            <span className="text-white/70">pengine</span>.
+          </li>
+        </ul>
+
         <div className="mt-5 rounded-2xl border border-white/10 bg-white/5 p-4 font-mono text-xs text-(--mid)">
           <p>
             Checking <code className="text-slate-300">{PENGINE.health}</code>…
