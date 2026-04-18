@@ -58,17 +58,26 @@ export function CronPanel() {
   const [formError, setFormError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
-  const [togglingId, setTogglingId] = useState<string | null>(null);
-  const [testingId, setTestingId] = useState<string | null>(null);
+  const [togglingIds, setTogglingIds] = useState<Set<string>>(() => new Set());
+  const [testingIds, setTestingIds] = useState<Set<string>>(() => new Set());
   const [testResults, setTestResults] = useState<Record<string, CronTestResponse>>({});
-  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [deletingIds, setDeletingIds] = useState<Set<string>>(() => new Set());
   const [skillsCatalog, setSkillsCatalog] = useState<Skill[] | null>(null);
 
   const cancelledRef = useRef(false);
+  const fetchSeqRef = useRef(0);
+  const editingIdRef = useRef<string | null>(editingId);
+  const showFormRef = useRef(showForm);
+
+  useEffect(() => {
+    editingIdRef.current = editingId;
+    showFormRef.current = showForm;
+  }, [editingId, showForm]);
 
   const load = useCallback(async () => {
+    const seq = ++fetchSeqRef.current;
     const resp = await fetchCronJobs();
-    if (cancelledRef.current) return;
+    if (cancelledRef.current || seq !== fetchSeqRef.current) return;
     setLoading(false);
     if (resp) {
       setJobs(resp.jobs.map(normalizeCronJob));
@@ -132,18 +141,26 @@ export function CronPanel() {
     }
     if (draft.schedule.kind === "every_minutes") {
       const m = draft.schedule.minutes;
-      if (!Number.isFinite(m) || m < 1 || m > 10080) {
+      if (!Number.isInteger(m) || m < 1 || m > 10080) {
         setFormError("Minutes must be between 1 and 10080");
         return;
       }
     } else {
       const { hour, minute } = draft.schedule;
-      if (hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+      if (
+        !Number.isInteger(hour) ||
+        !Number.isInteger(minute) ||
+        hour < 0 ||
+        hour > 23 ||
+        minute < 0 ||
+        minute > 59
+      ) {
         setFormError("Time must be HH:MM in 24-hour local time");
         return;
       }
     }
 
+    const sessionEditingId = editingIdRef.current;
     setSaving(true);
     setFormError(null);
     const payload: CronDraft = {
@@ -152,25 +169,32 @@ export function CronPanel() {
       instruction: trimmedInstruction,
       condition: draft.condition.trim(),
     };
-    const result = editingId
-      ? await updateCronJob(editingId, payload)
+    const result = sessionEditingId
+      ? await updateCronJob(sessionEditingId, payload)
       : await createCronJob(payload);
     setSaving(false);
+    if (!showFormRef.current || editingIdRef.current !== sessionEditingId) {
+      return;
+    }
     if (!result.ok) {
       setFormError(result.error ?? "Could not save cron job");
       return;
     }
-    setNotice(editingId ? "Cron job updated" : "Cron job created");
+    setNotice(sessionEditingId ? "Cron job updated" : "Cron job created");
     closeForm();
     await load();
   };
 
   const handleDelete = async (job: CronJob) => {
     if (!window.confirm(`Delete cron job "${job.name}"?`)) return;
-    setDeletingId(job.id);
+    setDeletingIds((s) => new Set(s).add(job.id));
     setError(null);
     const result = await deleteCronJob(job.id);
-    setDeletingId(null);
+    setDeletingIds((s) => {
+      const n = new Set(s);
+      n.delete(job.id);
+      return n;
+    });
     if (!result.ok) {
       setError(result.error ?? "Could not delete cron job");
       return;
@@ -186,12 +210,16 @@ export function CronPanel() {
 
   const handleToggle = async (job: CronJob) => {
     const next = !job.enabled;
-    setTogglingId(job.id);
+    setTogglingIds((s) => new Set(s).add(job.id));
     setJobs((prev) =>
       prev ? prev.map((j) => (j.id === job.id ? { ...j, enabled: next } : j)) : prev,
     );
     const result = await setCronJobEnabled(job.id, next);
-    setTogglingId(null);
+    setTogglingIds((s) => {
+      const n = new Set(s);
+      n.delete(job.id);
+      return n;
+    });
     if (!result.ok) {
       setError(result.error ?? "Could not update cron job");
       void load();
@@ -199,10 +227,14 @@ export function CronPanel() {
   };
 
   const handleTest = async (job: CronJob) => {
-    setTestingId(job.id);
+    setTestingIds((s) => new Set(s).add(job.id));
     setError(null);
     const result = await testCronJob(job.id);
-    setTestingId(null);
+    setTestingIds((s) => {
+      const n = new Set(s);
+      n.delete(job.id);
+      return n;
+    });
     if (!result.ok || !result.result) {
       setError(result.error ?? "Test run failed");
       return;
@@ -364,8 +396,8 @@ export function CronPanel() {
                     max={10080}
                     value={draft.schedule.minutes}
                     onChange={(e) => {
-                      const v = Number.parseInt(e.target.value, 10);
-                      if (Number.isFinite(v)) setEveryMinutes(v);
+                      const v = e.target.valueAsNumber;
+                      if (Number.isInteger(v) && v >= 1 && v <= 10080) setEveryMinutes(v);
                     }}
                     className="w-20 rounded-md border border-white/10 bg-black/30 px-2 py-0.5 font-mono text-[11px] text-white outline-none focus:border-cyan-300/40"
                   />
@@ -430,16 +462,17 @@ export function CronPanel() {
         <div className="mt-4 grid gap-2">
           {jobs.map((job) => {
             const testResult = testResults[job.id];
-            const busy = togglingId === job.id || testingId === job.id || deletingId === job.id;
+            const busy =
+              togglingIds.has(job.id) || testingIds.has(job.id) || deletingIds.has(job.id);
             return (
               <CronJobCard
                 key={job.id}
                 job={job}
                 testResult={testResult}
                 busy={busy}
-                toggleDisabled={togglingId === job.id}
-                testing={testingId === job.id}
-                deleting={deletingId === job.id}
+                toggleDisabled={togglingIds.has(job.id)}
+                testing={testingIds.has(job.id)}
+                deleting={deletingIds.has(job.id)}
                 skillsCatalog={skillsCatalog}
                 onToggle={() => void handleToggle(job)}
                 onTest={() => void handleTest(job)}

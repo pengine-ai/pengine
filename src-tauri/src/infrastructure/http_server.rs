@@ -25,10 +25,15 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::io::ErrorKind;
 use std::time::Duration;
+use tokio::task;
+use tokio::time::timeout;
 use tokio_stream::{Stream, StreamExt};
 use tower_http::cors::{Any, CorsLayer};
 
 pub const DEFAULT_PORT: u16 = 21516;
+
+/// Matches dashboard `testCronJob` default timeout (120s).
+const CRON_TEST_AGENT_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Deserialize)]
 pub struct ConnectRequest {
@@ -1943,10 +1948,14 @@ pub struct CronTestResponse {
 }
 
 async fn persist_cron(state: &AppState) -> Result<(), String> {
+    let _guard = state.cron_save_mutex.lock().await;
     let jobs = state.cron_jobs.read().await.clone();
     let last_chat_id = *state.last_chat_id.read().await;
     let file = CronFile { jobs, last_chat_id };
-    cron_repository::save(&state.cron_path, &file)
+    let path = state.cron_path.clone();
+    task::spawn_blocking(move || cron_repository::save(&path, &file))
+        .await
+        .map_err(|e| format!("cron persist task: {e}"))?
 }
 
 fn bad_request(msg: impl Into<String>) -> (StatusCode, Json<ErrorResponse>) {
@@ -1966,6 +1975,13 @@ fn not_found(msg: impl Into<String>) -> (StatusCode, Json<ErrorResponse>) {
 fn internal(msg: impl Into<String>) -> (StatusCode, Json<ErrorResponse>) {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ErrorResponse { error: msg.into() }),
+    )
+}
+
+fn gateway_timeout(msg: impl Into<String>) -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::GATEWAY_TIMEOUT,
         Json(ErrorResponse { error: msg.into() }),
     )
 }
@@ -2122,9 +2138,32 @@ async fn handle_cron_test(
     } else {
         Some(job.skill_slugs.as_slice())
     };
-    let turn = bot_agent::run_system_turn(&state, &prompt, skills_filter)
-        .await
-        .map_err(|e| internal(format!("agent error: {e}")))?;
+    let turn = match timeout(
+        CRON_TEST_AGENT_TIMEOUT,
+        bot_agent::run_system_turn(&state, &prompt, skills_filter),
+    )
+    .await
+    {
+        Ok(Ok(turn)) => turn,
+        Ok(Err(e)) => return Err(internal(format!("agent error: {e}"))),
+        Err(_elapsed) => {
+            state
+                .emit_log(
+                    "cron",
+                    &format!(
+                        "test run for '{}' ({}) timed out after {}s",
+                        job.name,
+                        job.id,
+                        CRON_TEST_AGENT_TIMEOUT.as_secs()
+                    ),
+                )
+                .await;
+            return Err(gateway_timeout(format!(
+                "agent timed out after {}s",
+                CRON_TEST_AGENT_TIMEOUT.as_secs()
+            )));
+        }
+    };
     let reply = turn.text;
     let condition_met = !turn.suppress_telegram_reply
         && !reply.trim().is_empty()

@@ -102,6 +102,8 @@ pub struct AppState {
     pub last_chat_id: Arc<RwLock<Option<i64>>>,
     /// Rate-limit scheduler logs when jobs are due but `last_chat_id` is still unknown.
     pub cron_no_chat_warned: Arc<AtomicBool>,
+    /// Serializes `cron.json` snapshots + disk writes with HTTP / scheduler / MCP callers.
+    pub cron_save_mutex: Arc<Mutex<()>>,
 }
 
 impl AppState {
@@ -133,6 +135,7 @@ impl AppState {
             cron_notify: Arc::new(Notify::new()),
             last_chat_id: Arc::new(RwLock::new(None)),
             cron_no_chat_warned: Arc::new(AtomicBool::new(false)),
+            cron_save_mutex: Arc::new(Mutex::new(())),
         }
     }
 

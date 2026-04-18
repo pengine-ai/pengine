@@ -456,6 +456,7 @@ async fn format_cron_list(state: &AppState) -> String {
 }
 
 async fn set_cron_enabled(state: &AppState, job_id: &str, enabled: bool) -> Result<String, String> {
+    let _save_guard = state.cron_save_mutex.lock().await;
     let updated = {
         let mut jobs = state.cron_jobs.write().await;
         let Some(job) = jobs.iter_mut().find(|j| j.id == job_id) else {

@@ -55,7 +55,7 @@ export function CronDailyLocalTimePicker({
           value={String(hour)}
           onValueChange={(v) => {
             const h = Number.parseInt(v, 10);
-            if (Number.isFinite(h)) onChange(h, minute);
+            if (Number.isInteger(h)) onChange(h, minute);
           }}
           disabled={disabled}
         >
@@ -84,7 +84,7 @@ export function CronDailyLocalTimePicker({
           value={String(minute)}
           onValueChange={(v) => {
             const m = Number.parseInt(v, 10);
-            if (Number.isFinite(m)) onChange(hour, m);
+            if (Number.isInteger(m)) onChange(hour, m);
           }}
           disabled={disabled}
         >

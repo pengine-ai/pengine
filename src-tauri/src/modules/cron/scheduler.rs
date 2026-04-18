@@ -4,10 +4,12 @@ use super::types::{CronFile, CronJob};
 use crate::modules::bot::agent;
 use crate::shared::state::AppState;
 use crate::shared::text::split_by_chars;
+use futures::FutureExt;
 use std::sync::atomic::Ordering;
 use std::time::Duration as StdDuration;
 use teloxide::prelude::*;
 use teloxide::types::ChatId;
+use tokio::task;
 
 /// Wake-up cadence for the scheduler. The loop also resumes on `state.cron_notify`
 /// so CRUD / enable / test operations take effect immediately instead of waiting
@@ -70,6 +72,9 @@ async fn tick(state: &AppState) {
     }
 
     for job in due {
+        if state.shutdown_notify.notified().now_or_never().is_some() {
+            break;
+        }
         execute_job(state, job).await;
     }
 }
@@ -87,13 +92,18 @@ pub async fn execute_job(state: &AppState, job: CronJob) {
     } else {
         Some(job.skill_slugs.as_slice())
     };
-    let result = agent::run_system_turn(state, &prompt, skills_filter).await;
-
-    if let Err(e) = mark_ran(state, &job.id).await {
-        state
-            .emit_log("cron", &format!("persist last_run_at failed: {e}"))
-            .await;
-    }
+    let result = tokio::select! {
+        _ = state.shutdown_notify.notified() => {
+            state
+                .emit_log(
+                    "cron",
+                    &format!("'{}' — cancelled before agent run (shutdown)", job.name),
+                )
+                .await;
+            return;
+        }
+        r = agent::run_system_turn(state, &prompt, skills_filter) => r,
+    };
 
     match result {
         Ok(turn) => {
@@ -104,9 +114,7 @@ pub async fn execute_job(state: &AppState, job: CronJob) {
                         &format!("'{}' — reply suppressed; not sending to Telegram", job.name),
                     )
                     .await;
-                return;
-            }
-            if turn.text.trim().is_empty() {
+            } else if turn.text.trim().is_empty() {
                 state
                     .emit_log(
                         "cron",
@@ -116,9 +124,7 @@ pub async fn execute_job(state: &AppState, job: CronJob) {
                         ),
                     )
                     .await;
-                return;
-            }
-            if service::is_no_message_reply(&turn.text) {
+            } else if service::is_no_message_reply(&turn.text) {
                 state
                     .emit_log(
                         "cron",
@@ -128,15 +134,37 @@ pub async fn execute_job(state: &AppState, job: CronJob) {
                         ),
                     )
                     .await;
-                return;
-            }
-            if let Err(e) = send_to_last_chat(state, &turn.text).await {
-                state
-                    .emit_log("cron", &format!("'{}' send failed: {e}", job.name))
-                    .await;
             } else {
+                tokio::select! {
+                    _ = state.shutdown_notify.notified() => {
+                        state
+                            .emit_log(
+                                "cron",
+                                &format!(
+                                    "'{}' — cancelled before Telegram send (shutdown)",
+                                    job.name
+                                ),
+                            )
+                            .await;
+                        return;
+                    }
+                    r = send_to_last_chat(state, &turn.text) => match r {
+                        Ok(()) => {
+                            state
+                                .emit_log("cron", &format!("'{}' sent reply", job.name))
+                                .await;
+                        }
+                        Err(e) => {
+                            state
+                                .emit_log("cron", &format!("'{}' send failed: {e}", job.name))
+                                .await;
+                        }
+                    },
+                }
+            }
+            if let Err(e) = mark_ran(state, &job.id).await {
                 state
-                    .emit_log("cron", &format!("'{}' sent reply", job.name))
+                    .emit_log("cron", &format!("persist last_run_at failed: {e}"))
                     .await;
             }
         }
@@ -149,6 +177,7 @@ pub async fn execute_job(state: &AppState, job: CronJob) {
 }
 
 async fn mark_ran(state: &AppState, job_id: &str) -> Result<(), String> {
+    let _guard = state.cron_save_mutex.lock().await;
     let snapshot = {
         let mut jobs = state.cron_jobs.write().await;
         if let Some(j) = jobs.iter_mut().find(|j| j.id == job_id) {
@@ -161,7 +190,10 @@ async fn mark_ran(state: &AppState, job_id: &str) -> Result<(), String> {
         jobs: snapshot,
         last_chat_id,
     };
-    repository::save(&state.cron_path, &file)
+    let path = state.cron_path.clone();
+    task::spawn_blocking(move || repository::save(&path, &file))
+        .await
+        .map_err(|e| format!("cron mark_ran task: {e}"))?
 }
 
 pub async fn send_to_last_chat(state: &AppState, text: &str) -> Result<(), String> {

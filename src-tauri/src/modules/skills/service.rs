@@ -331,6 +331,8 @@ fn skill_passes_hint_gate(
 ///
 /// When `slug_filter` is [`Some`] and non-empty, only those enabled skills are included
 /// (e.g. cron jobs with a pinned skill list).
+/// Note: `slug_filter == Some(&[])` is intentionally treated like `None` (no filter); pass
+/// `Some(non_empty_slice)` to pin skills or `None` to disable filtering.
 pub fn skills_prompt_hint_for_turn(
     store_path: &Path,
     user_message: Option<&str>,
