@@ -1,4 +1,5 @@
 mod app;
+mod build_info;
 mod infrastructure;
 pub mod modules;
 mod shared;

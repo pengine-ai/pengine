@@ -32,12 +32,21 @@ export function DashboardPage() {
     { name: "Ollama", status: "checking", detail: "Checking…" },
   ]);
   const [disconnectError, setDisconnectError] = useState<string | null>(null);
+  const [appVersion, setAppVersion] = useState<string | null>(null);
+  const [gitCommit, setGitCommit] = useState<string | null>(null);
   const refreshStatus = useCallback(async () => {
     let botUser = botUsername ?? "unknown";
     const health = await getPengineHealth(3000);
     const pengineUp = !!health;
     const botConnected = health?.bot_connected ?? false;
     if (health?.bot_username) botUser = health.bot_username;
+    if (health) {
+      setAppVersion(health.app_version ?? null);
+      setGitCommit(health.git_commit ?? null);
+    } else {
+      setAppVersion(null);
+      setGitCommit(null);
+    }
 
     const ollama = await fetchOllamaModels(2500);
     const ollamaUp = ollama.reachable;
@@ -203,6 +212,17 @@ export function DashboardPage() {
           <p className="mt-2 font-mono text-xs text-rose-300">{disconnectError}</p>
         )}
         {modelError && <p className="mt-2 font-mono text-xs text-rose-300">{modelError}</p>}
+
+        {appVersion && gitCommit && (
+          <p
+            className="mt-2 font-mono text-[10px] tracking-wide text-white/35 sm:text-[11px]"
+            title={`${gitCommit}`}
+            data-testid="app-build-info"
+          >
+            Pengine v{appVersion}
+            {gitCommit !== "unknown" ? ` · ${gitCommit.slice(0, 7)}` : ""}
+          </p>
+        )}
 
         {/* ── Terminal (full width) ────────────────────────────── */}
         <section className="mt-4 sm:mt-6">

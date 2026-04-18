@@ -1,3 +1,4 @@
+use crate::build_info;
 use crate::infrastructure::bot_lifecycle;
 use crate::modules::bot::{agent as bot_agent, repository, service as bot_service};
 use crate::modules::cron::{
@@ -53,6 +54,10 @@ pub struct HealthResponse {
     pub bot_connected: bool,
     pub bot_username: Option<String>,
     pub bot_id: Option<String>,
+    /// Release version (root `package.json`, baked in at build).
+    pub app_version: String,
+    /// Git commit at build time (`HEAD`), or `"unknown"`.
+    pub git_commit: String,
 }
 
 #[derive(Serialize)]
@@ -348,6 +353,8 @@ async fn handle_health(State(state): State<AppState>) -> Json<HealthResponse> {
         bot_connected: conn.is_some(),
         bot_username: conn.as_ref().map(|c| c.bot_username.clone()),
         bot_id: conn.as_ref().map(|c| c.bot_id.clone()),
+        app_version: build_info::APP_VERSION.to_string(),
+        git_commit: build_info::GIT_COMMIT.to_string(),
     })
 }
 
