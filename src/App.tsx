@@ -10,6 +10,9 @@ const SetupPage = lazy(() => import("./pages/SetupPage").then((m) => ({ default:
 const DashboardPage = lazy(() =>
   import("./pages/DashboardPage").then((m) => ({ default: m.DashboardPage })),
 );
+const SettingsPage = lazy(() =>
+  import("./pages/SettingsPage").then((m) => ({ default: m.SettingsPage })),
+);
 
 function RoutePageFallback() {
   return (
@@ -33,7 +36,7 @@ function StartupDashboardRedirect() {
     startupDone.current = true;
 
     const path = window.location.pathname;
-    if (path === "/dashboard") return;
+    if (path === "/dashboard" || path === "/settings") return;
 
     if (useAppSessionStore.getState().isDeviceConnected) {
       navigate("/dashboard", { replace: true });
@@ -97,6 +100,7 @@ function App() {
           <Route path="/" element={<LandingPage />} />
           <Route path="/setup" element={<SetupPage />} />
           <Route path="/dashboard" element={<DashboardPage />} />
+          <Route path="/settings" element={<SettingsPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </Suspense>
