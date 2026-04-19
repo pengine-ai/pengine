@@ -1,3 +1,4 @@
+use crate::modules::ollama::cloud;
 use crate::modules::ollama::constants::{OLLAMA_CHAT_URL, OLLAMA_PS_URL, OLLAMA_TAGS_URL};
 use crate::shared::text::normalize_assistant_message_content;
 use std::sync::OnceLock;
@@ -8,10 +9,43 @@ fn http_client() -> &'static reqwest::Client {
     HTTP.get_or_init(reqwest::Client::new)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelKind {
+    Local,
+    Cloud,
+}
+
+impl ModelKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ModelKind::Local => "local",
+            ModelKind::Cloud => "cloud",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ModelInfo {
+    pub name: String,
+    pub kind: ModelKind,
+}
+
 #[derive(Debug, Clone)]
 pub struct ModelCatalog {
     pub active: Option<String>,
-    pub models: Vec<String>,
+    pub models: Vec<ModelInfo>,
+}
+
+/// Cloud models are surfaced by the local Ollama daemon after `ollama signin`
+/// and are tagged with `-cloud` (e.g. `gpt-oss:120b-cloud`) or the bare tag
+/// `cloud`. Tag is the part after the first `:` (defaulting to `latest`).
+pub fn classify_model(name: &str) -> ModelKind {
+    let tag = name.split_once(':').map(|(_, t)| t).unwrap_or("");
+    if tag == "cloud" || tag.ends_with("-cloud") {
+        ModelKind::Cloud
+    } else {
+        ModelKind::Local
+    }
 }
 
 /// Returns active model and the full pulled model list (`/api/tags`).
@@ -46,7 +80,7 @@ pub async fn model_catalog(timeout_ms: u64) -> Result<ModelCatalog, String> {
         Err(e) => log::warn!("ollama {}: request error: {e}", OLLAMA_PS_URL),
     }
 
-    let mut models: Vec<String> = Vec::new();
+    let mut models: Vec<ModelInfo> = Vec::new();
     match client.get(OLLAMA_TAGS_URL).timeout(timeout).send().await {
         Ok(resp) => {
             if !resp.status().is_success() {
@@ -62,7 +96,12 @@ pub async fn model_catalog(timeout_ms: u64) -> Result<ModelCatalog, String> {
                             .as_array()
                             .map(|arr| {
                                 arr.iter()
-                                    .filter_map(|m| m["name"].as_str().map(|s| s.to_string()))
+                                    .filter_map(|m| {
+                                        m["name"].as_str().map(|s| ModelInfo {
+                                            name: s.to_string(),
+                                            kind: classify_model(s),
+                                        })
+                                    })
                                     .collect()
                             })
                             .unwrap_or_default();
@@ -77,16 +116,70 @@ pub async fn model_catalog(timeout_ms: u64) -> Result<ModelCatalog, String> {
     }
 
     if let Some(ref a) = active {
-        if !models.iter().any(|m| m == a) {
-            models.insert(0, a.clone());
+        if !models.iter().any(|m| &m.name == a) {
+            models.insert(
+                0,
+                ModelInfo {
+                    name: a.clone(),
+                    kind: classify_model(a),
+                },
+            );
         }
     }
 
+    // Cloud models are proxied through the local daemon, so if local Ollama
+    // is unreachable they aren't usable either — keep the original error.
     if active.is_none() && models.is_empty() {
         return Err("ollama unreachable: no active model and no pulled models".to_string());
     }
 
+    for cloud_name in cloud::list_cloud_models().await {
+        if !models.iter().any(|m| m.name == cloud_name) {
+            models.push(ModelInfo {
+                name: cloud_name,
+                kind: ModelKind::Cloud,
+            });
+        }
+    }
+
     Ok(ModelCatalog { active, models })
+}
+
+/// Best-guess local fallback model when a cloud rate-limit forces a downgrade.
+/// Prefers `preferred` if local, then `last_local`, then the active model if
+/// local, then the first local entry in the catalog.
+pub fn pick_local_fallback(
+    catalog: &ModelCatalog,
+    preferred: Option<&str>,
+    last_local: Option<&str>,
+) -> Option<String> {
+    let local_named = |name: &str| {
+        catalog
+            .models
+            .iter()
+            .find(|m| m.name == name && m.kind == ModelKind::Local)
+            .map(|m| m.name.clone())
+    };
+    if let Some(p) = preferred {
+        if let Some(m) = local_named(p) {
+            return Some(m);
+        }
+    }
+    if let Some(p) = last_local {
+        if let Some(m) = local_named(p) {
+            return Some(m);
+        }
+    }
+    if let Some(active) = catalog.active.as_deref() {
+        if let Some(m) = local_named(active) {
+            return Some(m);
+        }
+    }
+    catalog
+        .models
+        .iter()
+        .find(|m| m.kind == ModelKind::Local)
+        .map(|m| m.name.clone())
 }
 
 /// Returns the currently loaded model (from `/api/ps`), falling back to the
@@ -99,8 +192,20 @@ pub async fn active_model() -> Result<String, String> {
     catalog
         .models
         .first()
-        .cloned()
+        .map(|m| m.name.clone())
         .ok_or_else(|| "no models pulled in ollama".to_string())
+}
+
+/// Detect rate-limit / quota errors returned for cloud models. The local
+/// daemon proxies the upstream HTTP status (typically 429) and may also embed
+/// a textual hint in the response body.
+pub fn is_rate_limit_error(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    lower.contains("http 429")
+        || lower.contains("rate limit")
+        || lower.contains("rate-limit")
+        || lower.contains("quota")
+        || lower.contains("too many requests")
 }
 
 /// Outcome of a single chat call so the caller knows whether tools were included in the request.

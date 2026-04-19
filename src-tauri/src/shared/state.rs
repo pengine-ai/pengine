@@ -82,6 +82,10 @@ pub struct AppState {
     /// Ensures only one MCP registry rebuild (stdio connects) runs at a time.
     pub mcp_rebuild_mutex: Arc<Mutex<()>>,
     pub preferred_ollama_model: Arc<RwLock<Option<String>>>,
+    /// Last user-selected **local** Ollama model. Used as the automatic
+    /// downgrade target when a cloud model returns a rate-limit error so the
+    /// agent can keep replying without the user having to repick.
+    pub last_local_model: Arc<RwLock<Option<String>>>,
     pub cached_filesystem_paths: Arc<RwLock<Vec<String>>>,
     pub tool_engine_mutex: Arc<Mutex<()>>,
     /// Active memory-session recording (toggled by keyword commands; see `bot::agent`).
@@ -136,6 +140,7 @@ impl AppState {
             mcp_config_mutex: Arc::new(Mutex::new(())),
             mcp_rebuild_mutex: Arc::new(Mutex::new(())),
             preferred_ollama_model: Arc::new(RwLock::new(None)),
+            last_local_model: Arc::new(RwLock::new(None)),
             cached_filesystem_paths: Arc::new(RwLock::new(Vec::new())),
             tool_engine_mutex: Arc::new(Mutex::new(())),
             memory_session: Arc::new(RwLock::new(None)),
