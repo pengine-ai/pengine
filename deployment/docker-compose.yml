@@ -1,12 +1,19 @@
-# Pengine web + Pengui on the same host: publish 1422 on all interfaces (not 127.0.0.1-only)
-# so Pengui nginx (Docker) can reach this via http://host.docker.internal:1422/
-# and you can curl http://127.0.0.1:1422/ on the host.
+# Pengine + Pengui: join Pengui’s bridge (`pengui-network`) so nginx can proxy to
+# http://pengine-app:1422. Deploy Pengui first so the network exists.
+# PENGUI_NETWORK_NAME if your Pengui compose uses another network name (see docker network ls).
+networks:
+  pengui-network:
+    external: true
+    name: ${PENGUI_NETWORK_NAME:-pengui-network}
+
 services:
   pengine-web:
     image: ${PENGINE_WEB_IMAGE:-ghcr.io/pengine-ai/pengine-web:latest}
     container_name: pengine-app
     hostname: pengine
     restart: unless-stopped
+    networks:
+      - pengui-network
     # Vite preview — serves `dist/` (must match deploy/Dockerfile CMD).
     command: ["npm", "run", "preview", "--", "--host", "0.0.0.0", "--port", "1422"]
     ports:
