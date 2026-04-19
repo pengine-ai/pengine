@@ -1,31 +1,26 @@
 # pengine-web: **website only** — same static bundle the Tauri desktop shell loads from
 # `dist/`, without building or running the native app.
 #
-# Mirrors `src-tauri/tauri.conf.json`:
-#   - `build.beforeBuildCommand` → `bun run build` (→ `build:web`)
-#   - `build.frontendDist`       → `../dist` (this image serves that folder on :80)
+# Pipeline build step: `npm run build:web` (see `package.json`). Local/Tauri may use `bun run build`
+# to the same `build:web` script. `build.frontendDist` → `../dist` (this image serves that on :80).
 #
 # Intentionally omitted: `tauri build`, Cargo, `src-tauri/` (see /.dockerignore).
 #
 # Build:  docker build -f deploy/Dockerfile .
 # Context: repository root (see /.dockerignore).
 
-FROM oven/bun:1 AS build
+FROM node:22-alpine
 WORKDIR /app
 
 ENV HUSKY=0
 ENV NODE_ENV=production
 
-COPY package.json bun.lock ./
-RUN bun install --frozen-lockfile --ignore-scripts
-
-COPY . .
-
 ARG VITE_APP_ORIGIN=https://pengine.net
 ENV VITE_APP_ORIGIN=${VITE_APP_ORIGIN}
 
-# Web UI only — matches Tauri’s packaged frontend; does not invoke the Tauri CLI.
-RUN bun run build:web
+COPY . .
+RUN npm install --frozen-lockfile --ignore-scripts
+RUN npm run build
 
 FROM ghcr.io/static-web-server/static-web-server:2-alpine
 USER root
