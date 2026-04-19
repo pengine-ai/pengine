@@ -13,6 +13,8 @@ name: Deploy web app
 #   DEPLOY_HOST     — hostname or IP of the deploy target
 #   DEPLOY_USER     — SSH user on the deploy target
 #   DEPLOY_SSH_KEY  — private SSH key (PEM) authorized on the target
+# Optional:
+#   DEPLOY_HOST_KNOWN_HOSTS — verified known_hosts line(s); if unset, CI uses ssh-keyscan
 
 on:
   push:
@@ -38,6 +40,9 @@ jobs:
       image_ref: ${{ steps.ref.outputs.image_ref }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Tag push: github.ref; manual: workflow input (otherwise default branch would build)
+          ref: ${{ github.event.inputs.tag || github.ref }}
 
       - uses: docker/setup-buildx-action@v3
 
@@ -89,9 +94,18 @@ jobs:
       - name: Trust host key
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_HOST_KNOWN_HOSTS: ${{ secrets.DEPLOY_HOST_KNOWN_HOSTS }}
         run: |
+          set -euo pipefail
           mkdir -p ~/.ssh
-          ssh-keyscan -H "$DEPLOY_HOST" >>~/.ssh/known_hosts 2>/dev/null
+          chmod 700 ~/.ssh
+          if [ -n "${DEPLOY_HOST_KNOWN_HOSTS:-}" ]; then
+            printf '%s\n' "$DEPLOY_HOST_KNOWN_HOSTS" >>~/.ssh/known_hosts
+          else
+            ssh-keyscan -H "$DEPLOY_HOST" >>~/.ssh/known_hosts 2>/dev/null \
+              || { echo "ssh-keyscan failed; set optional DEPLOY_HOST_KNOWN_HOSTS to pin the host key." >&2; exit 1; }
+          fi
+          chmod 644 ~/.ssh/known_hosts
 
       - name: Copy docker-compose.yml to host
         env:

@@ -1,6 +1,6 @@
 # Deploying the web app
 
-The public production URL for the web UI is **`https://pengine.net`** (DNS A/AAAA → your host; TLS at the reverse proxy). The Vite production build embeds this via [`VITE_APP_ORIGIN`](../.env.production) for client-side metadata.
+The public production URL for the web UI is **`https://pengine.net`** (DNS A/AAAA → your host; TLS at the reverse proxy). The Vite production build embeds this via [`VITE_APP_ORIGIN`](../../.env.production) for client-side metadata.
 
 The pengine web bundle is deployed to a remote host via the
 [`Deploy web app`](../../.github/workflows/web-deploy.yml) GitHub Actions
@@ -39,6 +39,12 @@ Add under *Settings → Secrets and variables → Actions*:
 | `DEPLOY_HOST` | Hostname or IP of the deploy target |
 | `DEPLOY_USER` | SSH user on the target (must be in the `docker` group) |
 | `DEPLOY_SSH_KEY` | Private SSH key (PEM, including `-----BEGIN`/`-----END` lines), with its public half in the target user's `~/.ssh/authorized_keys` |
+
+Optional:
+
+| Secret | Value |
+| --- | --- |
+| `DEPLOY_HOST_KNOWN_HOSTS` | One or more `known_hosts` lines for `DEPLOY_HOST` (paste output of a **verified** `ssh-keyscan`). If omitted, the workflow runs `ssh-keyscan` at deploy time instead. |
 
 GHCR auth on the host uses the per-run `GITHUB_TOKEN` — no extra secret
 needed, but the host must be able to reach `ghcr.io` on 443.
