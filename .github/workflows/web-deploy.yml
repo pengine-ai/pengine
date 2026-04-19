@@ -44,10 +44,8 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ steps.meta.outputs.ref }}
-          fetch-depth: 1
+      - name: Checkout code
+        uses: actions/checkout@v5
 
       - name: Git short SHA
         id: git
@@ -59,7 +57,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: deploy/Dockerfile
+          file: ./deployment/Dockerfile
           platforms: linux/amd64
           push: true
           provenance: false
@@ -77,8 +75,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      # Need repo files for scp (deploy job does not inherit build-package checkout).
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v5
 
       - name: Ensure remote directory
         uses: appleboy/ssh-action@v1.2.5
@@ -98,9 +96,10 @@ jobs:
           key: ${{ secrets.DEPLOY_SSH_KEY }}
           port: 22
           timeout: 2m
-          source: deploy/docker-compose.yml
+          source: deployment/docker-compose.yml
           target: ~/pengine/
           overwrite: true
+          strip_components: 1
 
       - name: SSH — docker login, compose pull, up
         uses: appleboy/ssh-action@v1.2.5
@@ -118,8 +117,8 @@ jobs:
           envs: GHCR_USER,GHCR_TOKEN,PENGINE_WEB_IMAGE
           script: |
             set -euo pipefail
-            cd ~/pengine
+            cd ~/pengine/deployment
             echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
             export PENGINE_WEB_IMAGE
             docker compose pull
-            docker compose up -d --remove-orphans
+            docker compose up -d

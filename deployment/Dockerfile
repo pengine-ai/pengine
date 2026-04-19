@@ -2,7 +2,6 @@ FROM node:22-alpine AS builder
 WORKDIR /app
 
 ENV HUSKY=0
-ENV NODE_ENV=production
 
 COPY package.json package-lock.json ./
 RUN npm ci --ignore-scripts

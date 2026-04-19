@@ -6,8 +6,8 @@ The pengine web bundle is deployed to a remote host via the
 [`Deploy web app`](../../.github/workflows/web-deploy.yml) GitHub Actions
 workflow. It has two jobs:
 
-1. **Build and push image** — Checks out the input tag and builds [`deploy/Dockerfile`](../../deploy/Dockerfile) from that revision. Steps: **`npm ci`** → [`npm run build:web`](../../package.json) → runtime **[`vite preview`](https://vite.dev/guide/cli#vite-preview)**. CI passes `VITE_APP_ORIGIN=https://pengine.net` as a **build-arg**. **Always** pushes to GHCR: `:<tag>`, `:sha-<short>`, and `:latest`.
-2. **Deploy to host** — checks out the workflow branch and **scp**’s [`deploy/docker-compose.yml`](../../deploy/docker-compose.yml) to the server, then SSH runs **`docker login`** → **`docker compose pull`** → **`docker compose up`**. **`PENGINE_WEB_IMAGE`** is **`ghcr.io/<owner>/pengine-web:<tag>`** from the workflow input.
+1. **Build and push image** — Checks out the input tag and builds [`deploy/Dockerfile`](../../deployemnt/Dockerfile) from that revision. Steps: **`npm ci`** → [`npm run build:web`](../../package.json) → runtime **[`vite preview`](https://vite.dev/guide/cli#vite-preview)**. CI passes `VITE_APP_ORIGIN=https://pengine.net` as a **build-arg**. **Always** pushes to GHCR: `:<tag>`, `:sha-<short>`, and `:latest`.
+2. **Deploy to host** — checks out the workflow branch and **scp**’s [`deploy/docker-compose.yml`](../../deployment/docker-compose.yml) to the server, then SSH runs **`docker login`** → **`docker compose pull`** → **`docker compose up`**. **`PENGINE_WEB_IMAGE`** is **`ghcr.io/<owner>/pengine/web:<tag>`** from the workflow input.
 
 The app listens on **port 1422** inside the container (**Vite preview** — matches
 `preview.port` in `vite.config.ts`; dev server stays on **1420**). Add a **host**
@@ -17,7 +17,7 @@ not defined in this repository — point nginx (or similar) at that upstream URL
 
 ## Triggers
 
-- **Manual only** — Actions → *Deploy web app* → *Run workflow*. Enter a **`tag`**
+- **Manual only** — Actions → _Deploy web app_ → _Run workflow_. Enter a **`tag`**
   (e.g. `1.0.1` or `v1.0.1`) that exists as a **git ref** on the remote. The workflow
   checks out that ref, builds the image, **always pushes** it to GHCR for that tag,
   then deploys with **`docker compose pull`** on the host.
@@ -26,18 +26,18 @@ not defined in this repository — point nginx (or similar) at that upstream URL
 
 ## Required secrets
 
-Add under *Settings → Secrets and variables → Actions*:
+Add under _Settings → Secrets and variables → Actions_:
 
-| Secret | Value |
-| --- | --- |
-| `DEPLOY_HOST` | Hostname or IP of the deploy target |
-| `DEPLOY_USER` | SSH user on the target (must be in the `docker` group) |
+| Secret           | Value                                                                                                                                                                                |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `DEPLOY_HOST`    | Hostname or IP of the deploy target                                                                                                                                                  |
+| `DEPLOY_USER`    | SSH user on the target (must be in the `docker` group)                                                                                                                               |
 | `DEPLOY_SSH_KEY` | Private key (full file, `BEGIN`/`END` lines), **no passphrase**. Ed25519 recommended — [generate a deploy key](#ssh-deploy-key). Public key on the host in `~/.ssh/authorized_keys`. |
 
 Optional (not wired in the workflow today; extend the `appleboy` steps if you need host-key pinning):
 
-| Secret | Value |
-| --- | --- |
+| Secret               | Value                                                                                                                                                                                       |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Host key fingerprint | [appleboy/ssh-action](https://github.com/appleboy/ssh-action) supports `fingerprint` (SHA256 of the server host key) for MITM protection — add to the workflow `with:` block if you use it. |
 
 GHCR auth on the host uses the per-run `GITHUB_TOKEN` — no extra secret
@@ -128,7 +128,7 @@ ssh "$DEPLOY_USER@$DEPLOY_HOST" 'docker ps --filter name=pengine'
 curl -fsSL https://pengine.net/ | head
 ```
 
-To roll back, run *Deploy web app* again with an older **`tag`** — the workflow
+To roll back, run _Deploy web app_ again with an older **`tag`** — the workflow
 rebuilds and overwrites that tag’s image in GHCR, then deploys it.
 
 ## Local image build
