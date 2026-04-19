@@ -86,7 +86,7 @@ jobs:
           key: ${{ secrets.DEPLOY_SSH_KEY }}
           port: 22
           timeout: 2m
-          script: mkdir -p ~/pengine
+          script: mkdir -p ~/pengine/deployment
 
       - name: Copy docker-compose.yml to host
         uses: appleboy/scp-action@v0.1.7
