@@ -49,6 +49,14 @@ jobs:
           ref: ${{ steps.meta.outputs.ref }}
           fetch-depth: 1
 
+      - name: Require deploy/Dockerfile at this ref
+        run: |
+          set -euo pipefail
+          if [[ ! -f deploy/Dockerfile ]]; then
+            echo "::error::This ref (${{ steps.meta.outputs.ref }}) has no deploy/Dockerfile. The web image build was added in a later commit — use a tag (or SHA) that includes the deploy/ directory, e.g. tag current main as a new patch version."
+            exit 1
+          fi
+
       - name: Git short SHA
         id: git
         run: echo "short=$(git rev-parse --short HEAD)" >>"$GITHUB_OUTPUT"
