@@ -1,13 +1,13 @@
 name: Deploy web app
 
-# Required `tag` (GHCR semver tag, e.g. 1.0.2). If image missing → checkout + build + push.
-# Deploy never uses actions/checkout: compose is fetched via GitHub API, then SSH + scp + pull.
+# Job 1: If ghcr.io/.../pengine-web:<tag> is missing → checkout, build, push to GHCR.
+# Job 2: Fetch compose (API), SSH → docker compose pull + up.
 
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Registry / deploy tag (e.g. 1.0.2). Git ref must exist (tag or branch) for compose + optional build."
+        description: "Registry / deploy tag (e.g. 1.0.2). Git ref for build must exist when the image is not yet in GHCR."
         required: true
         type: string
 
@@ -23,9 +23,14 @@ env:
   IMAGE: ghcr.io/${{ github.repository_owner }}/pengine-web
 
 jobs:
-  deploy-web:
+  build-package:
+    name: Build and push image (if not in GHCR)
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    outputs:
+      ref: ${{ steps.meta.outputs.ref }}
+      tag: ${{ steps.meta.outputs.tag }}
+      image: ${{ env.IMAGE }}
     steps:
       - name: Resolve git ref and registry tag
         id: meta
@@ -43,7 +48,7 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Check if image already exists in GHCR
+      - name: Check if package already exists in GHCR
         id: registry
         env:
           TAG: ${{ steps.meta.outputs.tag }}
@@ -51,11 +56,16 @@ jobs:
           set -euo pipefail
           if docker buildx imagetools inspect "${{ env.IMAGE }}:${TAG}" >/dev/null 2>&1; then
             echo "exists=true" >>"$GITHUB_OUTPUT"
-            echo "Image ${{ env.IMAGE }}:${TAG} already in GHCR — skipping build."
+            echo "Package ${{ env.IMAGE }}:${TAG} already in GHCR — skipping build and push."
           else
             echo "exists=false" >>"$GITHUB_OUTPUT"
-            echo "Image ${{ env.IMAGE }}:${TAG} not in GHCR — will build and push."
+            echo "Package ${{ env.IMAGE }}:${TAG} not in GHCR — will build and push."
           fi
+
+      - name: No build needed
+        if: steps.registry.outputs.exists == 'true'
+        run: |
+          echo "Skipping Docker build; using existing image from registry."
 
       - uses: actions/checkout@v4
         if: steps.registry.outputs.exists != 'true'
@@ -78,7 +88,7 @@ jobs:
       - uses: docker/setup-buildx-action@v3
         if: steps.registry.outputs.exists != 'true'
 
-      - name: Build and push
+      - name: Build and push package to GHCR
         if: steps.registry.outputs.exists != 'true'
         uses: docker/build-push-action@v6
         with:
@@ -95,18 +105,36 @@ jobs:
             ${{ env.IMAGE }}:sha-${{ steps.git.outputs.short }}
             ${{ env.IMAGE }}:latest
 
-      - name: Fetch deploy/docker-compose.yml (Contents API — no git checkout for deploy)
+  deploy:
+    name: Deploy to host
+    needs: build-package
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Fetch deploy/docker-compose.yml (Contents API)
         env:
-          REF: ${{ steps.meta.outputs.ref }}
+          REF: ${{ needs.build-package.outputs.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
-          API_URL="https://api.github.com/repos/${{ github.repository }}/contents/deploy/docker-compose.yml?ref=${REF}"
-          if ! curl -fsSL \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Accept: application/vnd.github+json" \
-            -o /tmp/compose-api.json \
-            "$API_URL"; then
-            echo "::error::Could not fetch deploy/docker-compose.yml for ref '${REF}' (missing tag/branch on GitHub, or no access)."
+          REPO="${{ github.repository }}"
+          TOKEN="${{ secrets.GITHUB_TOKEN }}"
+          USED=""
+          for r in "${REF}" "${DEFAULT_BRANCH}" "main" "master"; do
+            [ -z "${r:-}" ] && continue
+            if curl -fsSL \
+              -H "Authorization: Bearer ${TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              -o /tmp/compose-api.json \
+              "https://api.github.com/repos/${REPO}/contents/deploy/docker-compose.yml?ref=${r}"; then
+              USED="$r"
+              echo "Fetched deploy/docker-compose.yml from ref: ${USED}"
+              break
+            fi
+            echo "No deploy/docker-compose.yml at ref=${r} (404 or no access), trying fallback…"
+          done
+          if [ -z "${USED}" ]; then
+            echo "::error::Could not fetch deploy/docker-compose.yml (tried tag/branch '${REF}', default branch, main, master)."
             exit 1
           fi
           jq -r .content /tmp/compose-api.json | base64 -d > docker-compose.upload.yml
@@ -134,12 +162,12 @@ jobs:
           target: "~/pengine/"
           overwrite: true
 
-      - name: SSH — compose pull on host
+      - name: SSH — docker compose pull on host
         uses: appleboy/ssh-action@v1.2.5
         env:
           GHCR_USER: ${{ github.repository_owner }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PENGINE_WEB_IMAGE: "${{ env.IMAGE }}:${{ steps.meta.outputs.tag }}"
+          PENGINE_WEB_IMAGE: "${{ needs.build-package.outputs.image }}:${{ needs.build-package.outputs.tag }}"
         with:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}

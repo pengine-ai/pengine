@@ -4,15 +4,10 @@ The public production URL for the web UI is **`https://pengine.net`** (DNS A/AAA
 
 The pengine web bundle is deployed to a remote host via the
 [`Deploy web app`](../../.github/workflows/web-deploy.yml) GitHub Actions
-workflow. Each run:
+workflow. It has two jobs:
 
-1. Builds [`deploy/Dockerfile`](../../deploy/Dockerfile) from the **repo root**
-   (see [`/.dockerignore`](../../.dockerignore)): `bun install` → [`bun run build:web`](../../package.json)
-   (same as Tauri [`build.beforeBuildCommand`](../../src-tauri/tauri.conf.json) / [`build.frontendDist`](../../src-tauri/tauri.conf.json); **no** `tauri build` or Rust) → [static-web-server](https://github.com/static-web-server/static-web-server)
-   with **`SERVER_FALLBACK_PAGE`** so React Router paths resolve. CI passes
-   `VITE_APP_ORIGIN=https://pengine.net` as a **build-arg** (overridable locally).
-2. **If** `ghcr.io/<owner>/pengine-web:<tag>` is **not** already in GHCR, builds and pushes that tag (plus `:sha-<short>` and `:latest`). **If** the image **already exists**, skips the build and only deploys.
-3. Fetches [`deploy/docker-compose.yml`](../../deploy/docker-compose.yml) for that ref via the **GitHub API** (no `git checkout` on the runner for deploy — avoids fetch failures when only deploying). Copies it to `~/pengine` over SSH, then on the host: **`docker login` → `docker compose pull` → `docker compose up`** with **`PENGINE_WEB_IMAGE=…/pengine-web:<tag>`**.
+1. **Build and push image (if not in GHCR)** — If `ghcr.io/<owner>/pengine-web:<tag>` is **missing**, checks out that ref and builds [`deploy/Dockerfile`](../../deploy/Dockerfile) from the repo root (see [`/.dockerignore`](../../.dockerignore)): `bun install` → [`bun run build:web`](../../package.json) → [static-web-server](https://github.com/static-web-server/static-web-server) with **`SERVER_FALLBACK_PAGE`**. CI passes `VITE_APP_ORIGIN=https://pengine.net` as a **build-arg**. Pushes `:<tag>`, `:sha-<short>`, and `:latest`. If the package **already exists**, this job **skips** the build and logs that fact.
+2. **Deploy to host** — fetches [`deploy/docker-compose.yml`](../../deploy/docker-compose.yml) via the **GitHub Contents API** (no checkout on the runner). It tries your **`tag`** ref first, then the **default branch**, **`main`**, **`master`**. **`PENGINE_WEB_IMAGE`** on the host still uses your **`tag`**. Then SSH copies the file to `~/pengine`, and the host runs **`docker login` → `docker compose pull` → `docker compose up`**.
 
 The container publishes on `127.0.0.1:1420`. **TLS and reverse-proxy (e.g. nginx)
 for the public site are not defined in this repository** — maintain that in
@@ -25,8 +20,8 @@ adjust the published port in `docker-compose.yml` to match your layout).
   **`tag`** (e.g. `1.0.1` or `v1.0.1`) that exists as a **git tag** on the remote.
   The workflow checks out that tag, uses the same value (with optional leading `v`
   stripped) as the **GHCR image tag**, and deploys with **`docker compose pull`**
-  on the host. If that image is **already** in the registry, only the host deploy
-  runs.
+  on the host. If that image is **already** in the registry, the **build** job
+  skips; the **deploy** job still runs.
 - **App release** — [`App Release`](../../.github/workflows/app-release.yml) is
   separate (`v*` tags for desktop); web deploy uses the **`tag`** input above.
 
