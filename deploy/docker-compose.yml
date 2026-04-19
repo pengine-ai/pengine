@@ -4,10 +4,11 @@ services:
     container_name: pengine-app
     hostname: pengine
     restart: unless-stopped
+    # Vite preview — serves `dist/` (must match deploy/Dockerfile CMD).
+    command: ["npm", "run", "preview", "--", "--host", "0.0.0.0", "--port", "1422"]
     expose:
       - "1422"
     environment:
-      # Vite preview (`npm run preview` in image); port fixed in Dockerfile CMD
       - NODE_ENV=production
     networks:
       pengui-network:
