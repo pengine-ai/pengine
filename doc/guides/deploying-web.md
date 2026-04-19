@@ -12,7 +12,7 @@ workflow. Each run:
    with **`SERVER_FALLBACK_PAGE`** so React Router paths resolve. CI passes
    `VITE_APP_ORIGIN=https://pengine.net` as a **build-arg** (overridable locally).
 2. **If** `ghcr.io/<owner>/pengine-web:<tag>` is **not** already in GHCR, builds and pushes that tag (plus `:sha-<short>` and `:latest`). **If** the image **already exists**, skips the build and only deploys.
-3. On the deploy host: copies [`deploy/docker-compose.yml`](../../deploy/docker-compose.yml) to `~/pengine`, then **`docker login` → `docker compose pull` → `docker compose up`** with **`PENGINE_WEB_IMAGE=…/pengine-web:<tag>`** (same tag you passed in).
+3. Fetches [`deploy/docker-compose.yml`](../../deploy/docker-compose.yml) for that ref via the **GitHub API** (no `git checkout` on the runner for deploy — avoids fetch failures when only deploying). Copies it to `~/pengine` over SSH, then on the host: **`docker login` → `docker compose pull` → `docker compose up`** with **`PENGINE_WEB_IMAGE=…/pengine-web:<tag>`**.
 
 The container publishes on `127.0.0.1:1420`. **TLS and reverse-proxy (e.g. nginx)
 for the public site are not defined in this repository** — maintain that in

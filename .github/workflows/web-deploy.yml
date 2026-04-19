@@ -1,14 +1,13 @@
 name: Deploy web app
 
-# workflow_dispatch with required `tag` (git tag = GHCR tag, e.g. 1.0.1).
-# If ghcr.io/<owner>/pengine-web:<tag> already exists → skip build, only deploy.
-# Otherwise → build, push to GHCR, then deploy. Host: docker login + compose pull + up.
+# Required `tag` (GHCR semver tag, e.g. 1.0.2). If image missing → checkout + build + push.
+# Deploy never uses actions/checkout: compose is fetched via GitHub API, then SSH + scp + pull.
 
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Git tag to checkout and GHCR image tag (e.g. 1.0.1 or v1.0.1). Must exist on the remote."
+        description: "Registry / deploy tag (e.g. 1.0.2). Git ref must exist (tag or branch) for compose + optional build."
         required: true
         type: string
 
@@ -38,20 +37,6 @@ jobs:
           echo "ref=${REF}" >>"$GITHUB_OUTPUT"
           echo "tag=${TAG}" >>"$GITHUB_OUTPUT"
 
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ steps.meta.outputs.ref }}
-
-      - name: Verify deploy assets
-        run: |
-          set -euo pipefail
-          test -f deploy/Dockerfile
-          test -f deploy/docker-compose.yml
-
-      - name: Git short SHA
-        id: git
-        run: echo "short=$(git rev-parse --short HEAD)" >>"$GITHUB_OUTPUT"
-
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -66,11 +51,29 @@ jobs:
           set -euo pipefail
           if docker buildx imagetools inspect "${{ env.IMAGE }}:${TAG}" >/dev/null 2>&1; then
             echo "exists=true" >>"$GITHUB_OUTPUT"
-            echo "Image ${{ env.IMAGE }}:${TAG} is already in GHCR — skipping build; deploying to host only."
+            echo "Image ${{ env.IMAGE }}:${TAG} already in GHCR — skipping build."
           else
             echo "exists=false" >>"$GITHUB_OUTPUT"
-            echo "Image ${{ env.IMAGE }}:${TAG} not in GHCR — building and pushing, then deploying."
+            echo "Image ${{ env.IMAGE }}:${TAG} not in GHCR — will build and push."
           fi
+
+      - uses: actions/checkout@v4
+        if: steps.registry.outputs.exists != 'true'
+        with:
+          ref: ${{ steps.meta.outputs.ref }}
+          fetch-depth: 1
+
+      - name: Verify deploy assets
+        if: steps.registry.outputs.exists != 'true'
+        run: |
+          set -euo pipefail
+          test -f deploy/Dockerfile
+          test -f deploy/docker-compose.yml
+
+      - name: Git short SHA
+        if: steps.registry.outputs.exists != 'true'
+        id: git
+        run: echo "short=$(git rev-parse --short HEAD)" >>"$GITHUB_OUTPUT"
 
       - uses: docker/setup-buildx-action@v3
         if: steps.registry.outputs.exists != 'true'
@@ -92,6 +95,23 @@ jobs:
             ${{ env.IMAGE }}:sha-${{ steps.git.outputs.short }}
             ${{ env.IMAGE }}:latest
 
+      - name: Fetch deploy/docker-compose.yml (Contents API — no git checkout for deploy)
+        env:
+          REF: ${{ steps.meta.outputs.ref }}
+        run: |
+          set -euo pipefail
+          API_URL="https://api.github.com/repos/${{ github.repository }}/contents/deploy/docker-compose.yml?ref=${REF}"
+          if ! curl -fsSL \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            -o /tmp/compose-api.json \
+            "$API_URL"; then
+            echo "::error::Could not fetch deploy/docker-compose.yml for ref '${REF}' (missing tag/branch on GitHub, or no access)."
+            exit 1
+          fi
+          jq -r .content /tmp/compose-api.json | base64 -d > docker-compose.upload.yml
+          test -s docker-compose.upload.yml
+
       - name: Ensure remote directory
         uses: appleboy/ssh-action@v1.2.5
         with:
@@ -102,7 +122,7 @@ jobs:
           timeout: 2m
           script: mkdir -p ~/pengine
 
-      - name: Copy docker-compose.yml
+      - name: Copy docker-compose.yml to host
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.DEPLOY_HOST }}
@@ -110,17 +130,16 @@ jobs:
           key: ${{ secrets.DEPLOY_SSH_KEY }}
           port: 22
           timeout: 2m
-          source: "deploy/docker-compose.yml"
+          source: "docker-compose.upload.yml"
           target: "~/pengine/"
           overwrite: true
 
-      - name: Pull image on host and restart stack
+      - name: SSH — compose pull on host
         uses: appleboy/ssh-action@v1.2.5
         env:
           GHCR_USER: ${{ github.repository_owner }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PENGINE_WEB_IMAGE: "${{ env.IMAGE }}:${{ steps.meta.outputs.tag }}"
-          IMAGE_TAG: ${{ steps.meta.outputs.tag }}
         with:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
@@ -128,26 +147,12 @@ jobs:
           port: 22
           timeout: 3m
           command_timeout: 10m
-          envs: GHCR_USER,GHCR_TOKEN,PENGINE_WEB_IMAGE,IMAGE_TAG
+          envs: GHCR_USER,GHCR_TOKEN,PENGINE_WEB_IMAGE
           script: |
             set -euo pipefail
+            mv -f ~/pengine/docker-compose.upload.yml ~/pengine/docker-compose.yml
             cd ~/pengine
-            echo "Deploying ${{ env.IMAGE }}:${IMAGE_TAG} (docker compose pull)"
             echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
             export PENGINE_WEB_IMAGE
             docker compose pull
             docker compose up -d --remove-orphans
-            docker image prune -f
-
-      - name: Verify container responds
-        uses: appleboy/ssh-action@v1.2.5
-        with:
-          host: ${{ secrets.DEPLOY_HOST }}
-          username: ${{ secrets.DEPLOY_USER }}
-          key: ${{ secrets.DEPLOY_SSH_KEY }}
-          port: 22
-          timeout: 1m
-          command_timeout: 2m
-          script: |
-            curl -sf --max-time 15 http://127.0.0.1:1420/ >/dev/null \
-              && echo "OK: pengine web responds on 127.0.0.1:1420"
