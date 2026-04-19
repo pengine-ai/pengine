@@ -104,8 +104,6 @@ jobs:
           fi
           jq -r .content /tmp/dockerfile-api.json | base64 -d > deploy/Dockerfile
           test -s deploy/Dockerfile
-          echo "---- deploy/Dockerfile (lines 24–35) ----"
-          sed -n '24,35p' deploy/Dockerfile || true
 
       - name: Git short SHA
         if: steps.registry.outputs.exists != 'true'

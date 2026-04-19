@@ -2,7 +2,7 @@
 # `dist/`, without building or running the native app.
 #
 # Mirrors `src-tauri/tauri.conf.json`:
-#   - `build.beforeBuildCommand` → `build:web` or `build` (older tags)
+#   - `build.beforeBuildCommand` → `npm run build:ci` (→ `build:web`)
 #   - `build.frontendDist`       → `../dist` (this image serves that folder on :80)
 #
 # Intentionally omitted: `tauri build`, Cargo, `src-tauri/` (see /.dockerignore).
@@ -24,10 +24,7 @@ COPY . .
 ARG VITE_APP_ORIGIN=https://pengine.net
 ENV VITE_APP_ORIGIN=${VITE_APP_ORIGIN}
 
-# Web UI only — matches Tauri’s packaged frontend; does not invoke the Tauri CLI.
-# Older tags may only define `build` (not `build:web`); pick the right script.
-RUN BUILD_SCRIPT="$(bun -e 'const p=JSON.parse(await Bun.file("package.json").text()); const s=p.scripts||{}; if(s["build:web"])console.log("build:web"); else if(s["build"])console.log("build"); else throw new Error("No build or build:web in package.json")')" \
-  && bun run "$BUILD_SCRIPT"
+RUN npm run build:ci
 
 FROM ghcr.io/static-web-server/static-web-server:2-alpine
 USER root
