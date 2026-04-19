@@ -8,6 +8,7 @@
 //! result so the dashboard picker can show them without re-fetching every
 //! few seconds.
 
+use futures::stream::{self, StreamExt};
 use regex::Regex;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -20,6 +21,8 @@ const CLOUD_LIBRARY_PREFIX: &str = "https://ollama.com/library/";
 const CACHE_TTL: Duration = Duration::from_secs(60 * 60);
 const SEARCH_TIMEOUT: Duration = Duration::from_secs(5);
 const DETAIL_TIMEOUT: Duration = Duration::from_secs(4);
+/// Cap parallel detail-page fetches to avoid bursting ollama.com.
+const CLOUD_DETAIL_CONCURRENCY: usize = 8;
 
 struct CacheEntry {
     fetched_at: Instant,
@@ -102,21 +105,24 @@ async fn fetch_cloud_models() -> Result<Vec<String>, String> {
         return Err("no cloud slugs found in /search?c=cloud".to_string());
     }
 
-    let mut tasks = Vec::with_capacity(slugs.len());
-    for slug in slugs {
-        let client = client.clone();
-        tasks.push(tokio::spawn(async move {
-            cloud_models_for_slug(&client, &slug).await
-        }));
-    }
-    let mut out: Vec<String> = Vec::new();
-    for t in tasks {
-        if let Ok(Ok(names)) = t.await {
-            out.extend(names);
-        }
-    }
+    let results: Vec<Result<Vec<String>, String>> = stream::iter(slugs)
+        .map(|slug| {
+            let client = client.clone();
+            async move { cloud_models_for_slug(&client, &slug).await }
+        })
+        .buffer_unordered(CLOUD_DETAIL_CONCURRENCY)
+        .collect()
+        .await;
+    let mut out: Vec<String> = results
+        .into_iter()
+        .filter_map(Result::ok)
+        .flatten()
+        .collect();
     out.sort();
     out.dedup();
+    if out.is_empty() {
+        return Err("cloud catalog detail scrape returned no model names".to_string());
+    }
     Ok(out)
 }
 

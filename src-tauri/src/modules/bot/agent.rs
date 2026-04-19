@@ -103,7 +103,7 @@ async fn chat_with_cloud_fallback(
         Ok(r) => Ok(r),
         Err(err) => {
             if ollama::classify_model(model) != ollama::ModelKind::Cloud
-                || !ollama::is_rate_limit_error(&err)
+                || !ollama::is_cloud_unavailable_error(&err)
             {
                 return Err(err);
             }
@@ -116,7 +116,7 @@ async fn chat_with_cloud_fallback(
                 state
                     .emit_log(
                         "ollama",
-                        &format!("cloud limit on '{model}', no local model available"),
+                        &format!("cloud '{model}' unavailable ({err}); no local fallback"),
                     )
                     .await;
                 return Err(err);
@@ -127,7 +127,7 @@ async fn chat_with_cloud_fallback(
             state
                 .emit_log(
                     "ollama",
-                    &format!("cloud limit on '{model}' — switching to local '{local}'"),
+                    &format!("cloud '{model}' unavailable, switching to local '{local}': {err}"),
                 )
                 .await;
             {

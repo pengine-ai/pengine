@@ -54,6 +54,7 @@ pub async fn model_catalog(timeout_ms: u64) -> Result<ModelCatalog, String> {
     let timeout = std::time::Duration::from_millis(timeout_ms);
 
     let mut active: Option<String> = None;
+    let mut daemon_reachable = false;
     match client.get(OLLAMA_PS_URL).timeout(timeout).send().await {
         Ok(resp) => {
             if !resp.status().is_success() {
@@ -63,6 +64,7 @@ pub async fn model_catalog(timeout_ms: u64) -> Result<ModelCatalog, String> {
                     resp.status()
                 );
             } else {
+                daemon_reachable = true;
                 match resp.json::<serde_json::Value>().await {
                     Ok(body) => {
                         active = body["models"]
@@ -90,6 +92,7 @@ pub async fn model_catalog(timeout_ms: u64) -> Result<ModelCatalog, String> {
                     resp.status()
                 );
             } else {
+                daemon_reachable = true;
                 match resp.json::<serde_json::Value>().await {
                     Ok(body) => {
                         models = body["models"]
@@ -127,12 +130,6 @@ pub async fn model_catalog(timeout_ms: u64) -> Result<ModelCatalog, String> {
         }
     }
 
-    // Cloud models are proxied through the local daemon, so if local Ollama
-    // is unreachable they aren't usable either — keep the original error.
-    if active.is_none() && models.is_empty() {
-        return Err("ollama unreachable: no active model and no pulled models".to_string());
-    }
-
     for cloud_name in cloud::list_cloud_models().await {
         if !models.iter().any(|m| m.name == cloud_name) {
             models.push(ModelInfo {
@@ -140,6 +137,10 @@ pub async fn model_catalog(timeout_ms: u64) -> Result<ModelCatalog, String> {
                 kind: ModelKind::Cloud,
             });
         }
+    }
+
+    if !daemon_reachable && models.is_empty() {
+        return Err("ollama unreachable: no active model and no pulled models".to_string());
     }
 
     Ok(ModelCatalog { active, models })
@@ -196,16 +197,27 @@ pub async fn active_model() -> Result<String, String> {
         .ok_or_else(|| "no models pulled in ollama".to_string())
 }
 
-/// Detect rate-limit / quota errors returned for cloud models. The local
-/// daemon proxies the upstream HTTP status (typically 429) and may also embed
-/// a textual hint in the response body.
-pub fn is_rate_limit_error(err: &str) -> bool {
+/// Detect cloud-side failures that warrant downgrading to a local model.
+/// Covers explicit rate limits (429 / "rate limit" / "quota"), upstream
+/// outages proxied as 5xx with the cloud's `ref: <uuid>` envelope, and the
+/// "sign in / unauthorized" responses returned when the user hasn't run
+/// `ollama signin`. Any of these mean the picked cloud model can't serve
+/// this turn — the local fallback keeps the agent responsive.
+pub fn is_cloud_unavailable_error(err: &str) -> bool {
     let lower = err.to_ascii_lowercase();
     lower.contains("http 429")
         || lower.contains("rate limit")
         || lower.contains("rate-limit")
         || lower.contains("quota")
         || lower.contains("too many requests")
+        || lower.contains("http 500")
+        || lower.contains("http 502")
+        || lower.contains("http 503")
+        || lower.contains("http 504")
+        || lower.contains("internal server error")
+        || lower.contains("unauthorized")
+        || lower.contains("sign in")
+        || lower.contains("not signed in")
 }
 
 /// Outcome of a single chat call so the caller knows whether tools were included in the request.
