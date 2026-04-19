@@ -197,6 +197,12 @@ export function DashboardPage() {
                 Setup
               </Link>
             )}
+            <Link
+              to="/settings"
+              className="rounded-lg border border-white/15 bg-white/5 px-3 py-1 font-mono text-[11px] text-white/70 transition hover:bg-white/10 hover:text-white"
+            >
+              Settings
+            </Link>
             {isDeviceConnected && (
               <button
                 type="button"

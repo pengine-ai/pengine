@@ -6,6 +6,7 @@ import { useAppSessionStore } from "../../modules/bot/store/appSessionStore";
 const navLinks = [
   { label: "Home", to: "/" },
   { label: "Dashboard", to: "/dashboard" },
+  { label: "Settings", to: "/settings" },
 ];
 
 export function TopMenu() {
