@@ -12,7 +12,7 @@ COPY . .
 ARG VITE_APP_ORIGIN=https://pengine.net
 ENV VITE_APP_ORIGIN=${VITE_APP_ORIGIN}
 
-RUN npm run build:web
+RUN npm run build:web:ci
 
 FROM node:22-alpine AS runner
 WORKDIR /app

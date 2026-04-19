@@ -92,7 +92,7 @@ jobs:
           key: ${{ secrets.DEPLOY_SSH_KEY }}
           port: 22
           timeout: 2m
-          source: deploy/docker-compose.yml
+          source: deployment/docker-compose.yml
           target: ~/pengine/
           overwrite: true
 
