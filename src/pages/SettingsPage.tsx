@@ -7,7 +7,7 @@ import { TopMenu } from "../shared/ui/TopMenu";
 type SettingsTab = "preferences" | "about";
 
 const CONTACT = {
-  x: { label: "X (Twitter)", href: "https://x.com/MaximEdogawa" },
+  x: { label: "X (Twitter)", href: "https://x.com/PengineAI" },
   github: { label: "GitHub", href: "https://github.com/pengine-ai/pengine" },
 } as const;
 
