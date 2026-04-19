@@ -5,6 +5,7 @@ import { useAppSessionStore } from "../modules/bot/store/appSessionStore";
 import { CronPanel } from "../modules/cron";
 import { McpToolsPanel } from "../modules/mcp/components/McpToolsPanel";
 import { fetchOllamaModels, setPreferredOllamaModel } from "../modules/ollama/api";
+import type { OllamaModelInfo } from "../modules/ollama/types";
 import { SkillsPanel } from "../modules/skills";
 import { ToolEnginePanel } from "../modules/toolengine/components/ToolEnginePanel";
 import { UpdateIndicator } from "../modules/updater";
@@ -21,7 +22,7 @@ export function DashboardPage() {
   const isDeviceConnected = useAppSessionStore((state) => state.isDeviceConnected);
   const disconnectDevice = useAppSessionStore((state) => state.disconnectDevice);
   const botUsername = useAppSessionStore((state) => state.botUsername);
-  const [availableModels, setAvailableModels] = useState<string[]>([]);
+  const [availableModels, setAvailableModels] = useState<OllamaModelInfo[]>([]);
   const [selectedModel, setSelectedModel] = useState<string | null>(null);
   const [activeModel, setActiveModel] = useState<string | null>(null);
   const [savingModel, setSavingModel] = useState(false);
@@ -182,8 +183,8 @@ export function DashboardPage() {
                   {activeModel ? `Active (${activeModel})` : "Active model"}
                 </option>
                 {availableModels.map((model) => (
-                  <option key={model} value={model}>
-                    {model}
+                  <option key={model.name} value={model.name}>
+                    {model.kind === "cloud" ? `${model.name} · cloud` : model.name}
                   </option>
                 ))}
               </select>

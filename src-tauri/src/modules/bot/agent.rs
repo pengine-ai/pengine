@@ -87,6 +87,59 @@ fn chat_options_for_agent_step(
 /// not truncated before sending to the user.
 const TOOL_OUTPUT_CHAR_CAP: usize = 4000;
 
+/// Run a chat call; if the request goes to a cloud model and the daemon
+/// returns a rate-limit error, downgrade to the user's last local model and
+/// retry once. The downgraded model is also written back to
+/// `preferred_ollama_model` so the rest of the turn (and future turns) stay
+/// local until the user picks again.
+async fn chat_with_cloud_fallback(
+    state: &AppState,
+    model: &mut String,
+    messages: &serde_json::Value,
+    tools: &serde_json::Value,
+    options: &ChatOptions,
+) -> Result<ollama::ChatResult, String> {
+    match ollama::chat_with_tools(model, messages, tools, options).await {
+        Ok(r) => Ok(r),
+        Err(err) => {
+            if ollama::classify_model(model) != ollama::ModelKind::Cloud
+                || !ollama::is_cloud_unavailable_error(&err)
+            {
+                return Err(err);
+            }
+            let last_local = state.last_local_model.read().await.clone();
+            let catalog = ollama::model_catalog(3000).await.ok();
+            let fallback = catalog
+                .as_ref()
+                .and_then(|c| ollama::pick_local_fallback(c, None, last_local.as_deref()));
+            let Some(local) = fallback else {
+                state
+                    .emit_log(
+                        "ollama",
+                        &format!("cloud '{model}' unavailable ({err}); no local fallback"),
+                    )
+                    .await;
+                return Err(err);
+            };
+            if local == *model {
+                return Err(err);
+            }
+            state
+                .emit_log(
+                    "ollama",
+                    &format!("cloud '{model}' unavailable, switching to local '{local}': {err}"),
+                )
+                .await;
+            {
+                let mut pref = state.preferred_ollama_model.write().await;
+                *pref = Some(local.clone());
+            }
+            *model = local;
+            ollama::chat_with_tools(model, messages, tools, options).await
+        }
+    }
+}
+
 fn tool_name_is_fetch(name: &str) -> bool {
     name.eq_ignore_ascii_case("fetch")
         || name
@@ -645,7 +698,7 @@ async fn run_model_turn(
     think: bool,
     skills_slug_filter: Option<&[String]>,
 ) -> Result<TurnResult, String> {
-    let model = match state.preferred_ollama_model.read().await.clone() {
+    let mut model = match state.preferred_ollama_model.read().await.clone() {
         Some(m) => m,
         None => ollama::active_model().await?,
     };
@@ -745,7 +798,9 @@ async fn run_model_turn(
             push_ephemeral_post_tool_reminder(&mut messages);
         }
 
-        let result = ollama::chat_with_tools(&model, &messages, effective_tools, &chat_opts).await;
+        let result =
+            chat_with_cloud_fallback(state, &mut model, &messages, effective_tools, &chat_opts)
+                .await;
         if inject_post_tool {
             pop_ephemeral_post_tool_reminder(&mut messages);
         }
@@ -991,8 +1046,14 @@ async fn run_model_turn(
             ..ChatOptions::default()
         };
         let t0 = Instant::now();
-        let result =
-            ollama::chat_with_tools(&model, &summary_messages, &json!([]), &summary_opts).await?;
+        let result = chat_with_cloud_fallback(
+            state,
+            &mut model,
+            &summary_messages,
+            &json!([]),
+            &summary_opts,
+        )
+        .await?;
         let tokens = fmt_tokens(result.prompt_tokens, result.eval_tokens);
         state
             .emit_log(

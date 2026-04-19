@@ -88,11 +88,19 @@ pub struct PutMcpFilesystemBody {
 }
 
 #[derive(Serialize)]
+pub struct OllamaModelDto {
+    pub name: String,
+    /// `"local"` (default Ollama models) or `"cloud"` (Ollama Cloud — surfaced
+    /// after `ollama signin` with names like `gpt-oss:120b-cloud`).
+    pub kind: &'static str,
+}
+
+#[derive(Serialize)]
 pub struct OllamaModelsResponse {
     pub reachable: bool,
     pub active_model: Option<String>,
     pub selected_model: Option<String>,
-    pub models: Vec<String>,
+    pub models: Vec<OllamaModelDto>,
 }
 
 #[derive(Deserialize)]
@@ -372,7 +380,14 @@ async fn handle_ollama_models(State(state): State<AppState>) -> Json<OllamaModel
             reachable: true,
             active_model: catalog.active,
             selected_model,
-            models: catalog.models,
+            models: catalog
+                .models
+                .into_iter()
+                .map(|m| OllamaModelDto {
+                    name: m.name,
+                    kind: m.kind.as_str(),
+                })
+                .collect(),
         }),
         Err(_) => Json(OllamaModelsResponse {
             reachable: false,
@@ -436,23 +451,32 @@ async fn handle_ollama_model_put(
         .map(|m| m.trim().to_string())
         .filter(|m| !m.is_empty());
 
+    let mut selected_kind: Option<ollama_service::ModelKind> = None;
     if let Some(ref model) = normalized {
         let catalog = ollama_service::model_catalog(3000)
             .await
             .map_err(|e| (StatusCode::BAD_GATEWAY, Json(ErrorResponse { error: e })))?;
-        if !catalog.models.iter().any(|m| m == model) {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: format!("model '{model}' is not available in Ollama"),
-                }),
-            ));
+        match catalog.models.iter().find(|m| &m.name == model) {
+            Some(m) => selected_kind = Some(m.kind),
+            None => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: format!("model '{model}' is not available in Ollama"),
+                    }),
+                ));
+            }
         }
     }
 
     {
         let mut lock = state.preferred_ollama_model.write().await;
         *lock = normalized.clone();
+    }
+
+    if let (Some(name), Some(ollama_service::ModelKind::Local)) = (&normalized, selected_kind) {
+        let mut last = state.last_local_model.write().await;
+        *last = Some(name.clone());
     }
 
     state

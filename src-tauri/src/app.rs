@@ -3,6 +3,7 @@ use crate::infrastructure::http_server;
 use crate::modules::bot::{commands, repository, service as bot_service};
 use crate::modules::cron::{repository as cron_repository, scheduler as cron_scheduler};
 use crate::modules::mcp::service as mcp_service;
+use crate::modules::ollama::cloud as ollama_cloud;
 use crate::modules::secure_store;
 use crate::shared::state::{AppState, ConnectionData};
 use std::path::PathBuf;
@@ -180,6 +181,12 @@ pub fn run() {
             let server_state = shared_state.clone();
             tauri::async_runtime::spawn(async move {
                 http_server::start_server(server_state).await;
+            });
+
+            // Pre-warm the Ollama cloud catalog so the first dashboard refresh
+            // returns cloud entries without the user waiting on ollama.com.
+            tauri::async_runtime::spawn(async move {
+                let _ = ollama_cloud::list_cloud_models().await;
             });
 
             Ok(())
