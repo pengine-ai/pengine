@@ -1,25 +1,14 @@
 name: Deploy web app
 
-# Build the pengine web bundle in CI (Vite → static assets), package it with
-# deploy/Dockerfile, push to GHCR, and roll out on the deploy host via
-# docker compose under ~/pengine.
-#
-# Triggers:
-#   - Push — any branch; builds and deploys the pushed commit.
-#   - workflow_dispatch — use “Run workflow” and pick a branch, or set ref
-#     (branch / tag / SHA). If ref is empty, uses the tip of the selected branch.
-#
-# Required secrets: DEPLOY_HOST, DEPLOY_USER, DEPLOY_SSH_KEY
-# Optional: DEPLOY_HOST_KNOWN_HOSTS
+# Build → GHCR (:<version>, :sha-*, :latest). Version tag = exact git tag (e.g. 1.0.1) if
+# present, else package.json. Deploy uses digest pin (immutable) of that build.
+# workflow_dispatch; optional `ref`. Secrets: DEPLOY_HOST, DEPLOY_USER, DEPLOY_SSH_KEY.
 
 on:
-  push:
-    branches:
-      - "**"
   workflow_dispatch:
     inputs:
       ref:
-        description: "Git ref to build (branch, tag, or SHA). Leave empty to use the selected branch tip."
+        description: "Git ref to build (branch, tag, or SHA). Empty = tip of the branch you select in the UI."
         required: false
         default: ""
         type: string
@@ -34,15 +23,14 @@ concurrency:
 
 env:
   IMAGE: ghcr.io/${{ github.repository_owner }}/pengine-web
-  # Same commit for build + deploy (and matching docker-compose copy).
-  CHECKOUT_REF: >-
-    ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.ref != '' && github.event.inputs.ref || github.sha }}
+  CHECKOUT_REF: ${{ github.event.inputs.ref != '' && github.event.inputs.ref || github.sha }}
 
 jobs:
   build:
     runs-on: ubuntu-latest
     outputs:
       image_ref: ${{ steps.ref.outputs.image_ref }}
+      image_version: ${{ steps.ver.outputs.version }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -67,10 +55,11 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="$(jq -r .version package.json)"
-          # HEAD matches CHECKOUT_REF (GITHUB_SHA is only the trigger SHA).
-          SHORT_SHA="$(git rev-parse --short HEAD)"
-          echo "version=$VERSION" >>"$GITHUB_OUTPUT"
-          echo "short_sha=$SHORT_SHA" >>"$GITHUB_OUTPUT"
+          if TAG="$(git describe --tags --exact-match 2>/dev/null)"; then
+            VERSION="${TAG#v}"
+          fi
+          echo "version=${VERSION}" >>"$GITHUB_OUTPUT"
+          echo "short_sha=$(git rev-parse --short HEAD)" >>"$GITHUB_OUTPUT"
 
       - name: Build and push
         id: build
@@ -89,7 +78,7 @@ jobs:
             ${{ env.IMAGE }}:sha-${{ steps.ver.outputs.short_sha }}
             ${{ env.IMAGE }}:latest
 
-      - name: Export image ref
+      - name: Export image ref (digest pin for deploy)
         id: ref
         run: echo "image_ref=${{ env.IMAGE }}@${{ steps.build.outputs.digest }}" >>"$GITHUB_OUTPUT"
 
@@ -101,53 +90,62 @@ jobs:
         with:
           ref: ${{ env.CHECKOUT_REF }}
 
-      - name: Start SSH agent
-        uses: webfactory/ssh-agent@v0.9.0
+      - name: Ensure remote directory
+        uses: appleboy/ssh-action@v1.2.5
         with:
-          ssh-private-key: ${{ secrets.DEPLOY_SSH_KEY }}
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: 22
+          timeout: 2m
+          script: mkdir -p ~/pengine
 
-      - name: Trust host key
-        env:
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_HOST_KNOWN_HOSTS: ${{ secrets.DEPLOY_HOST_KNOWN_HOSTS }}
-        run: |
-          set -euo pipefail
-          mkdir -p ~/.ssh
-          chmod 700 ~/.ssh
-          if [ -n "${DEPLOY_HOST_KNOWN_HOSTS:-}" ]; then
-            printf '%s\n' "$DEPLOY_HOST_KNOWN_HOSTS" >>~/.ssh/known_hosts
-          else
-            ssh-keyscan -H "$DEPLOY_HOST" >>~/.ssh/known_hosts 2>/dev/null \
-              || { echo "ssh-keyscan failed; set optional DEPLOY_HOST_KNOWN_HOSTS to pin the host key." >&2; exit 1; }
-          fi
-          chmod 644 ~/.ssh/known_hosts
+      - name: Copy docker-compose.yml
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: 22
+          timeout: 2m
+          source: "deploy/docker-compose.yml"
+          target: "~/pengine/"
+          overwrite: true
 
-      - name: Copy docker-compose.yml to host
+      - name: Pull image (digest) and restart stack
+        uses: appleboy/ssh-action@v1.2.5
         env:
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
-        run: |
-          ssh "$DEPLOY_USER@$DEPLOY_HOST" 'mkdir -p ~/pengine'
-          scp deploy/docker-compose.yml "$DEPLOY_USER@$DEPLOY_HOST:~/pengine/docker-compose.yml"
-
-      - name: Pull and restart
-        env:
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
           GHCR_USER: ${{ github.repository_owner }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          IMAGE_REF: ${{ needs.build.outputs.image_ref }}
-        run: |
-          ssh "$DEPLOY_USER@$DEPLOY_HOST" \
-            GHCR_USER="$GHCR_USER" \
-            GHCR_TOKEN="$GHCR_TOKEN" \
-            PENGINE_WEB_IMAGE="$IMAGE_REF" \
-            'bash -s' <<'REMOTE'
-          set -euo pipefail
-          cd ~/pengine
-          echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
-          export PENGINE_WEB_IMAGE
-          docker compose pull
-          docker compose up -d --remove-orphans
-          docker image prune -f
-          REMOTE
+          PENGINE_WEB_IMAGE: ${{ needs.build.outputs.image_ref }}
+          IMAGE_VERSION: ${{ needs.build.outputs.image_version }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: 22
+          timeout: 3m
+          command_timeout: 10m
+          envs: GHCR_USER,GHCR_TOKEN,PENGINE_WEB_IMAGE,IMAGE_VERSION
+          script: |
+            set -euo pipefail
+            cd ~/pengine
+            echo "Rolling out pengine-web:${IMAGE_VERSION} (digest-pinned)"
+            echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+            export PENGINE_WEB_IMAGE
+            docker compose pull
+            docker compose up -d --remove-orphans
+            docker image prune -f
+
+      - name: Verify container responds
+        uses: appleboy/ssh-action@v1.2.5
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: 22
+          timeout: 1m
+          command_timeout: 2m
+          script: |
+            curl -sf --max-time 15 http://127.0.0.1:1420/ >/dev/null \
+              && echo "OK: pengine web responds on 127.0.0.1:1420"

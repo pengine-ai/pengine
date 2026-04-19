@@ -2,8 +2,7 @@
 # published to 127.0.0.1:1420). Reverse-proxy / TLS is not part of this repo —
 # configure that in your ops repo (e.g. nginx → http://127.0.0.1:1420).
 #
-# PENGINE_WEB_IMAGE is set by the GitHub Actions deploy step to the image
-# reference being rolled out (digest pin from CI, e.g. ghcr.io/.../pengine-web@sha256:...).
+# PENGINE_WEB_IMAGE is set by CI (digest pin, e.g. ghcr.io/.../pengine-web@sha256:...).
 # Docker Compose substitutes it from the environment at `up` time.
 
 services:
