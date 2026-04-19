@@ -1,17 +1,9 @@
 name: Deploy web app
-
-# Job 1: If ghcr.io/.../pengine-web:<tag> is missing → checkout **sources** at that tag, overlay
-#         **deploy/Dockerfile** from the default branch (API), then build and push to GHCR.
-#         Old tags often have no `deploy/` tree; without the overlay, buildx fails (lstat deploy/…).
-# Job 2: Checkout (for compose file) → scp deploy/docker-compose.yml → SSH:
-#        docker login (GHCR) → docker compose pull / up. Compose comes from the workflow’s ref
-#        (branch you run the workflow on), not the deploy input tag.
-
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Registry / deploy tag (e.g. 1.0.2). Git ref for build must exist when the image is not yet in GHCR."
+        description: "Git tag / registry tag (e.g. 1.0.2). Image is built and pushed every run."
         required: true
         type: string
 
@@ -28,7 +20,7 @@ env:
 
 jobs:
   build-package:
-    name: Build and push image (if not in GHCR)
+    name: Build and push image
     runs-on: ubuntu-latest
     timeout-minutes: 45
     outputs:
@@ -52,73 +44,18 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Check if package already exists in GHCR
-        id: registry
-        env:
-          TAG: ${{ steps.meta.outputs.tag }}
-        run: |
-          set -euo pipefail
-          if docker buildx imagetools inspect "${{ env.IMAGE }}:${TAG}" >/dev/null 2>&1; then
-            echo "exists=true" >>"$GITHUB_OUTPUT"
-            echo "Package ${{ env.IMAGE }}:${TAG} already in GHCR — skipping build and push."
-          else
-            echo "exists=false" >>"$GITHUB_OUTPUT"
-            echo "Package ${{ env.IMAGE }}:${TAG} not in GHCR — will build and push."
-          fi
-
-      - name: No build needed
-        if: steps.registry.outputs.exists == 'true'
-        run: |
-          echo "Skipping Docker build; using existing image from registry."
-
       - uses: actions/checkout@v4
-        if: steps.registry.outputs.exists != 'true'
         with:
           ref: ${{ steps.meta.outputs.ref }}
           fetch-depth: 1
 
-      # Tags/commits before `deploy/` existed have no Dockerfile in the checkout — load the canonical
-      # file from the repo default branch (same pattern as shallow clones that cannot git-fetch main).
-      - name: Fetch deploy/Dockerfile from default branch (Contents API)
-        if: steps.registry.outputs.exists != 'true'
-        env:
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-        run: |
-          set -euo pipefail
-          REPO="${{ github.repository }}"
-          TOKEN="${{ secrets.GITHUB_TOKEN }}"
-          mkdir -p deploy
-          USED=""
-          for r in "${DEFAULT_BRANCH:-}" "main" "master"; do
-            [ -z "${r:-}" ] && continue
-            if curl -fsSL \
-              -H "Authorization: Bearer ${TOKEN}" \
-              -H "Accept: application/vnd.github+json" \
-              -o /tmp/dockerfile-api.json \
-              "https://api.github.com/repos/${REPO}/contents/deploy/Dockerfile?ref=${r}"; then
-              USED="$r"
-              echo "Fetched deploy/Dockerfile from ref: ${USED}"
-              break
-            fi
-            echo "No deploy/Dockerfile at ref=${r}, trying next…"
-          done
-          if [ -z "${USED}" ]; then
-            echo "::error::Could not fetch deploy/Dockerfile from API (tried default branch, main, master)."
-            exit 1
-          fi
-          jq -r .content /tmp/dockerfile-api.json | base64 -d > deploy/Dockerfile
-          test -s deploy/Dockerfile
-
       - name: Git short SHA
-        if: steps.registry.outputs.exists != 'true'
         id: git
         run: echo "short=$(git rev-parse --short HEAD)" >>"$GITHUB_OUTPUT"
 
       - uses: docker/setup-buildx-action@v3
-        if: steps.registry.outputs.exists != 'true'
 
       - name: Build and push package to GHCR
-        if: steps.registry.outputs.exists != 'true'
         uses: docker/build-push-action@v6
         with:
           context: .

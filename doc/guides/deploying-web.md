@@ -6,8 +6,8 @@ The pengine web bundle is deployed to a remote host via the
 [`Deploy web app`](../../.github/workflows/web-deploy.yml) GitHub Actions
 workflow. It has two jobs:
 
-1. **Build and push image (if not in GHCR)** — If `ghcr.io/<owner>/pengine-web:<tag>` is **missing**, checks out that ref and builds [`deploy/Dockerfile`](../../deploy/Dockerfile) from the repo root (see [`/.dockerignore`](../../.dockerignore)): **`npm ci`** → [`npm run build:web`](../../package.json) → runtime runs **[`vite preview`](https://vite.dev/guide/cli#vite-preview)** (same script as local **`bun run preview`** / **`npm run preview`**). CI passes `VITE_APP_ORIGIN=https://pengine.net` as a **build-arg**. Pushes `:<tag>`, `:sha-<short>`, and `:latest`. If the package **already exists**, this job **skips** the build and logs that fact. **Packaging** loads `deploy/Dockerfile` via the **GitHub API** from the **default branch** (with fallbacks), then builds — so it always matches `main`, not an old copy on the tag. **`deploy/docker-compose.yml`** for the host is fetched the same way in the deploy job. **App sources** (`package.json`, `src/`, …) still come from the **tag** checkout.
-2. **Deploy to host** — fetches [`deploy/docker-compose.yml`](../../deploy/docker-compose.yml) via the **GitHub Contents API** (no checkout on the runner). It tries the **default branch**, then **`main`**, **`master`**, then your workflow **`tag`** — so the host usually gets the **current** compose file (including the explicit **`vite preview`** `command:`) even when the tag is older. **`PENGINE_WEB_IMAGE`** on the host still uses your **`tag`** for the image. Then SSH copies the file to `~/pengine`, and the host runs **`docker login` → `docker compose pull` → `docker compose up`**, followed by a **curl** check to **`http://127.0.0.1:1422/`** inside the container.
+1. **Build and push image** — Checks out the input tag and builds [`deploy/Dockerfile`](../../deploy/Dockerfile) from that revision. Steps: **`npm ci`** → [`npm run build:web`](../../package.json) → runtime **[`vite preview`](https://vite.dev/guide/cli#vite-preview)**. CI passes `VITE_APP_ORIGIN=https://pengine.net` as a **build-arg**. **Always** pushes to GHCR: `:<tag>`, `:sha-<short>`, and `:latest`.
+2. **Deploy to host** — checks out the workflow branch and **scp**’s [`deploy/docker-compose.yml`](../../deploy/docker-compose.yml) to the server, then SSH runs **`docker login`** → **`docker compose pull`** → **`docker compose up`**. **`PENGINE_WEB_IMAGE`** is **`ghcr.io/<owner>/pengine-web:<tag>`** from the workflow input.
 
 The app listens on **port 1422** inside the container (**Vite preview** — matches
 `preview.port` in `vite.config.ts`; dev server stays on **1420**). Add a **host**
@@ -17,12 +17,10 @@ not defined in this repository — point nginx (or similar) at that upstream URL
 
 ## Triggers
 
-- **Manual only** — Actions → *Deploy web app* → *Run workflow*. You must enter a
-  **`tag`** (e.g. `1.0.1` or `v1.0.1`) that exists as a **git tag** on the remote.
-  The workflow checks out that tag, uses the same value (with optional leading `v`
-  stripped) as the **GHCR image tag**, and deploys with **`docker compose pull`**
-  on the host. If that image is **already** in the registry, the **build** job
-  skips; the **deploy** job still runs.
+- **Manual only** — Actions → *Deploy web app* → *Run workflow*. Enter a **`tag`**
+  (e.g. `1.0.1` or `v1.0.1`) that exists as a **git ref** on the remote. The workflow
+  checks out that ref, builds the image, **always pushes** it to GHCR for that tag,
+  then deploys with **`docker compose pull`** on the host.
 - **App release** — [`App Release`](../../.github/workflows/app-release.yml) is
   separate (`v*` tags for desktop); web deploy uses the **`tag`** input above.
 
@@ -130,8 +128,8 @@ ssh "$DEPLOY_USER@$DEPLOY_HOST" 'docker ps --filter name=pengine'
 curl -fsSL https://pengine.net/ | head
 ```
 
-To roll back, run *Deploy web app* again with an older **`tag`** whose image is
-already in GHCR (deploy-only), or rebuild from that git tag if needed.
+To roll back, run *Deploy web app* again with an older **`tag`** — the workflow
+rebuilds and overwrites that tag’s image in GHCR, then deploys it.
 
 ## Local image build
 
