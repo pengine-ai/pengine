@@ -11,8 +11,8 @@ workflow. Each run:
    (same as Tauri [`build.beforeBuildCommand`](../../src-tauri/tauri.conf.json) / [`build.frontendDist`](../../src-tauri/tauri.conf.json); **no** `tauri build` or Rust) → [static-web-server](https://github.com/static-web-server/static-web-server)
    with **`SERVER_FALLBACK_PAGE`** so React Router paths resolve. CI passes
    `VITE_APP_ORIGIN=https://pengine.net` as a **build-arg** (overridable locally).
-2. Pushes the image to GHCR as `ghcr.io/<owner>/pengine-web:<version>` and
-   `:latest`.
+2. Pushes the image to GHCR as `ghcr.io/<owner>/pengine-web:<version>` (from
+   `package.json`), `:sha-<short>`, and `:latest`.
 3. SSHes into the deploy host, copies
    [`deploy/docker-compose.yml`](../../deploy/docker-compose.yml) to `~/pengine`,
    logs in to GHCR, then `docker compose pull && docker compose up -d`.
@@ -24,11 +24,13 @@ adjust the published port in `docker-compose.yml` to match your layout).
 
 ## Triggers
 
-- **Tag push** — pushing a tag matching `v*` (e.g. `v1.0.1`) deploys that tag.
-  The same tag also fires [`App Release`](../../.github/workflows/app-release.yml);
-  the two run in parallel.
-- **Manual dispatch** — from the Actions tab, pick any existing tag to
-  redeploy it.
+- **Push** — any branch; each push builds from that commit and deploys to the
+  host (same `:latest` / semver tags; coordinate if multiple branches deploy).
+- **Manual dispatch** — in Actions → *Run workflow*, choose **any branch** from
+  the branch dropdown, then optionally set **ref** (another branch, tag, or
+  SHA). If **ref** is empty, the workflow uses the tip of the branch you picked.
+- **App releases** — [`App Release`](../../.github/workflows/app-release.yml) is
+  still tag-driven (`v*`); it does not have to run for a web deploy.
 
 ## Required secrets
 
@@ -76,7 +78,8 @@ ssh "$DEPLOY_USER@$DEPLOY_HOST" 'docker ps --filter name=pengine'
 curl -fsSL https://pengine.net/ | head
 ```
 
-To roll back, manually dispatch the workflow with the previous tag.
+To roll back, manually dispatch the workflow and set **ref** to a previous tag
+or commit SHA, or pull a prior `sha-*` image on the host.
 
 ## Local image build
 

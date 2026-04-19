@@ -1,37 +1,42 @@
 name: Deploy web app
 
-# Build the pengine web image, publish to GHCR, and roll it out on the deploy
-# host via docker compose under ~/pengine. This workflow only updates the app
-# container (static bundle on :80 → 127.0.0.1:1420). Reverse-proxy / nginx /
-# TLS for the public site is configured elsewhere (another repository).
+# Build the pengine web bundle in CI (Vite → static assets), package it with
+# deploy/Dockerfile, push to GHCR, and roll out on the deploy host via
+# docker compose under ~/pengine.
 #
 # Triggers:
-#   - Push a tag matching v* → builds and deploys that tag
-#   - Manual dispatch → pick a tag to redeploy
+#   - Push — any branch; builds and deploys the pushed commit.
+#   - workflow_dispatch — use “Run workflow” and pick a branch, or set ref
+#     (branch / tag / SHA). If ref is empty, uses the tip of the selected branch.
 #
-# Required repo secrets:
-#   DEPLOY_HOST     — hostname or IP of the deploy target
-#   DEPLOY_USER     — SSH user on the deploy target
-#   DEPLOY_SSH_KEY  — private SSH key (PEM) authorized on the target
-# Optional:
-#   DEPLOY_HOST_KNOWN_HOSTS — verified known_hosts line(s); if unset, CI uses ssh-keyscan
+# Required secrets: DEPLOY_HOST, DEPLOY_USER, DEPLOY_SSH_KEY
+# Optional: DEPLOY_HOST_KNOWN_HOSTS
 
 on:
   push:
-    tags:
-      - "v*"
+    branches:
+      - "**"
   workflow_dispatch:
     inputs:
-      tag:
-        description: "Release tag to deploy (e.g. v1.0.1)"
-        required: true
+      ref:
+        description: "Git ref to build (branch, tag, or SHA). Leave empty to use the selected branch tip."
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
   packages: write
 
+concurrency:
+  group: pengine-web-deploy-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   IMAGE: ghcr.io/${{ github.repository_owner }}/pengine-web
+  # Same commit for build + deploy (and matching docker-compose copy).
+  CHECKOUT_REF: >-
+    ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.ref != '' && github.event.inputs.ref || github.sha }}
 
 jobs:
   build:
@@ -41,8 +46,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # Tag push: github.ref; manual: workflow input (otherwise default branch would build)
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ env.CHECKOUT_REF }}
+
+      - name: Verify deploy assets
+        run: |
+          set -euo pipefail
+          test -f deploy/Dockerfile
+          test -f deploy/docker-compose.yml
 
       - uses: docker/setup-buildx-action@v3
 
@@ -52,13 +62,15 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Resolve version
+      - name: Resolve image tags
         id: ver
         run: |
-          TAG="${{ github.event.inputs.tag || github.ref_name }}"
-          VERSION="${TAG#v}"
-          echo "tag=$TAG" >>"$GITHUB_OUTPUT"
+          set -euo pipefail
+          VERSION="$(jq -r .version package.json)"
+          # HEAD matches CHECKOUT_REF (GITHUB_SHA is only the trigger SHA).
+          SHORT_SHA="$(git rev-parse --short HEAD)"
           echo "version=$VERSION" >>"$GITHUB_OUTPUT"
+          echo "short_sha=$SHORT_SHA" >>"$GITHUB_OUTPUT"
 
       - name: Build and push
         id: build
@@ -74,6 +86,7 @@ jobs:
             VITE_APP_ORIGIN=https://pengine.net
           tags: |
             ${{ env.IMAGE }}:${{ steps.ver.outputs.version }}
+            ${{ env.IMAGE }}:sha-${{ steps.ver.outputs.short_sha }}
             ${{ env.IMAGE }}:latest
 
       - name: Export image ref
@@ -85,6 +98,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.CHECKOUT_REF }}
 
       - name: Start SSH agent
         uses: webfactory/ssh-agent@v0.9.0
