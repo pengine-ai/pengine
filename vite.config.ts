@@ -52,7 +52,6 @@ export default defineConfig(async () => {
       // Required when nginx (or any reverse proxy) sends Host: pengine.net — Vite 7 blocks unknown hosts by default.
       allowedHosts: [
         "pengine.net",
-        "penguinpool.space",
         "localhost",
         "127.0.0.1",
         ...(process.env.VITE_PREVIEW_ALLOWED_HOSTS?.split(",")
