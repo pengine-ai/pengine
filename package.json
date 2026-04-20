@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:app": "VITE_ENABLE_APP_ROUTES_IN_BROWSER=true vite",
     "build:web": "tsc && vite build",
     "build": "bun run build:web",
     "preview": "vite preview",

@@ -1,6 +1,8 @@
 import { Link } from "react-router-dom";
 import { TerminalPreview } from "../modules/bot/components/TerminalPreview";
 import { DownloadLatestButton } from "../modules/updater";
+import { AboutLegalContent } from "../shared/about/AboutLegalContent";
+import { isMarketingWebsite } from "../shared/runtimeTarget";
 import { PhoneMockup } from "../shared/ui/PhoneMockup";
 import { SpecMockup } from "../shared/ui/SpecMockup";
 import { TopMenu } from "../shared/ui/TopMenu";
@@ -106,6 +108,8 @@ const specCards = [
 ];
 
 export function LandingPage() {
+  const marketingSite = isMarketingWebsite();
+
   return (
     <div className="relative overflow-x-clip pb-20">
       <TopMenu />
@@ -128,10 +132,14 @@ export function LandingPage() {
               tools become new abilities on demand.
             </p>
             <div className="mt-5 flex flex-wrap gap-3">
-              <Link to="/setup" className="primary-button px-6">
-                Scan and connect
-              </Link>
-              <DownloadLatestButton className="secondary-button px-6" />
+              {marketingSite ? (
+                <DownloadLatestButton className="primary-button px-6" />
+              ) : (
+                <Link to="/setup" className="primary-button px-6">
+                  Scan and connect
+                </Link>
+              )}
+              {!marketingSite && <DownloadLatestButton className="secondary-button px-6" />}
               <a href="#spec" className="secondary-button px-6">
                 Read the spec
               </a>
@@ -438,10 +446,14 @@ export function LandingPage() {
               Your AI. Your machine. Your rules.
             </h2>
             <div className="mt-8 flex flex-wrap justify-center gap-4">
-              <Link to="/setup" className="primary-button px-6">
-                Open setup wizard
-              </Link>
-              <DownloadLatestButton className="secondary-button px-6" />
+              {marketingSite ? (
+                <DownloadLatestButton className="primary-button px-6" />
+              ) : (
+                <Link to="/setup" className="primary-button px-6">
+                  Open setup wizard
+                </Link>
+              )}
+              {!marketingSite && <DownloadLatestButton className="secondary-button px-6" />}
               <a
                 href="https://github.com/pengine-ai/pengine"
                 className="secondary-button gap-2 px-6"
@@ -462,6 +474,23 @@ export function LandingPage() {
             </div>
           </div>
         </section>
+
+        {marketingSite && (
+          <section id="about" className="scroll-mt-28 pt-24">
+            <p className="mono-label">About</p>
+            <div className="mt-3 flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+              <h2 className="max-w-3xl text-4xl font-extrabold tracking-tight text-white sm:text-5xl">
+                Contact, privacy, and project
+              </h2>
+              <p className="max-w-xl subtle-copy">
+                Links and compliance information for the open source app.
+              </p>
+            </div>
+            <div className="mt-10 panel p-6 sm:p-8">
+              <AboutLegalContent />
+            </div>
+          </section>
+        )}
       </main>
     </div>
   );

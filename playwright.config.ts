@@ -18,7 +18,8 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: "npm run dev -- --host 127.0.0.1 --port 1420",
+    command:
+      "VITE_ENABLE_APP_ROUTES_IN_BROWSER=true npm run dev -- --host 127.0.0.1 --port 1420",
     url: "http://127.0.0.1:1420",
     reuseExistingServer: !process.env.CI,
     timeout: 120000,

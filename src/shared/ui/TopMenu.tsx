@@ -2,17 +2,22 @@ import * as Menubar from "@radix-ui/react-menubar";
 import { useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { useAppSessionStore } from "../../modules/bot/store/appSessionStore";
+import { isMarketingWebsite } from "../runtimeTarget";
 
-const navLinks = [
+const appNavLinks = [
   { label: "Home", to: "/" },
   { label: "Dashboard", to: "/dashboard" },
   { label: "Settings", to: "/settings" },
 ];
 
+const marketingNavLinks = [{ label: "Home", to: "/" }];
+
 export function TopMenu() {
   const location = useLocation();
+  const marketingSite = isMarketingWebsite();
+  const navLinks = marketingSite ? marketingNavLinks : appNavLinks;
   const isDeviceConnected = useAppSessionStore((s) => s.isDeviceConnected);
-  const showOpenSetup = !isDeviceConnected && location.pathname !== "/setup";
+  const showOpenSetup = !marketingSite && !isDeviceConnected && location.pathname !== "/setup";
   const [mobileOpen, setMobileOpen] = useState(false);
   const isOnSetup = location.pathname === "/setup";
 
@@ -118,13 +123,15 @@ export function TopMenu() {
             })}
           </Menubar.Root>
 
-          <p
-            className={`font-mono text-[11px] uppercase tracking-[0.14em] ${
-              isOnSetup ? "text-cyan-200/90" : "text-(--dim)"
-            }`}
-          >
-            {isOnSetup ? "Setup in progress" : "Runtime dashboard"}
-          </p>
+          {!marketingSite && (
+            <p
+              className={`font-mono text-[11px] uppercase tracking-[0.14em] ${
+                isOnSetup ? "text-cyan-200/90" : "text-(--dim)"
+              }`}
+            >
+              {isOnSetup ? "Setup in progress" : "Runtime dashboard"}
+            </p>
+          )}
         </div>
       </div>
     </header>

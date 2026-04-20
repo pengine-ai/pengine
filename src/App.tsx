@@ -2,6 +2,7 @@ import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { Navigate, Route, Routes, useNavigate } from "react-router-dom";
 import { getPengineHealth } from "./modules/bot/api";
 import { useAppSessionStore } from "./modules/bot/store/appSessionStore";
+import { isMarketingWebsite } from "./shared/runtimeTarget";
 
 const LandingPage = lazy(() =>
   import("./pages/LandingPage").then((m) => ({ default: m.LandingPage })),
@@ -70,6 +71,7 @@ function StartupDashboardRedirect() {
 
 function App() {
   const [sessionReady, setSessionReady] = useState(false);
+  const marketingSite = isMarketingWebsite();
 
   useEffect(() => {
     if (useAppSessionStore.persist.hasHydrated()) {
@@ -94,13 +96,17 @@ function App() {
 
   return (
     <div data-testid="app-ready">
-      <StartupDashboardRedirect />
+      {!marketingSite && <StartupDashboardRedirect />}
       <Suspense fallback={<RoutePageFallback />}>
         <Routes>
           <Route path="/" element={<LandingPage />} />
-          <Route path="/setup" element={<SetupPage />} />
-          <Route path="/dashboard" element={<DashboardPage />} />
-          <Route path="/settings" element={<SettingsPage />} />
+          {!marketingSite && (
+            <>
+              <Route path="/setup" element={<SetupPage />} />
+              <Route path="/dashboard" element={<DashboardPage />} />
+              <Route path="/settings" element={<SettingsPage />} />
+            </>
+          )}
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </Suspense>
