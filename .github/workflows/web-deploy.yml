@@ -1,9 +1,10 @@
-name: Deploy web app
+name: Build web app
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Git tag / registry tag (e.g. 1.0.2). Image is built and pushed every run."
+        description: "Git tag / registry tag (e.g. 1.0.2). Image is built and pushed
+          every run."
         required: true
         type: string
 
@@ -68,57 +69,3 @@ jobs:
             ${{ env.IMAGE }}:${{ steps.meta.outputs.tag }}
             ${{ env.IMAGE }}:sha-${{ steps.git.outputs.short }}
             ${{ env.IMAGE }}:latest
-
-  deploy:
-    name: Deploy to host
-    needs: build-package
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v5
-
-      - name: Ensure remote directory
-        uses: appleboy/ssh-action@v1.2.5
-        with:
-          host: ${{ secrets.DEPLOY_HOST }}
-          username: ${{ secrets.DEPLOY_USER }}
-          key: ${{ secrets.DEPLOY_SSH_KEY }}
-          port: 22
-          timeout: 2m
-          script: mkdir -p ~/pengine
-
-      - name: Copy docker-compose.yml to host
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.DEPLOY_HOST }}
-          username: ${{ secrets.DEPLOY_USER }}
-          key: ${{ secrets.DEPLOY_SSH_KEY }}
-          port: 22
-          timeout: 2m
-          source: deployment/docker-compose.yml
-          target: ~/pengine/
-          overwrite: true
-          strip_components: 1
-
-      - name: SSH — docker login, compose pull, up
-        uses: appleboy/ssh-action@v1.2.5
-        env:
-          GHCR_USER: ${{ github.repository_owner }}
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PENGINE_WEB_IMAGE: "${{ needs.build-package.outputs.image }}:${{ needs.build-package.outputs.tag }}"
-        with:
-          host: ${{ secrets.DEPLOY_HOST }}
-          username: ${{ secrets.DEPLOY_USER }}
-          key: ${{ secrets.DEPLOY_SSH_KEY }}
-          port: 22
-          timeout: 3m
-          command_timeout: 10m
-          envs: GHCR_USER,GHCR_TOKEN,PENGINE_WEB_IMAGE
-          script: |
-            set -euo pipefail
-            cd ~/pengine/deployment
-            echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
-            export PENGINE_WEB_IMAGE
-            docker compose pull
-            docker compose up -d

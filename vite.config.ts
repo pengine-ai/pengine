@@ -49,6 +49,15 @@ export default defineConfig(async () => {
     preview: {
       port: 1422,
       strictPort: true,
+      // Required when nginx (or any reverse proxy) sends Host: pengine.net — Vite 7 blocks unknown hosts by default.
+      allowedHosts: [
+        "pengine.net",
+        "localhost",
+        "127.0.0.1",
+        ...(process.env.VITE_PREVIEW_ALLOWED_HOSTS?.split(",")
+          .map((h) => h.trim())
+          .filter(Boolean) ?? []),
+      ],
     },
   };
 });

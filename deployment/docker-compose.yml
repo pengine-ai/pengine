@@ -1,13 +1,17 @@
+# Local / standalone: Pengine only (default bridge, port 1422 on host).
+#
+# Production next to Pengui: use Pengui’s docker-compose with --profile pengine
+# (see pengui repo deployment/docker-compose.yml) — same network as nginx, no external network.
+
 services:
   pengine-web:
     image: ${PENGINE_WEB_IMAGE:-ghcr.io/pengine-ai/pengine-web:latest}
     container_name: pengine-app
     hostname: pengine
     restart: unless-stopped
-    # Vite preview — serves `dist/` (must match deploy/Dockerfile CMD).
     command: ["npm", "run", "preview", "--", "--host", "0.0.0.0", "--port", "1422"]
-    expose:
-      - "1422"
+    ports:
+      - "1422:1422"
     environment:
       - NODE_ENV=production
     healthcheck:
