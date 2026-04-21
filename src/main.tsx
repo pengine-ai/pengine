@@ -4,9 +4,12 @@ import { BrowserRouter } from "react-router-dom";
 import App from "./App";
 import "./shared/appMeta";
 import { initTauriRegistryBridge } from "./shared/mcpEvents";
+import { isTauriApp } from "./shared/runtimeTarget";
 import "./index.css";
 
-initTauriRegistryBridge();
+if (isTauriApp()) {
+  initTauriRegistryBridge();
+}
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <StrictMode>

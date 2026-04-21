@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { isMarketingWebsite } from "../../../shared/runtimeTarget";
 import { PENGINE } from "../api";
 import { logLineKindClass } from "./logLineKindClass";
 
@@ -8,10 +9,25 @@ const fallbackLines: LogLine[] = [
   { timestamp: "00:00:00", kind: "ok", message: "Waiting for Pengine service…" },
 ];
 
+/** Static copy only — never opens loopback (avoids browser local-network prompts on the public site). */
+const marketingDemoLines: LogLine[] = [
+  {
+    timestamp: "—",
+    kind: "info",
+    message: "Demo preview — the desktop app streams a live log from your machine.",
+  },
+  { timestamp: "—", kind: "ok", message: "Tool policy loaded from local settings." },
+  { timestamp: "—", kind: "info", message: "MCP registry idle — add servers in the dashboard." },
+  { timestamp: "—", kind: "ok", message: "Agent loop ready (connect Telegram in Setup)." },
+];
+
 const SCROLL_NEAR_BOTTOM_PX = 64;
 
 export function TerminalPreview() {
-  const [lines, setLines] = useState<LogLine[]>(fallbackLines);
+  const marketingSite = isMarketingWebsite();
+  const [lines, setLines] = useState<LogLine[]>(() =>
+    marketingSite ? marketingDemoLines : fallbackLines,
+  );
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const addLine = useCallback((line: LogLine) => {
@@ -19,6 +35,8 @@ export function TerminalPreview() {
   }, []);
 
   useEffect(() => {
+    if (marketingSite) return;
+
     let cancelled = false;
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
     let reconnectAttempt = 0;
@@ -91,7 +109,7 @@ export function TerminalPreview() {
       es?.close();
       unlistenTauri?.();
     };
-  }, [addLine]);
+  }, [addLine, marketingSite]);
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -111,7 +129,7 @@ export function TerminalPreview() {
         <span className="h-3 w-3 rounded-full bg-[#28c840]" />
         <p className="ml-2">pengine runtime</p>
         <span className="ml-auto hidden text-[10px] uppercase tracking-[0.14em] text-white/35 sm:inline">
-          live
+          {marketingSite ? "demo" : "live"}
         </span>
       </div>
       <div
