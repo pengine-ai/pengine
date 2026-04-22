@@ -101,12 +101,14 @@ async fn chat_with_cloud_fallback(
                 return Err(err);
             }
 
+            let err_lower = err.to_ascii_lowercase();
             // Check for subscription error specifically
-            let is_subscription_error =
-                err.contains("requires a subscription") || err.contains("upgrade for access");
+            let is_subscription_error = err_lower.contains("requires a subscription")
+                || err_lower.contains("upgrade for access");
 
             // Check for rate limit error
-            let is_rate_limit_error = err.contains("rate limit") || err.contains("quota exceeded");
+            let is_rate_limit_error =
+                err_lower.contains("rate limit") || err_lower.contains("quota exceeded");
 
             // Check for unavailable error
             let is_unavailable_error = ollama::is_cloud_unavailable_error(&err);
