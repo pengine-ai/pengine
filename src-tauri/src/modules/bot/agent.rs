@@ -87,11 +87,6 @@ fn chat_options_for_agent_step(
 /// not truncated before sending to the user.
 const TOOL_OUTPUT_CHAR_CAP: usize = 4000;
 
-/// Run a chat call; if the request goes to a cloud model and the daemon
-/// returns a rate-limit error, downgrade to the user's last local model and
-/// retry once. The downgraded model is also written back to
-/// `preferred_ollama_model` so the rest of the turn (and future turns) stay
-/// local until the user picks again.
 async fn chat_with_cloud_fallback(
     state: &AppState,
     model: &mut String,
@@ -102,11 +97,37 @@ async fn chat_with_cloud_fallback(
     match ollama::chat_with_tools(model, messages, tools, options).await {
         Ok(r) => Ok(r),
         Err(err) => {
-            if ollama::classify_model(model) != ollama::ModelKind::Cloud
-                || !ollama::is_cloud_unavailable_error(&err)
-            {
+            if ollama::classify_model(model) != ollama::ModelKind::Cloud {
                 return Err(err);
             }
+
+            let err_lower = err.to_ascii_lowercase();
+            // Check for subscription error specifically
+            let is_subscription_error = err_lower.contains("requires a subscription")
+                || err_lower.contains("upgrade for access");
+
+            // Check for rate limit error
+            let is_rate_limit_error =
+                err_lower.contains("rate limit") || err_lower.contains("quota exceeded");
+
+            // Check for unavailable error
+            let is_unavailable_error = ollama::is_cloud_unavailable_error(&err);
+
+            let should_fallback =
+                is_subscription_error || is_rate_limit_error || is_unavailable_error;
+
+            if !should_fallback {
+                return Err(err);
+            }
+
+            let reason = if is_subscription_error {
+                "subscription required"
+            } else if is_rate_limit_error {
+                "rate-limited/quota exceeded"
+            } else {
+                "unavailable"
+            };
+
             let last_local = state.last_local_model.read().await.clone();
             let catalog = ollama::model_catalog(3000).await.ok();
             let fallback = catalog
@@ -116,24 +137,36 @@ async fn chat_with_cloud_fallback(
                 state
                     .emit_log(
                         "ollama",
-                        &format!("cloud '{model}' unavailable ({err}); no local fallback"),
+                        &format!("cloud '{model}' {reason} ({err}); no local fallback"),
                     )
                     .await;
                 return Err(err);
             };
+
             if local == *model {
+                state
+                    .emit_log(
+                        "ollama",
+                        &format!(
+                            "cloud '{model}' {reason} ({err}); local fallback resolves to same model, cannot retry"
+                        ),
+                    )
+                    .await;
                 return Err(err);
             }
+
             state
                 .emit_log(
                     "ollama",
-                    &format!("cloud '{model}' unavailable, switching to local '{local}': {err}"),
+                    &format!("cloud '{model}' {reason}, switching to local '{local}': {err}"),
                 )
                 .await;
+
             {
                 let mut pref = state.preferred_ollama_model.write().await;
                 *pref = Some(local.clone());
             }
+
             *model = local;
             ollama::chat_with_tools(model, messages, tools, options).await
         }
@@ -686,7 +719,7 @@ async fn build_system_prompt(
     format!(
         "{PENGINE_OUTPUT_CONTRACT_LEAD}Assistant with tools. Call a tool only for external data; otherwise answer directly. \
          After tool results, answer immediately. Be concise. \
-         `brave_web_search` is only in the tool list when the user asked to search the open web (e.g. “search the internet”, “suche im Internet”, “suche nach …”) or a skill’s `requires` matches this turn — otherwise prefer **`fetch`** on any `http(s)` URL you have (including from the user). \
+         `brave_web_search` is only in the tool list when the user asked to search the open web (e.g. \"search the internet\", \"suche im Internet\", \"suche nach ...\") or a skill's `requires` matches this turn — otherwise prefer **`fetch`** on any `http(s)` URL you have (including from the user). \
          At most one `brave_web_search` per user message when it is available. \
          After an allowed search, the host may auto-`fetch` several top result URLs — use those excerpts and end with **Quellen** listing every source URL.{fs_hint}{mem_hint}{weather_directive}{skills_hint}"
     )

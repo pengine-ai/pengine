@@ -92,8 +92,9 @@ jobs:
             -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 
           # Add to the search list so tools find it without an explicit path
+          # shellcheck disable=SC2046  # intentional word-splitting on newlines
           security list-keychains -d user -s "$KEYCHAIN_PATH" \
-            "$(security list-keychains -d user | tr -d '"')"
+            $(security list-keychains -d user | tr -d '"')
 
           # Tidy up the .p12 from disk immediately
           rm certificate.p12
