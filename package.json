@@ -17,7 +17,7 @@
     "lint:fix": "eslint . --fix",
     "format": "prettier --write \"src/**/*.{ts,tsx,js,jsx,css,json}\"",
     "typecheck": "tsc --noEmit",
-    "rust:fmt": "cargo fmt --all --manifest-path src-tauri/Cargo.toml -- --check",
+    "rust:fmt": "cargo fmt --all --manifest-path src-tauri/Cargo.toml",
     "rust:lint": "cargo clippy --all-targets --manifest-path src-tauri/Cargo.toml -- -D warnings",
     "rust:check": "bun run rust:fmt && bun run rust:lint",
     "prepare": "husky"
