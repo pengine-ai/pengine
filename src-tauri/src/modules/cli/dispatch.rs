@@ -138,7 +138,7 @@ async fn dispatch_native(
                 ),
                 Err(e) => CliReply::error(e),
             }
-        },
+        }
         "exit" | "quit" => CliReply::text("bye."),
         other => CliReply::error(format!("unknown command: /{other}")),
     }
