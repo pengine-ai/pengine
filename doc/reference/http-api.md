@@ -29,6 +29,12 @@ Authoritative list: **`Router::new()`** in `http_server.rs`. Below: method, path
 | GET | `/v1/settings` | `skills_hint_max_bytes` + min/max/default. |
 | PUT | `/v1/settings` | Body: `{ "skills_hint_max_bytes": <u32> }` — clamped; persists `user_settings.json`. |
 
+## CLI (terminal surface)
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| GET | `/v1/cli/commands` | JSON: `{ "commands": [ { "name", "summary" }, … ] }` — native command metadata (same registry as `pengine help`). |
+
 ## MCP
 
 | Method | Path | Notes |

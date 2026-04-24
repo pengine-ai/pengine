@@ -10,7 +10,7 @@ Read **[doc/architecture/README.md](doc/architecture/README.md)** before adding,
 
 | Task | Documentation | Then open in code (non-exhaustive) |
 | --- | --- | --- |
-| Telegram flow, agent loop, tools, prompts, limits | [doc/agent/runtime.md](doc/agent/runtime.md) | `src-tauri/src/modules/bot/agent.rs`, `service.rs` |
+| Telegram flow, agent loop, tools, prompts, limits | [doc/agent/runtime.md](doc/agent/runtime.md) | `src-tauri/src/modules/agent/`, `modules/bot/service.rs` |
 | New or changed HTTP routes / dashboard API | [doc/reference/http-api.md](doc/reference/http-api.md) | `src-tauri/src/infrastructure/http_server.rs`, matching `src/modules/*/api/` |
 | MCP client, registry, native tools, `mcp.json` | [doc/architecture/mcp.md](doc/architecture/mcp.md), [doc/guides/custom-mcp-tools.md](doc/guides/custom-mcp-tools.md) | `src-tauri/src/modules/mcp/` |
 | Startup, `AppState`, disk paths, secrets | [doc/platform/data-and-startup.md](doc/platform/data-and-startup.md) | `src-tauri/src/app.rs`, `shared/state.rs`, `modules/secure_store/` |

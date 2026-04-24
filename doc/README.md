@@ -56,6 +56,7 @@ Product overview: [../README.md](../README.md).
 | [guides/custom-mcp-tools.md](guides/custom-mcp-tools.md) | Concepts, dashboard vs API, `mcp.json` paths, stdio fields, Docker/custom tools, pitfalls |
 | [guides/releasing.md](guides/releasing.md) | Tag-driven release pipeline, code signing/notarization explained, how to obtain Apple + Windows secrets |
 | [guides/deploying-web.md](guides/deploying-web.md) | Web-app deploy pipeline: GHCR image + SSH docker-compose rollout to the host |
+| [guides/cli.md](guides/cli.md) | Terminal CLI: `bun run cli`, flag order, `tauri dev --`, one-shot tests |
 
 ### Tool Engine (maintainers)
 
@@ -72,7 +73,8 @@ Product overview: [../README.md](../README.md).
 | **Web UI** | Landing, setup wizard, dashboard | `src/pages/`, `src/App.tsx` |
 | **Loopback HTTP API** | REST + SSE on `127.0.0.1:21516` | `src-tauri/src/infrastructure/http_server.rs` |
 | **Telegram bot** | Token verify, dispatch, replies | `src-tauri/src/modules/bot/` |
-| **Agent loop** | Ollama chat + tools, step cap, policies | `src-tauri/src/modules/bot/agent.rs` |
+| **Agent loop** | Ollama chat + tools, step cap, policies | `src-tauri/src/modules/agent/` |
+| **Terminal CLI** | `tauri-plugin-cli`, REPL, Telegram `$` bridge | `src-tauri/src/modules/cli/` |
 | **Ollama** | Models list, active/selected model | `src-tauri/src/modules/ollama/`, `GET/PUT /v1/ollama/*` |
 | **MCP** | stdio transports, registry, `tools/call` | `src-tauri/src/modules/mcp/` |
 | **Tool Engine** | Catalog install, custom images, runtime probe | `src-tauri/src/modules/tool_engine/`, `src/modules/toolengine/` |

@@ -6,6 +6,7 @@ import { CronPanel } from "../modules/cron";
 import { McpToolsPanel } from "../modules/mcp/components/McpToolsPanel";
 import { fetchOllamaModels, setPreferredOllamaModel } from "../modules/ollama/api";
 import type { OllamaModelInfo } from "../modules/ollama/types";
+import { CliCommandsPanel } from "../modules/cli";
 import { SkillsPanel } from "../modules/skills";
 import { ToolEnginePanel } from "../modules/toolengine/components/ToolEnginePanel";
 import { UpdateIndicator } from "../modules/updater";
@@ -236,6 +237,11 @@ export function DashboardPage() {
         {/* ── Terminal (full width) — live runtime log ───────── */}
         <section className="mt-4 sm:mt-6">
           <TerminalPreview />
+        </section>
+
+        {/* ── Terminal CLI (PATH launcher toggle) ───────────────── */}
+        <section className="mt-4 sm:mt-6">
+          <CliCommandsPanel />
         </section>
 
         {/* ── Saved audit files (disk) — separate from live stream ─ */}

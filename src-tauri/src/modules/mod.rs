@@ -1,4 +1,6 @@
+pub mod agent;
 pub mod bot;
+pub mod cli;
 pub mod cron;
 pub mod keywords;
 pub mod mcp;

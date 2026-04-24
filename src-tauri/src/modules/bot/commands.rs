@@ -1,6 +1,7 @@
 use crate::infrastructure::audit_log;
 use crate::infrastructure::bot_lifecycle;
 use crate::modules::bot::repository;
+use crate::modules::cli::shim as cli_shim;
 use crate::modules::keywords::all_keyword_groups;
 use crate::modules::secure_store;
 use crate::shared::keywords::KeywordGroup;
@@ -111,4 +112,22 @@ pub async fn audit_delete_file(
     audit_log::remove_audit_file(&state.store_path, date.trim())
         .await
         .map_err(audit_log::command_error_from_io)
+}
+
+/// Where the `pengine-cli` launcher would be written and whether `PATH` already includes it.
+#[tauri::command]
+pub fn cli_shim_status() -> Result<cli_shim::CliShimStatus, String> {
+    cli_shim::status()
+}
+
+/// Install `pengine-cli` launcher script (macOS/Linux) or `%LOCALAPPDATA%\\Pengine\\bin\\pengine-cli.cmd` (Windows)
+/// pointing at this app’s executable.
+#[tauri::command]
+pub fn cli_shim_install() -> Result<cli_shim::CliShimStatus, String> {
+    cli_shim::install_shim()
+}
+
+#[tauri::command]
+pub fn cli_shim_remove() -> Result<(), String> {
+    cli_shim::remove_shim()
 }

@@ -1,7 +1,7 @@
 use super::repository;
 use super::service;
 use super::types::{CronFile, CronJob};
-use crate::modules::bot::agent;
+use crate::modules::agent;
 use crate::shared::state::AppState;
 use crate::shared::text::split_by_chars;
 use futures::FutureExt;

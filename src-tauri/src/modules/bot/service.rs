@@ -1,12 +1,15 @@
-use crate::modules::bot::agent;
+use crate::modules::agent;
+use crate::modules::cli::telegram_bridge;
 use crate::modules::cron::{repository as cron_repository, types::CronFile};
 use crate::shared::state::AppState;
 use crate::shared::text::split_by_chars;
 use std::sync::Arc;
 use teloxide::prelude::*;
-use teloxide::types::{ChatAction, ChatId, Me};
+use teloxide::types::{ChatAction, ChatId};
 use teloxide::utils::command::BotCommands;
 use tokio::sync::Notify;
+
+pub use super::token_verify::verify_token;
 
 /// Telegram's per-message hard limit is 4096 **UTF-16 code units**, not Unicode
 /// scalars: one emoji outside the BMP counts as 2 code units. `split_by_chars`
@@ -14,13 +17,6 @@ use tokio::sync::Notify;
 /// that are entirely supplementary characters. 2000 * 2 = 4000 UTF-16 units
 /// leaves headroom under the 4096 limit.
 const TELEGRAM_CHUNK_BUDGET: usize = 2000;
-
-pub async fn verify_token(token: &str) -> Result<Me, String> {
-    let bot = Bot::new(token);
-    bot.get_me()
-        .await
-        .map_err(|e| format!("Telegram getMe failed: {e}"))
-}
 
 pub async fn start_bot(state: AppState, token: String, shutdown: Arc<Notify>) {
     let bot = Bot::new(&token);
@@ -128,6 +124,23 @@ async fn text_handler(bot: Bot, msg: Message, state: AppState) -> ResponseResult
         })
     };
 
+    if let Some(rest) = telegram_bridge::strip_dollar_cli_payload(&incoming) {
+        let reply = telegram_bridge::run_telegram_cli_line(&state, rest).await;
+        typing_task.abort();
+        let body_preview = match &reply.kind {
+            crate::modules::cli::output::ReplyKind::Error => format!("error: {}", reply.body),
+            _ => reply.body.clone(),
+        };
+        state
+            .emit_log(
+                "reply",
+                &format!("[cli:$] {}", body_preview.lines().next().unwrap_or("")),
+            )
+            .await;
+        send_telegram_cli_reply(&bot, msg.chat.id, &reply, &state).await;
+        return Ok(());
+    }
+
     let result = agent::run_turn(&state, &incoming).await;
     typing_task.abort();
 
@@ -186,6 +199,27 @@ async fn remember_chat_id(state: &AppState, chat_id: ChatId) {
 /// Send `text` to `chat_id`, splitting into Telegram-sized chunks if needed.
 /// Send failures are logged (not propagated) so one bad chunk doesn't abort
 /// the handler and leave the user with no reply at all.
+async fn send_telegram_cli_reply(
+    bot: &Bot,
+    chat_id: ChatId,
+    reply: &crate::modules::cli::output::CliReply,
+    state: &AppState,
+) {
+    let chunks = telegram_bridge::telegram_cli_reply_chunks(reply);
+    let total = chunks.len();
+    for (i, chunk) in chunks.iter().enumerate() {
+        if let Err(e) = bot.send_message(chat_id, chunk).await {
+            state
+                .emit_log(
+                    "run",
+                    &format!("telegram cli send failed (chunk {}/{}): {e}", i + 1, total),
+                )
+                .await;
+            return;
+        }
+    }
+}
+
 async fn send_reply(bot: &Bot, chat_id: ChatId, text: &str, state: &AppState) {
     let chunks = split_by_chars(text, TELEGRAM_CHUNK_BUDGET);
     let total = chunks.len();

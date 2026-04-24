@@ -88,7 +88,7 @@ pub struct AppState {
     pub last_local_model: Arc<RwLock<Option<String>>>,
     pub cached_filesystem_paths: Arc<RwLock<Vec<String>>>,
     pub tool_engine_mutex: Arc<Mutex<()>>,
-    /// Active memory-session recording (toggled by keyword commands; see `bot::agent`).
+    /// Active memory-session recording (toggled by keyword commands; see `modules::agent`).
     pub memory_session: Arc<RwLock<Option<MemorySession>>>,
     /// Flat tool names last invoked by the model (FIFO, for routing next turns).
     pub recent_tool_names: Arc<Mutex<Vec<String>>>,

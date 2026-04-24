@@ -1,6 +1,7 @@
 use crate::infrastructure::audit_log;
 use crate::infrastructure::http_server;
 use crate::modules::bot::{commands, repository, service as bot_service};
+use crate::modules::cli::bootstrap as cli_bootstrap;
 use crate::modules::cron::{repository as cron_repository, scheduler as cron_scheduler};
 use crate::modules::mcp::service as mcp_service;
 use crate::modules::ollama::cloud as ollama_cloud;
@@ -8,6 +9,16 @@ use crate::modules::secure_store;
 use crate::shared::state::{AppState, ConnectionData};
 use std::path::PathBuf;
 use tauri::Manager;
+
+/// Main window is created here (not in `tauri.conf.json`) so CLI invocations
+/// like bare `pengine` in CLI mode never instantiate a webview — only the GUI path runs this.
+fn open_main_window(app: &tauri::App) -> tauri::Result<()> {
+    tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::App("index.html".into()))
+        .title("pengine")
+        .inner_size(800.0, 600.0)
+        .build()?;
+    Ok(())
+}
 
 fn store_path(app: &tauri::App) -> PathBuf {
     let base = app
@@ -22,9 +33,14 @@ pub fn run() {
     env_logger::init();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_cli::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            // CLI mode short-circuits UI startup (`process::exit`) or returns early
+            // for a GUI child (`PENGINE_OPEN_GUI=1` from `pengine app`). Otherwise
+            // setup continues and `open_main_window` runs at the end.
+            cli_bootstrap::handle_cli_or_continue(app);
             let path = store_path(app);
             let (mcp_path, mcp_src) = mcp_service::resolve_mcp_config_path(&path);
 
@@ -189,6 +205,8 @@ pub fn run() {
                 let _ = ollama_cloud::list_cloud_models().await;
             });
 
+            open_main_window(app)?;
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -199,6 +217,9 @@ pub fn run() {
             commands::audit_list_files,
             commands::audit_read_file,
             commands::audit_delete_file,
+            commands::cli_shim_status,
+            commands::cli_shim_install,
+            commands::cli_shim_remove,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

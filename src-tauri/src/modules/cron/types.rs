@@ -1,9 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-/// When a cron job fires. Kept intentionally small: `EveryMinutes` covers "every 10
-/// minutes / hourly / every 6 hours", `DailyAt` covers "once a day at HH:MM" in the
-/// host's local timezone (the machine running the scheduler).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Schedule {
@@ -18,8 +15,6 @@ pub struct CronJob {
     pub instruction: String,
     #[serde(default)]
     pub condition: String,
-    /// If non-empty, only these skills are injected into the system prompt for this job.
-    /// Empty means all enabled skills (default).
     #[serde(default)]
     pub skill_slugs: Vec<String>,
     pub schedule: Schedule,

@@ -1,4 +1,5 @@
-use super::search_followup;
+pub mod search_followup;
+
 use crate::modules::memory::{self, MemoryProvider, SessionCommand};
 use crate::modules::ollama::keywords::THINK_ON;
 use crate::modules::ollama::service::{self as ollama, ChatOptions};

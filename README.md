@@ -90,6 +90,23 @@ bun run dev
 bun run tauri dev
 ```
 
+### Terminal CLI (same binary as the app)
+
+From the repo root you can run native commands without opening the UI, for example:
+
+```bash
+bun run cli                 # interactive REPL in the terminal (no app window)
+bun run cli -- version
+bun run cli -- help
+bun run cli -- status
+```
+
+From a built binary: **`pengine`** in a real terminal starts the **shell only**. **`pengine app`** opens the **desktop window in another process** so you can keep the shell running in parallel. See **[doc/guides/cli.md](doc/guides/cli.md)**.
+
+To type **`pengine-cli`** on `PATH` (release): open the **installed app → Dashboard → Terminal CLI** and turn **CLI on PATH** on. Use **`pengine-cli app`** for the window.
+
+Use **`--json` before the subcommand** for machine output (e.g. `bun run cli -- --json status`). Smoke tests: `bun run cli:test`.
+
 ### Build
 
 ```bash

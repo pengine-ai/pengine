@@ -211,7 +211,7 @@ pub const SKILL_HINT_BODY_CAP: usize = 2200;
 
 /// Default cap for the full skills fragment (intro + bodies + mandatory snippets), aligned with
 /// [`crate::shared::user_settings::DEFAULT_SKILLS_HINT_MAX_BYTES`]. The **runtime** limit is
-/// [`crate::shared::state::AppState::skills_hint_max_bytes`] (see `bot::agent` turns).
+/// [`crate::shared::state::AppState::skills_hint_max_bytes`] (see `modules::agent` turns).
 pub const DEFAULT_SKILL_HINT_BYTES: usize =
     crate::shared::user_settings::DEFAULT_SKILLS_HINT_MAX_BYTES as usize;
 

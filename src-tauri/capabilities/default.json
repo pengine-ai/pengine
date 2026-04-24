@@ -7,10 +7,12 @@
     "core:default",
     "opener:default",
     "dialog:default",
+    "cli:default",
     "core:event:default",
     "core:event:allow-listen",
     "core:event:allow-emit",
     "allow-audit-logs",
-    "allow-mcp-folder-picker"
+    "allow-mcp-folder-picker",
+    "allow-cli-shim"
   ]
 }
