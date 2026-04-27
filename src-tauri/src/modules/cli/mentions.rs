@@ -106,11 +106,7 @@ pub fn expand_mentions(message: &str, cwd: &Path, allowed_roots: &[PathBuf]) -> 
         message.push_str("\n\n## Mentioned files\n");
         for f in &inlined {
             let path = f.resolved_path.display();
-            let trunc_note = if f.truncated {
-                " (truncated)"
-            } else {
-                ""
-            };
+            let trunc_note = if f.truncated { " (truncated)" } else { "" };
             message.push_str(&format!("\n--- @{} → {path}{trunc_note} ---\n", f.mention));
             message.push_str(&f.content);
             if !f.content.ends_with('\n') {

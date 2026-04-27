@@ -163,7 +163,10 @@ pub async fn import(state: &AppState, path: &str) -> CliReply {
     }
 
     if added.is_empty() && overwritten.is_empty() {
-        return CliReply::code("bash", "import: nothing to add (file contained zero servers)");
+        return CliReply::code(
+            "bash",
+            "import: nothing to add (file contained zero servers)",
+        );
     }
 
     if let Err(e) = mcp_service::save_config(&state.mcp_config_path, &cfg) {
@@ -203,12 +206,7 @@ async fn add_http(
     )
 }
 
-async fn add_stdio(
-    state: &AppState,
-    name: &str,
-    command: String,
-    args: &AddArgs,
-) -> CliReply {
+async fn add_stdio(state: &AppState, name: &str, command: String, args: &AddArgs) -> CliReply {
     let entry = ServerEntry::Stdio {
         command: command.clone(),
         args: args.stdio_args.clone(),
@@ -230,12 +228,7 @@ async fn add_stdio(
     )
 }
 
-async fn add_docker(
-    state: &AppState,
-    name: &str,
-    image: String,
-    args: &AddArgs,
-) -> CliReply {
+async fn add_docker(state: &AppState, name: &str, image: String, args: &AddArgs) -> CliReply {
     let runtime = match detect_runtime().await {
         Some(r) => r,
         None => {
@@ -306,7 +299,11 @@ fn describe_entry(entry: &ServerEntry) -> (&'static str, String) {
             } else {
                 format!("{command} {}", args.join(" "))
             };
-            let dr = if *direct_return { " [direct_return]" } else { "" };
+            let dr = if *direct_return {
+                " [direct_return]"
+            } else {
+                ""
+            };
             ("stdio", format!("{argv}{dr}"))
         }
         ServerEntry::Http {
@@ -314,17 +311,17 @@ fn describe_entry(entry: &ServerEntry) -> (&'static str, String) {
             headers,
             direct_return,
         } => {
-            let dr = if *direct_return { " [direct_return]" } else { "" };
+            let dr = if *direct_return {
+                " [direct_return]"
+            } else {
+                ""
+            };
             let h = if headers.is_empty() {
                 String::new()
             } else {
                 format!(
                     " headers=[{}]",
-                    headers
-                        .keys()
-                        .cloned()
-                        .collect::<Vec<_>>()
-                        .join(",")
+                    headers.keys().cloned().collect::<Vec<_>>().join(",")
                 )
             };
             ("http", format!("{url}{h}{dr}"))
@@ -396,15 +393,19 @@ pub fn parse_add_args(rest: &str) -> Result<AddArgs, String> {
                 let (k, v) = raw
                     .split_once(':')
                     .or_else(|| raw.split_once('='))
-                    .ok_or_else(|| format!("--header `{raw}`: expected `Key: value` or `Key=value`"))?;
-                out.headers.push((k.trim().to_string(), v.trim().to_string()));
+                    .ok_or_else(|| {
+                        format!("--header `{raw}`: expected `Key: value` or `Key=value`")
+                    })?;
+                out.headers
+                    .push((k.trim().to_string(), v.trim().to_string()));
             }
             "--env" => {
                 let raw = take_value(&mut i, "--env")?;
                 let (k, v) = raw
                     .split_once('=')
                     .ok_or_else(|| format!("--env `{raw}`: expected `KEY=value`"))?;
-                out.stdio_env.push((k.trim().to_string(), v.trim().to_string()));
+                out.stdio_env
+                    .push((k.trim().to_string(), v.trim().to_string()));
             }
             "--mount-workspace" => out.mount_workspace = true,
             "--mount-rw" => out.mount_read_only = false,
@@ -484,10 +485,7 @@ mod tests {
                 .unwrap();
         assert_eq!(a.name, "gh");
         assert_eq!(a.url.as_deref(), Some("https://x.example/mcp"));
-        assert_eq!(
-            a.headers,
-            vec![("Authorization".into(), "Bearer t".into())]
-        );
+        assert_eq!(a.headers, vec![("Authorization".into(), "Bearer t".into())]);
     }
 
     #[test]
@@ -510,7 +508,10 @@ mod tests {
         .unwrap();
         assert_eq!(a.command.as_deref(), Some("npx"));
         assert_eq!(a.stdio_args, vec!["-y", "@scope/server"]);
-        assert_eq!(a.stdio_env, vec![("FOO".into(), "bar".into()), ("BAZ".into(), "qux".into())]);
+        assert_eq!(
+            a.stdio_env,
+            vec![("FOO".into(), "bar".into()), ("BAZ".into(), "qux".into())]
+        );
     }
 
     #[test]

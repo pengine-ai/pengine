@@ -67,7 +67,13 @@ pub fn handle_cli_or_continue(app: &tauri::App) {
     let json = flag_true(&matches.args, "json");
     let output_format = single_string(&matches.args, "output-format")
         .map(|s| s.to_ascii_lowercase())
-        .unwrap_or_else(|| if json { "json".to_string() } else { "text".to_string() });
+        .unwrap_or_else(|| {
+            if json {
+                "json".to_string()
+            } else {
+                "text".to_string()
+            }
+        });
     let sink: Box<dyn OutputSink> = match output_format.as_str() {
         "json" | "stream-json" => Box::new(JsonSink),
         _ => Box::new(TerminalSink::new()),
@@ -94,9 +100,7 @@ pub fn handle_cli_or_continue(app: &tauri::App) {
             }
         };
         if flag_true(&matches.args, "continue") {
-            if let Ok(Some(s)) =
-                crate::modules::cli::session::load_last(&state.store_path)
-            {
+            if let Ok(Some(s)) = crate::modules::cli::session::load_last(&state.store_path) {
                 tauri::async_runtime::block_on(async {
                     *state.cli_session.write().await = Some(s);
                 });
@@ -106,12 +110,7 @@ pub fn handle_cli_or_continue(app: &tauri::App) {
             if let Err(e) = mcp_service::rebuild_registry_into_state(&state).await {
                 return CliReply::error(format!("mcp warmup failed: {e}"));
             }
-            handlers::ask_in_session(
-                &state,
-                &prompt,
-                flag_true(&matches.args, "continue"),
-            )
-            .await
+            handlers::ask_in_session(&state, &prompt, flag_true(&matches.args, "continue")).await
         });
         let is_error = matches!(reply.kind, crate::modules::cli::output::ReplyKind::Error);
         sink.render(&reply);
@@ -153,8 +152,7 @@ pub fn handle_cli_or_continue(app: &tauri::App) {
                     }
                 };
                 if flag_true(&matches.args, "continue") {
-                    if let Ok(Some(s)) =
-                        crate::modules::cli::session::load_last(&state.store_path)
+                    if let Ok(Some(s)) = crate::modules::cli::session::load_last(&state.store_path)
                     {
                         tauri::async_runtime::block_on(async {
                             *state.cli_session.write().await = Some(s);

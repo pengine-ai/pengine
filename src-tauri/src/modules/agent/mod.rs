@@ -1211,8 +1211,7 @@ fn contains_write_token(name: &str, tokens: &[&str]) -> bool {
             if &bytes[i..i + needle.len()] == needle {
                 let left_ok = i == 0 || matches!(bytes[i - 1], b'_' | b'.' | b'-');
                 let right = i + needle.len();
-                let right_ok =
-                    right == bytes.len() || matches!(bytes[right], b'_' | b'.' | b'-');
+                let right_ok = right == bytes.len() || matches!(bytes[right], b'_' | b'.' | b'-');
                 if left_ok && right_ok {
                     return true;
                 }

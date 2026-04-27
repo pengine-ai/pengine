@@ -795,10 +795,7 @@ pub async fn ask_in_session(state: &AppState, text: &str, persist_session: bool)
     let prompt_for_agent = if context_prefix.is_empty() {
         expanded.message.clone()
     } else {
-        format!(
-            "{context_prefix}## New user message\n{}",
-            expanded.message
-        )
+        format!("{context_prefix}## New user message\n{}", expanded.message)
     };
 
     let progress = Progress::start("Thinking");

@@ -55,7 +55,10 @@ store:     {}",
                     cwd.display()
                 )));
                 state
-                    .emit_log("cli", &format!("trust: added {} to mcp fs roots", cwd.display()))
+                    .emit_log(
+                        "cli",
+                        &format!("trust: added {} to mcp fs roots", cwd.display()),
+                    )
                     .await;
             }
             Ok(PromptOutcome::Declined) => {
@@ -110,7 +113,9 @@ store:     {}",
                 }
                 last_interrupt = Some(Instant::now());
                 if tty {
-                    sink.render(&CliReply::text("(press Ctrl+C again to exit, or type /exit)"));
+                    sink.render(&CliReply::text(
+                        "(press Ctrl+C again to exit, or type /exit)",
+                    ));
                 }
                 continue;
             }

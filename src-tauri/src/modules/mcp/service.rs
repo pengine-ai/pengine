@@ -376,8 +376,7 @@ pub fn parse_claude_mcp_servers(
         .ok_or_else(|| "no `mcpServers` key".to_string())?;
     let mut out = std::collections::BTreeMap::new();
     for (name, server) in map {
-        let entry =
-            parse_claude_one_server(server).map_err(|e| format!("server `{name}`: {e}"))?;
+        let entry = parse_claude_one_server(server).map_err(|e| format!("server `{name}`: {e}"))?;
         out.insert(name.clone(), entry);
     }
     Ok(out)
@@ -931,6 +930,9 @@ mod tests {
         let (path, servers) = load_project_mcp_servers(dir.path()).unwrap();
         assert!(path.ends_with(".mcp.json"));
         assert_eq!(servers.len(), 1);
-        assert!(matches!(servers.get("x").unwrap(), ServerEntry::Http { .. }));
+        assert!(matches!(
+            servers.get("x").unwrap(),
+            ServerEntry::Http { .. }
+        ));
     }
 }

@@ -88,7 +88,11 @@ impl CliSession {
         let mut bytes_used = 0usize;
         let mut pieces: Vec<String> = Vec::new();
         for t in &self.turns[take_from..] {
-            let piece = format!("[user] {}\n[assistant] {}\n", t.user.trim(), t.assistant.trim());
+            let piece = format!(
+                "[user] {}\n[assistant] {}\n",
+                t.user.trim(),
+                t.assistant.trim()
+            );
             bytes_used = bytes_used.saturating_add(piece.len());
             if bytes_used > HISTORY_BYTES_BUDGET && !pieces.is_empty() {
                 break;
@@ -136,8 +140,7 @@ pub fn save(store_path: &Path, session: &CliSession) -> Result<(), String> {
     };
     let pointer_body =
         serde_json::to_string_pretty(&pointer).map_err(|e| format!("encode pointer: {e}"))?;
-    fs::write(last_pointer(store_path), pointer_body)
-        .map_err(|e| format!("write pointer: {e}"))?;
+    fs::write(last_pointer(store_path), pointer_body).map_err(|e| format!("write pointer: {e}"))?;
     Ok(())
 }
 

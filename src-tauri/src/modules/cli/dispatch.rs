@@ -54,7 +54,9 @@ pub async fn dispatch_line(state: &AppState, line: &str, ctx: DispatchContext) -
         RouterOutcome::Unknown(name) => {
             CliReply::error(format!("unknown command: /{name} (try /help)",))
         }
-        RouterOutcome::Agent(text) => handlers::ask_in_session(state, text, !ctx.telegram_surface).await,
+        RouterOutcome::Agent(text) => {
+            handlers::ask_in_session(state, text, !ctx.telegram_surface).await
+        }
         RouterOutcome::Native { name, rest } => dispatch_native(state, name, rest, ctx).await,
     }
 }

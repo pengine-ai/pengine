@@ -84,10 +84,7 @@ impl HttpTransport {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("")
             .to_string();
-        let body = resp
-            .text()
-            .await
-            .map_err(|e| format!("read body: {e}"))?;
+        let body = resp.text().await.map_err(|e| format!("read body: {e}"))?;
 
         if !status.is_success() {
             return Err(format!(
@@ -167,7 +164,8 @@ mod tests {
 
     #[test]
     fn parse_response_handles_sse_data_line() {
-        let body = "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true}}\n\n";
+        let body =
+            "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true}}\n\n";
         let r = parse_response("text/event-stream", body).unwrap();
         assert_eq!(r.result.unwrap()["ok"], json!(true));
     }

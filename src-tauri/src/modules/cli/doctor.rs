@@ -149,7 +149,12 @@ async fn check_mcp(state: &AppState) -> Check {
 }
 
 async fn check_keychain(state: &AppState) -> Check {
-    let bot_id = state.connection.lock().await.as_ref().map(|c| c.bot_id.clone());
+    let bot_id = state
+        .connection
+        .lock()
+        .await
+        .as_ref()
+        .map(|c| c.bot_id.clone());
     let Some(id) = bot_id else {
         return Check {
             name: "keychain",
