@@ -24,9 +24,10 @@ pub struct HttpTransport {
 
 impl HttpTransport {
     pub fn new(url: String, headers: HashMap<String, String>) -> Result<Self, String> {
-        // Ceiling for long `tools/call` (e.g. directory_tree); per-request timeout still passed in `call_with_timeout`.
+        // Global reqwest ceiling (individual requests also set `.timeout(...)` in `call_with_timeout`).
+        // Must be ≥ longest per-method `tools/call` timeout (e.g. shell MCP 300s).
         let client = Client::builder()
-            .timeout(Duration::from_secs(600))
+            .timeout(Duration::from_secs(360))
             .build()
             .map_err(|e| format!("reqwest client: {e}"))?;
         Ok(Self {
@@ -38,7 +39,7 @@ impl HttpTransport {
     }
 
     pub fn default_call_timeout() -> Duration {
-        Duration::from_secs(120)
+        Duration::from_secs(60)
     }
 
     pub async fn call(&self, method: &str, params: Option<Value>) -> Result<Value, String> {

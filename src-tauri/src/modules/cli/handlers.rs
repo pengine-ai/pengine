@@ -873,14 +873,114 @@ async fn spawn_status_forwarder(
     }))
 }
 
+/// Plain-language label for an MCP tool id (snake_case), for CLI spinner / interjects.
+fn friendly_tool_action(name: &str) -> String {
+    match name {
+        "directory_tree" => "Scanning folder layout".into(),
+        "list_directory" | "list_directory_with_sizes" => "Listing folder contents".into(),
+        "search_files" => "Searching files".into(),
+        "read_text_file" | "read_multiple_files" | "read_media_file" => "Reading files".into(),
+        "write_file" | "edit_file" | "create_directory" | "move_file" => "Updating files".into(),
+        "get_file_info" => "Reading file info".into(),
+        "fetch" => "Fetching web content".into(),
+        "brave_web_search" => "Searching the web".into(),
+        "git_status" => "Checking git status".into(),
+        "git_branch" => "Listing git branches".into(),
+        "git_diff" | "git_diff_unstaged" => "Showing git changes".into(),
+        "git_log" => "Reading git history".into(),
+        "git_commit" => "Creating git commit".into(),
+        "time" => "Getting time".into(),
+        "roll_dice" => "Rolling dice".into(),
+        _ => name
+            .split('_')
+            .filter(|s| !s.is_empty())
+            .map(|w| {
+                let mut it = w.chars();
+                match it.next() {
+                    None => String::new(),
+                    Some(c) => c.to_uppercase().chain(it.flat_map(|x| x.to_lowercase())).collect(),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+    }
+}
+
+/// Short line for the live `Thinking · …` spinner (no `tool:` prefix, no raw snake_case ids).
+fn humanize_tool_status_line(message: &str) -> Option<String> {
+    const MAX: usize = 72;
+    let msg = message.trim();
+    if msg.is_empty() {
+        return None;
+    }
+
+    if let Some(prefix) = msg.strip_suffix(" tool call(s)") {
+        if let Ok(n) = prefix.trim().parse::<usize>() {
+            let s = match n {
+                0 => "Preparing tools…".to_string(),
+                1 => "Running one tool…".to_string(),
+                _ => format!("Running {n} tools…"),
+            };
+            return Some(truncate_chars(&s, MAX));
+        }
+    }
+
+    if let Some(rest) = msg.strip_prefix('[') {
+        if let Some((step, tail)) = rest.split_once(']') {
+            if step == "host" {
+                if msg.contains("auto-fetch") {
+                    return Some(truncate_chars(
+                        "Loading a linked page…",
+                        MAX,
+                    ));
+                }
+                return Some(truncate_chars(msg, MAX));
+            }
+            let name = tail.trim();
+            let action = friendly_tool_action(name);
+            let line = format!("{action}…");
+            return Some(truncate_chars(&line, MAX));
+        }
+    }
+
+    if let Some((head, tail)) = msg.split_once(": ") {
+        if tail.ends_with(" bytes") {
+            let action = friendly_tool_action(head.trim());
+            return Some(truncate_chars(&format!("{action} · done"), MAX));
+        }
+    }
+
+    if let Some((head, err)) = msg.split_once(" error: ") {
+        let action = friendly_tool_action(head.trim());
+        let err_short = truncate_chars(err.trim(), 48);
+        return Some(truncate_chars(
+            &format!("{action} · issue: {err_short}"),
+            MAX,
+        ));
+    }
+
+    Some(truncate_chars(msg, MAX))
+}
+
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+    let count = s.chars().count();
+    if count <= max_chars {
+        return s.to_string();
+    }
+    format!(
+        "{}…",
+        s.chars().take(max_chars.saturating_sub(1)).collect::<String>()
+    )
+}
+
 /// Render a `"tool"` log message as a persistent REPL block (matches the
 /// reply `  ⎿  ` prefix style). Returns `None` for noise we don't echo.
 ///
 /// Shapes from `modules/agent`:
-/// - `[N] name`                 → `called name (step N)`
-/// - `name: <n> bytes`          → pass-through (e.g. `fetch: 4012 bytes`)
-/// - `name error: <...>`        → pass-through
-/// - `[host] auto-fetch <url>`  → pass-through
+/// - `[N] name`                 → friendly action (no raw tool ids)
+/// - `name: <n> bytes`          → friendly “done” line
+/// - `name error: <...>`       → friendly error line
+/// - `[host] auto-fetch <url>`  → pass-through / shortened
 fn inline_tool_block(message: &str) -> Option<String> {
     let msg = message.trim();
     if msg.is_empty() || msg.ends_with("does not support tools") {
@@ -892,11 +992,15 @@ fn inline_tool_block(message: &str) -> Option<String> {
             if step.starts_with("host") {
                 msg.to_string()
             } else {
-                format!("called {name} (step {step})")
+                format!("{}…", friendly_tool_action(name))
             }
         } else {
             msg.to_string()
         }
+    } else if msg.contains(" error: ") {
+        humanize_tool_status_line(msg).unwrap_or_else(|| msg.to_string())
+    } else if msg.contains(": ") && msg.ends_with(" bytes") {
+        humanize_tool_status_line(msg).unwrap_or_else(|| msg.to_string())
     } else {
         msg.to_string()
     };
@@ -922,6 +1026,7 @@ fn summarize_log_for_status(ev: &LogEntry) -> Option<String> {
     match ev.kind.as_str() {
         // Self-echo + the final reply — the user is already about to see it.
         "cli" | "reply" | "msg" | "auth" | "ok" => None,
+        "tool" => humanize_tool_status_line(&ev.message),
         _ => {
             const MAX: usize = 60;
             let msg = ev.message.trim();
@@ -958,7 +1063,7 @@ mod tests {
     #[test]
     fn inline_tool_block_rewrites_step_call() {
         let out = inline_tool_block("[0] fetch").unwrap();
-        assert!(out.contains("called fetch (step 0)"), "got: {out}");
+        assert!(out.contains("Fetching web content"), "got: {out}");
     }
 
     #[test]
@@ -973,13 +1078,14 @@ mod tests {
     #[test]
     fn inline_tool_block_passes_result_line() {
         let out = inline_tool_block("fetch: 4012 bytes").unwrap();
-        assert!(out.ends_with("fetch: 4012 bytes"), "got: {out}");
+        assert!(out.contains("Fetching web content · done"), "got: {out}");
     }
 
     #[test]
     fn inline_tool_block_passes_error_line() {
         let out = inline_tool_block("fetch error: 503 Service Unavailable").unwrap();
-        assert!(out.contains("error: 503"), "got: {out}");
+        assert!(out.contains("Fetching web content · issue:"), "got: {out}");
+        assert!(out.contains("503"), "got: {out}");
     }
 
     #[test]

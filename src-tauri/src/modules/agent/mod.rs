@@ -457,13 +457,15 @@ fn tool_call_arguments(call: &serde_json::Value) -> serde_json::Value {
     }
 }
 
-/// MCP git tools (`git_branch`, `git_status`, …) require `repo_path` inside the container.
-/// Models often omit it; derive the mount root from workspace allow-list + host cwd (same rule as Tool Engine `/app/<label>`).
-async fn default_git_repo_container_path(state: &AppState) -> Option<String> {
-    if let Ok(p) = std::env::var("PENGINE_GIT_REPO_PATH") {
-        let t = p.trim();
-        if !t.is_empty() {
-            return Some(t.to_string());
+/// Default container path for git (`repo_path`) and filesystem MCP tools (`path`): `/app/<label>`
+/// from workspace roots + host cwd. Override with `PENGINE_MCP_CONTAINER_ROOT` or `PENGINE_GIT_REPO_PATH`.
+async fn default_workspace_container_path(state: &AppState) -> Option<String> {
+    for key in ["PENGINE_MCP_CONTAINER_ROOT", "PENGINE_GIT_REPO_PATH"] {
+        if let Ok(p) = std::env::var(key) {
+            let t = p.trim();
+            if !t.is_empty() {
+                return Some(t.to_string());
+            }
         }
     }
 
@@ -487,12 +489,125 @@ async fn default_git_repo_container_path(state: &AppState) -> Option<String> {
     pairs.first().map(|(_, c)| c.clone())
 }
 
+/// Ollama exposes tools as `server_key.tool_name`; merge helpers must match on the base name.
+fn mcp_tool_base_name(full_name: &str) -> &str {
+    full_name
+        .rsplit_once('.')
+        .map(|(_, tail)| tail)
+        .unwrap_or(full_name)
+}
+
+/// Merged into `directory_tree` when absent or empty — keeps scans inside host RPC timeouts.
+/// Patterns follow `@modelcontextprotocol/server-filesystem` (minimatch on paths under `path`).
+const DIRECTORY_TREE_DEFAULT_EXCLUDES: &[&str] = &[
+    "**/node_modules/**",
+    "**/.git/**",
+    "**/target/**",
+    "**/dist/**",
+    "**/build/**",
+    "**/.next/**",
+    "**/__pycache__/**",
+    "**/.cache/**",
+    "**/coverage/**",
+    "**/.turbo/**",
+    "**/Pods/**",
+    "**/.venv/**",
+    "**/venv/**",
+];
+
+fn merge_directory_tree_exclude_patterns(map: &mut serde_json::Map<String, serde_json::Value>) {
+    let user_nonempty: Option<Vec<String>> = match map.get("excludePatterns") {
+        Some(serde_json::Value::Array(a)) if !a.is_empty() => {
+            let v: Vec<String> = a
+                .iter()
+                .filter_map(|it| it.as_str().map(str::trim).filter(|s| !s.is_empty()))
+                .map(std::string::ToString::to_string)
+                .collect();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v)
+            }
+        }
+        _ => None,
+    };
+
+    let mut merged: HashSet<String> = DIRECTORY_TREE_DEFAULT_EXCLUDES
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+    if let Some(user) = user_nonempty {
+        for s in user {
+            merged.insert(s);
+        }
+    }
+    map.insert(
+        "excludePatterns".into(),
+        serde_json::Value::Array(merged.into_iter().map(|s| json!(s)).collect()),
+    );
+}
+
+/// Official MCP filesystem tools (`@modelcontextprotocol/server-filesystem`) require `path` under a
+/// configured root. Models often call `directory_tree` with `{}`; fill `path` with the same default
+/// mount as [`default_workspace_container_path`].
+fn merge_filesystem_mcp_path_args(
+    tool_full_name: &str,
+    args: serde_json::Value,
+    default_path: Option<&str>,
+) -> serde_json::Value {
+    let base = mcp_tool_base_name(tool_full_name);
+    const DIR_TOOLS: &[&str] = &[
+        "directory_tree",
+        "list_directory",
+        "list_directory_with_sizes",
+        "search_files",
+    ];
+    if !DIR_TOOLS
+        .iter()
+        .any(|t| base.eq_ignore_ascii_case(t))
+    {
+        return args;
+    }
+    let Some(default) = default_path.map(str::trim).filter(|s| !s.is_empty()) else {
+        return args;
+    };
+
+    let mut map = match args {
+        serde_json::Value::Object(m) => m,
+        serde_json::Value::Null => serde_json::Map::new(),
+        _ => {
+            if base.eq_ignore_ascii_case("directory_tree") {
+                let mut m = serde_json::Map::new();
+                m.insert("path".into(), json!(default));
+                merge_directory_tree_exclude_patterns(&mut m);
+                return serde_json::Value::Object(m);
+            }
+            return json!({ "path": default });
+        }
+    };
+
+    let needs_fill = match map.get("path") {
+        None => true,
+        Some(serde_json::Value::Null) => true,
+        Some(serde_json::Value::String(s)) => s.trim().is_empty(),
+        _ => false,
+    };
+    if needs_fill {
+        map.insert("path".into(), json!(default));
+    }
+    if base.eq_ignore_ascii_case("directory_tree") {
+        merge_directory_tree_exclude_patterns(&mut map);
+    }
+    serde_json::Value::Object(map)
+}
+
 fn merge_git_repo_path_args(
-    tool_flat_name: &str,
+    tool_full_name: &str,
     args: serde_json::Value,
     default_repo: Option<&str>,
 ) -> serde_json::Value {
-    if !tool_flat_name.starts_with("git_") {
+    let base = mcp_tool_base_name(tool_full_name);
+    if !base.starts_with("git_") {
         return args;
     }
     let Some(default) = default_repo.map(str::trim).filter(|s| !s.is_empty()) else {
@@ -862,7 +977,7 @@ async fn build_system_prompt(
             format!("\nFile tools: use /app/… paths only. Mounts: {mounts}.")
         };
         let discipline = if paths.is_empty() {
-            "\nFilesystem MCP: tools are functions — include **every** required argument from the schema (never `{}` when fields are required). For `directory_tree`, pass mandatory `path` as an absolute `/app/<folder>` under a configured mount."
+            "\nFilesystem MCP: tools are functions — include **every** required argument from the schema (never `{}` when fields are required). For `directory_tree`, pass mandatory `path` as an absolute `/app/<folder>` under a configured mount. Recursive trees over large repos time out: prefer **`list_directory`** / **`search_files`** on a narrow path, or pass **`excludePatterns`** (e.g. `**/node_modules/**`, `**/.git/**`, `**/target/**`)."
                 .to_string()
         } else {
             let example = workspace_app_bind_pairs(&paths)
@@ -870,7 +985,7 @@ async fn build_system_prompt(
                 .map(|(_, c)| c.clone())
                 .unwrap_or_else(|| "/app/<folder>".into());
             format!(
-                "\nFilesystem MCP: include every required argument. For **`directory_tree`**, always set **`path`** to an absolute mount root (example: `{example}`). \
+                "\nFilesystem MCP: include every required argument. For **`directory_tree`**, set **`path`** to an absolute mount root (example: `{example}`); avoid scanning the whole repo at once — use **`excludePatterns`** (`**/node_modules/**`, `**/.git/**`, …) or **`list_directory`** / **`search_files`** on subpaths first. \
                  For **`git_*`** tools (git repo in container), set **`repo_path`** to that same mount root when the schema requires it (example: `{example}`)."
             )
         };
@@ -1124,7 +1239,7 @@ async fn run_model_turn(
             .emit_log("tool", &format!("{} tool call(s)", tool_calls.len()))
             .await;
 
-        let git_repo_default = default_git_repo_container_path(state).await;
+        let workspace_mount_default = default_workspace_container_path(state).await;
 
         // Resolve under one lock, then execute in parallel (per-server stdio is serialized by
         // [`crate::modules::mcp::transport::StdioTransport::rpc_mutex`]).
@@ -1139,10 +1254,15 @@ async fn run_model_turn(
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .to_string();
-                    let args = merge_git_repo_path_args(
+                    let raw = tool_call_arguments(call);
+                    let args = merge_filesystem_mcp_path_args(
                         &name,
-                        tool_call_arguments(call),
-                        git_repo_default.as_deref(),
+                        merge_git_repo_path_args(
+                            &name,
+                            raw,
+                            workspace_mount_default.as_deref(),
+                        ),
+                        workspace_mount_default.as_deref(),
                     );
                     let resolved = reg.prepare_tool_invocation(&name, args);
                     (name, resolved)
@@ -1531,5 +1651,31 @@ mod tests {
             fetch_url_dedup_key("https://a.example/page/"),
             fetch_url_dedup_key("HTTPS://A.EXAMPLE/page")
         );
+    }
+
+    #[test]
+    fn directory_tree_merge_adds_excludes_for_prefixed_tool_name() {
+        let out = merge_filesystem_mcp_path_args(
+            "te_pengine-file-manager.directory_tree",
+            json!({}),
+            Some("/app/pengine"),
+        );
+        let obj = out.as_object().unwrap();
+        assert_eq!(obj.get("path").and_then(|v| v.as_str()), Some("/app/pengine"));
+        let ep = obj
+            .get("excludePatterns")
+            .and_then(|v| v.as_array())
+            .expect("excludePatterns");
+        assert!(ep.iter().any(|v| v.as_str() == Some("**/node_modules/**")));
+    }
+
+    #[test]
+    fn list_directory_merge_matches_prefixed_server_tool_name() {
+        let out = merge_filesystem_mcp_path_args(
+            "te_x.list_directory",
+            json!({}),
+            Some("/app/ws"),
+        );
+        assert_eq!(out["path"], json!("/app/ws"));
     }
 }

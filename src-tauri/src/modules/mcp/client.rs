@@ -6,19 +6,33 @@ use std::collections::HashMap;
 use std::sync::RwLock;
 use std::time::Duration;
 
-/// `podman run` + `npx -y` inside the container can exceed a minute on cold cache / slow networks.
-const MCP_CONNECT_CALL_TIMEOUT: Duration = Duration::from_secs(300);
+/// Handshake (`initialize`, `tools/list`) including cold `podman run` / image pull — keep bounded so the UI does not stall for many minutes.
+const MCP_CONNECT_CALL_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// Default JSON-RPC deadline for normal `tools/call` traffic (matches stdio/http transport defaults).
-const MCP_TOOLS_CALL_TIMEOUT_DEFAULT: Duration = Duration::from_secs(120);
+/// Default JSON-RPC deadline for most `tools/call` traffic (stdio/http transport defaults match).
+const MCP_TOOLS_CALL_TIMEOUT_DEFAULT: Duration = Duration::from_secs(60);
 
-/// Recursive scans can exceed the default budget on large workspaces (`node_modules`, `.git`, …).
-const MCP_TOOLS_CALL_TIMEOUT_SLOW_FS: Duration = Duration::from_secs(600);
+/// Recursive tree / glob search can be slow; keep a hard cap so the agent does not sit 10+ minutes.
+const MCP_TOOLS_CALL_TIMEOUT_SEARCH: Duration = Duration::from_secs(90);
+
+/// Full-repo trees are cheaper once excludes trim `node_modules` / `target` / `.git` (see agent merge),
+/// but source-heavy repos still need headroom below multi‑minute stalls.
+const MCP_TOOLS_CALL_TIMEOUT_TREE: Duration = Duration::from_secs(180);
+
+/// Shell MCP (`pengine/shell`, `shell_execute`, interactive terminals) — align with catalog
+/// `limits.timeout_secs` (300); default 60s caused spurious audit errors on `cargo`/`npm`/review scripts.
+const MCP_TOOLS_CALL_TIMEOUT_SHELL: Duration = Duration::from_secs(300);
 
 fn tools_call_timeout(tool_name: &str) -> Duration {
     match tool_name {
-        // Wide trees or deep recursion — same order of cost as `directory_tree`.
-        "directory_tree" | "search_files" => MCP_TOOLS_CALL_TIMEOUT_SLOW_FS,
+        "directory_tree" => MCP_TOOLS_CALL_TIMEOUT_TREE,
+        "search_files" => MCP_TOOLS_CALL_TIMEOUT_SEARCH,
+        // Foreground shell runs are often builds/tests; keep under catalog container ceiling.
+        "shell_execute" => MCP_TOOLS_CALL_TIMEOUT_SHELL,
+        // PTY / monitoring can block until user interaction or process exit.
+        name if name.starts_with("terminal_") || name == "process_monitor" => {
+            MCP_TOOLS_CALL_TIMEOUT_SHELL
+        }
         _ => MCP_TOOLS_CALL_TIMEOUT_DEFAULT,
     }
 }

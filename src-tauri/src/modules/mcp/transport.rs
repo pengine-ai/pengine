@@ -102,9 +102,9 @@ impl StdioTransport {
         })
     }
 
-    /// Default for ongoing `tools/call` traffic (container cold start is already paid at connect).
+    /// Default for `call()` when no explicit deadline is passed (prefer [`McpClient::call_tool`] timeouts).
     pub fn default_call_timeout() -> Duration {
-        Duration::from_secs(120)
+        Duration::from_secs(60)
     }
 
     pub async fn call(&self, method: &str, params: Option<Value>) -> Result<Value, String> {
