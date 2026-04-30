@@ -1345,8 +1345,12 @@ async fn run_model_turn(
         };
         let post_tool = tool_rounds > 0;
         let json_only_user_reply = !has_tools;
-        let chat_opts =
-            chat_options_for_agent_step(post_tool, think, json_only_user_reply, repo_write_followthrough);
+        let chat_opts = chat_options_for_agent_step(
+            post_tool,
+            think,
+            json_only_user_reply,
+            repo_write_followthrough,
+        );
 
         let inject_post_tool = post_tool;
         if inject_post_tool {
