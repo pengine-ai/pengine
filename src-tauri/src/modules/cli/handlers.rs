@@ -656,11 +656,7 @@ async fn compact_session_background(state: &AppState) {
         }
         let keep = HISTORY_TURN_BUDGET;
         let drop_upto = sess.turns.len().saturating_sub(keep);
-        (
-            sess.turns[..drop_upto].to_vec(),
-            sess.summary.clone(),
-            keep,
-        )
+        (sess.turns[..drop_upto].to_vec(), sess.summary.clone(), keep)
     };
 
     if to_compact.is_empty() {
@@ -677,7 +673,9 @@ async fn compact_session_background(state: &AppState) {
                     let snapshot = sess.clone();
                     drop(g);
                     if let Err(e) = session::save(&state.store_path, &snapshot) {
-                        state.emit_log("cli", &format!("auto-compact save: {e}")).await;
+                        state
+                            .emit_log("cli", &format!("auto-compact save: {e}"))
+                            .await;
                     } else {
                         state
                             .emit_log("cli", "session auto-compacted in background")
