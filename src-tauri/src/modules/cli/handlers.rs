@@ -105,12 +105,19 @@ pub async fn status(state: &AppState) -> CliReply {
     let session_line = {
         let snap = state.cli_session.read().await.clone();
         match snap {
-            Some(s) => format!(
-                "session:   turns={}  tokens_in={}  tokens_out={}",
-                s.turns.len(),
-                s.prompt_tokens_total,
-                s.eval_tokens_total
-            ),
+            Some(s) => {
+                let name_part = s
+                    .name
+                    .as_deref()
+                    .map(|n| format!("name={n}  "))
+                    .unwrap_or_default();
+                format!(
+                    "session:   {name_part}turns={}  tokens_in={}  tokens_out={}",
+                    s.turns.len(),
+                    s.prompt_tokens_total,
+                    s.eval_tokens_total
+                )
+            }
             None => "session:   no active CLI session".to_string(),
         }
     };
@@ -567,16 +574,221 @@ pub async fn ask(state: &AppState, text: &str) -> CliReply {
     ask_in_session(state, text, true).await
 }
 
-/// `/new` — discard the in-memory session and start fresh for the current project.
-/// The previous session is still on disk and will be auto-resumed on the next REPL start.
-pub async fn new_session(state: &AppState) -> CliReply {
+/// `/session` — named session management: list, new, switch, rename.
+pub async fn session_cmd(state: &AppState, action: &str, rest: &str) -> CliReply {
+    match action.trim() {
+        "" | "list" => session_list(state).await,
+        "help" => session_help(),
+        "new" => session_new(state, rest.trim()).await,
+        "switch" => session_switch(state, rest.trim()).await,
+        "rename" => session_rename(state, rest.trim()).await,
+        "delete" => session_delete(state, rest.trim()).await,
+        other => CliReply::error(format!(
+            "session: unknown action `{other}` — try /session help"
+        )),
+    }
+}
+
+fn session_help() -> CliReply {
+    CliReply::code(
+        "bash",
+        "\
+/session list                    list all saved sessions (newest first)
+/session new [name]              start a fresh session; save and compact current first
+/session switch <name-or-id>     resume a saved session; save current first
+/session rename <name>           give the active session a name
+/session delete <name-or-id>     delete a saved session from disk (cannot delete the active one)
+/session help                    show this help
+
+Notes:
+  - Sessions persist on disk across restarts.
+  - Auto-compaction runs in the background when a session exceeds 12 turns.
+  - /new is a shortcut for /session new (no name)."
+            .trim_end(),
+    )
+}
+
+async fn session_list(state: &AppState) -> CliReply {
+    let manifest = session::load_manifest(&state.store_path);
+    if manifest.entries.is_empty() {
+        return CliReply::text("no saved sessions");
+    }
+    let active_id = state
+        .cli_session
+        .read()
+        .await
+        .as_ref()
+        .map(|s| s.id.clone());
+    let mut out = format!(
+        "{:<3}  {:<15}  {:<22}  {:<5}  {}\n{}\n",
+        " ",
+        "id",
+        "name",
+        "turns",
+        "branch",
+        "─".repeat(72),
+    );
+    for e in manifest.entries.iter().rev() {
+        let marker = if active_id.as_deref() == Some(e.id.as_str()) {
+            "▶"
+        } else {
+            " "
+        };
+        let name = e.name.as_deref().unwrap_or("—");
+        let branch = e.git_branch.as_deref().unwrap_or("—");
+        out.push_str(&format!(
+            "{marker:<3}  {:<15}  {name:<22}  {:<5}  {branch}\n",
+            e.id, e.turn_count,
+        ));
+        if let Some(snippet) = &e.summary_snippet {
+            out.push_str(&format!("      {snippet}\n"));
+        }
+    }
+    CliReply::code("bash", out.trim_end())
+}
+
+async fn session_new(state: &AppState, name: &str) -> CliReply {
+    // Save current session before replacing it.
+    {
+        let snap = state.cli_session.read().await.clone();
+        if let Some(s) = snap {
+            if let Err(e) = session::save(&state.store_path, &s) {
+                state.emit_log("cli", &format!("session save: {e}")).await;
+            }
+        }
+    }
+    spawn_compaction_if_needed(state).await;
+
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let project = session::detect_project_context(&cwd);
-    *state.cli_session.write().await = Some(CliSession::fresh_with_project(project));
-    CliReply::text(
-        "started a new session — history cleared in memory. \
-         Previous session is still on disk and will auto-resume on next restart.",
-    )
+    let mut new_sess = CliSession::fresh_with_project(project);
+    if !name.is_empty() {
+        new_sess.name = Some(name.to_string());
+    }
+    let label = new_sess.name.clone().unwrap_or_else(|| new_sess.id.clone());
+    *state.cli_session.write().await = Some(new_sess);
+    CliReply::text(format!("started new session: {label}"))
+}
+
+async fn session_switch(state: &AppState, query: &str) -> CliReply {
+    if query.is_empty() {
+        return CliReply::error("session switch: name or id required (see /session list)");
+    }
+    let target = match session::load_by_name_or_id(&state.store_path, query) {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            return CliReply::error(format!(
+                "session switch: no session matching `{query}` (see /session list)"
+            ))
+        }
+        Err(e) => return CliReply::error(format!("session switch: {e}")),
+    };
+    // Don't switch to the already-active session.
+    let active_id = state
+        .cli_session
+        .read()
+        .await
+        .as_ref()
+        .map(|s| s.id.clone());
+    if active_id.as_deref() == Some(target.id.as_str()) {
+        return CliReply::text(format!(
+            "session `{}` is already active",
+            target.name.as_deref().unwrap_or(&target.id)
+        ));
+    }
+    // Save + compact current session before switching.
+    spawn_compaction_if_needed(state).await;
+    {
+        let snap = state.cli_session.read().await.clone();
+        if let Some(s) = snap {
+            if let Err(e) = session::save(&state.store_path, &s) {
+                state.emit_log("cli", &format!("session save: {e}")).await;
+            }
+        }
+    }
+    let turn_count = target.turns.len();
+    let label = target.name.clone().unwrap_or_else(|| target.id.clone());
+    let summary_line = target
+        .summary
+        .as_deref()
+        .map(|s| {
+            let snippet: String = s.trim().chars().take(100).collect();
+            format!("\n  summary: {snippet}")
+        })
+        .unwrap_or_default();
+    *state.cli_session.write().await = Some(target);
+    CliReply::text(format!(
+        "switched to session: {label}  (turns={turn_count}){summary_line}"
+    ))
+}
+
+async fn session_delete(state: &AppState, query: &str) -> CliReply {
+    if query.is_empty() {
+        return CliReply::error("session delete: name or id required (see /session list)");
+    }
+    let manifest = session::load_manifest(&state.store_path);
+    let q_lower = query.to_ascii_lowercase();
+    let entry = manifest
+        .entries
+        .iter()
+        .rev()
+        .find(|e| {
+            e.name
+                .as_deref()
+                .map(|n| n.eq_ignore_ascii_case(query))
+                .unwrap_or(false)
+                || e.id == query
+                || e.id.to_ascii_lowercase().starts_with(&q_lower)
+        })
+        .cloned();
+    let Some(entry) = entry else {
+        return CliReply::error(format!(
+            "session delete: no session matching `{query}` (see /session list)"
+        ));
+    };
+    // Refuse to delete the currently active session.
+    let active_id = state
+        .cli_session
+        .read()
+        .await
+        .as_ref()
+        .map(|s| s.id.clone());
+    if active_id.as_deref() == Some(entry.id.as_str()) {
+        return CliReply::error(
+            "session delete: cannot delete the active session — switch away first",
+        );
+    }
+    let label = entry
+        .name
+        .as_deref()
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| entry.id.clone());
+    if let Err(e) = session::delete(&state.store_path, &entry.id) {
+        return CliReply::error(format!("session delete: {e}"));
+    }
+    CliReply::text(format!("deleted session: {label}"))
+}
+
+async fn session_rename(state: &AppState, name: &str) -> CliReply {
+    if name.is_empty() {
+        return CliReply::error("session rename: new name required");
+    }
+    let mut guard = state.cli_session.write().await;
+    let Some(sess) = guard.as_mut() else {
+        return CliReply::error("session rename: no active session");
+    };
+    sess.name = Some(name.to_string());
+    let snapshot = sess.clone();
+    drop(guard);
+    if let Err(e) = session::save(&state.store_path, &snapshot) {
+        return CliReply::error(format!("session rename: save failed: {e}"));
+    }
+    CliReply::text(format!("session renamed to: {name}"))
+}
+
+/// `/new` — shortcut for `/session new` (no name).
+pub async fn new_session(state: &AppState) -> CliReply {
+    session_new(state, "").await
 }
 
 /// `/compact` — call the AI to summarize old turns, store as `session.summary`,
@@ -754,18 +966,22 @@ pub async fn ask_in_session(state: &AppState, text: &str, persist_session: bool)
     };
 
     let progress = Progress::start(flavor::thinking_label().to_string());
+    let token_counter = progress.token_counter();
     let forwarder = spawn_status_forwarder(state, progress.status_sender()).await;
-    let result = agent::run_turn(state, &prompt_for_agent).await;
+    let result = agent::run_turn(state, &prompt_for_agent, Some(token_counter)).await;
     if let Some(h) = forwarder {
         h.abort();
     }
     let elapsed = progress.finish().await;
-    emit_baked_line(elapsed);
 
     match result {
-        Ok(turn) if turn.suppress_telegram_reply => CliReply::text("(no reply)"),
+        Ok(turn) if turn.suppress_telegram_reply => {
+            emit_baked_line(elapsed);
+            CliReply::text("(no reply)")
+        }
         Ok(turn) => {
             if turn.text.trim().is_empty() {
+                emit_baked_line(elapsed);
                 return CliReply::text("(no reply)");
             }
             if persist_session {
@@ -790,6 +1006,7 @@ pub async fn ask_in_session(state: &AppState, text: &str, persist_session: bool)
                 }
                 spawn_compaction_if_needed(state).await;
             }
+            emit_turn_footer(elapsed, &turn);
             let mut body = turn.text;
             if !expanded.errors.is_empty() {
                 body.push_str("\n\n_Note: ");
@@ -798,7 +1015,10 @@ pub async fn ask_in_session(state: &AppState, text: &str, persist_session: bool)
             }
             CliReply::text(body)
         }
-        Err(e) => CliReply::error(format!("agent error: {e}")),
+        Err(e) => {
+            emit_baked_line(elapsed);
+            CliReply::error(format!("agent error: {e}"))
+        }
     }
 }
 
@@ -965,7 +1185,8 @@ fn inline_tool_block(message: &str) -> Option<String> {
     } else {
         msg.to_string()
     };
-    const MAX: usize = 100;
+    // Visible prefix is "  ⎿  · " = 7 chars; cap so the full line ≤ 78 cols.
+    const MAX: usize = 70;
     let clipped: String = rendered.chars().take(MAX).collect();
     let suffix = if rendered.chars().count() > MAX {
         "…"
@@ -985,25 +1206,18 @@ fn inline_tool_block(message: &str) -> Option<String> {
 /// Returns `None` for log kinds that would just echo ourselves.
 fn summarize_log_for_status(ev: &LogEntry) -> Option<String> {
     match ev.kind.as_str() {
-        // Self-echo + the final reply — the user is already about to see it.
+        // Self-echo + final reply — user is already about to see it.
         "cli" | "reply" | "msg" | "auth" | "ok" => None,
+        // Internal debug / routing info — not useful as spinner status.
+        "tool_ctx" | "run" | "memory" | "mcp" => None,
         "tool" => humanize_tool_status_line(&ev.message),
-        _ => {
-            const MAX: usize = 60;
-            let msg = ev.message.trim();
-            let msg: String = msg.chars().take(MAX).collect();
-            let ellipsed = if msg.chars().count() == MAX {
-                format!("{msg}…")
-            } else {
-                msg
-            };
-            Some(format!("{}: {}", ev.kind, ellipsed))
-        }
+        // Suppress unknown kinds to avoid raw debug strings in the spinner.
+        _ => None,
     }
 }
 
-/// `  ⎿  Baked for 4.8s` on stderr once the spinner has been cleared.
-/// Only emitted when stderr is a TTY, matching the spinner gate.
+/// `  ⎿  Baked for 4.8s — quip` on stderr — used when no token data is available
+/// (errors, suppressed replies, compaction).
 fn emit_baked_line(elapsed: std::time::Duration) {
     if !std::io::stderr().is_terminal() {
         return;
@@ -1015,6 +1229,73 @@ fn emit_baked_line(elapsed: std::time::Duration) {
     let mut err = std::io::stderr().lock();
     let _ = err.write_all(line.as_bytes());
     let _ = err.flush();
+}
+
+/// Full turn footer with elapsed time, token counts, model, and think flag.
+/// Shown on stderr after every successful agent turn so the user has
+/// per-turn data for optimisation decisions.
+///
+/// Example:
+/// ```text
+///   ⎿  Baked for 4.8s — chef's kiss · in:1,234 out:567 · qwen3:1.5b · think:on
+/// ```
+fn emit_turn_footer(elapsed: std::time::Duration, turn: &agent::TurnResult) {
+    if !std::io::stderr().is_terminal() {
+        return;
+    }
+    let baked = flavor::baked_message(elapsed, fmt_elapsed);
+
+    // Always show token counts. Use "?" when Ollama didn't return the field
+    // (e.g. model doesn't report counts, or prompt was fully KV-cached giving in:0).
+    let in_s = if turn.prompt_tokens > 0 {
+        fmt_num(turn.prompt_tokens)
+    } else {
+        "?".to_string()
+    };
+    let out_s = if turn.eval_tokens > 0 {
+        fmt_num(turn.eval_tokens)
+    } else {
+        "?".to_string()
+    };
+    let tokens = format!(" · in:{in_s} out:{out_s}");
+
+    let model = if !turn.model.is_empty() {
+        // Trim off `:latest` suffix — it adds noise without signal.
+        let m = turn.model.trim_end_matches(":latest");
+        format!(" · {m}")
+    } else {
+        String::new()
+    };
+
+    let think = if turn.think_enabled {
+        " · think:on"
+    } else {
+        ""
+    };
+
+    let steps = if turn.steps > 1 {
+        format!(" · {}steps", turn.steps)
+    } else {
+        String::new()
+    };
+
+    let line = format!("  \x1b[2m⎿\x1b[0m  \x1b[2m{baked}{tokens}{model}{think}{steps}\x1b[0m\n");
+    let mut err = std::io::stderr().lock();
+    let _ = err.write_all(line.as_bytes());
+    let _ = err.flush();
+}
+
+/// Format a token count with thousands separators: 1234 → "1,234".
+fn fmt_num(n: u64) -> String {
+    let s = n.to_string();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, ch) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out.chars().rev().collect()
 }
 
 #[cfg(test)]

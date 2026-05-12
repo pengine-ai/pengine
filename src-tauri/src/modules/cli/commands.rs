@@ -93,12 +93,25 @@ pub const COMMANDS: &[NativeCommand] = &[
                   when the session exceeds 12 turns.",
     },
     NativeCommand {
+        name: "session",
+        summary: "Manage named sessions: list, new, switch, rename (REPL-only).",
+        details: "Usage: /session list                   # list all saved sessions\n       \
+                  /session new [name]            # start a fresh session (optional name)\n       \
+                  /session switch <name-or-id>   # resume a saved session\n       \
+                  /session rename <name>          # name or rename the active session\n       \
+                  /session delete <name-or-id>   # delete a saved session from disk\n       \
+                  /session help                  # show all session subcommands\n\n\
+                  Sessions persist across restarts. Each session keeps a turn history and\n\
+                  a compacted summary for context. /session switch saves the current session\n\
+                  before switching. The previous /new command is a shortcut for /session new.",
+    },
+    NativeCommand {
         name: "new",
-        summary: "Start a fresh session (clears in-memory history; disk copy is kept) (REPL-only).",
+        summary: "Start a fresh session (shortcut for /session new) (REPL-only).",
         details: "Usage: /new\n\n\
                   Creates an empty session for the current project. The previous session\n\
-                  is still saved on disk and can be resumed by restarting pengine\n\
-                  (sessions auto-resume per project).",
+                  is still saved on disk and can be resumed with /session switch.\n\
+                  Shortcut for /session new.",
     },
     NativeCommand {
         name: "clear",

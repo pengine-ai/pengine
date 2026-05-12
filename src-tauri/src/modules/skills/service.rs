@@ -220,10 +220,10 @@ const SKILL_MANDATORY_HINT_CAP: usize = 1200;
 
 const SKILL_HINT_INTRO: &str = "\n\nSkills: follow each recipe exactly — \
 it lists WHICH URL and HOW MANY calls. Stop when you can answer; \
-don't probe alternate hosts. Unless a skill’s **`mandatory.md`** says otherwise, prefer **`fetch`** whenever you have a concrete URL; use **`brave_web_search`** when the recipe lists it in `requires` (and this turn matches that skill), when **`mandatory.md`** orders it, or when the user explicitly asked to search the open web.\n\
-**Weather, forecasts, temperature, precipitation:** use **skill:weather** (wttr.in / Open-Meteo) as the only recipe — never government-portal or “.gv.at” skills for those topics.\n\
-Portal- or government-specific skills you install yourself apply **only** when the user is clearly asking about that jurisdiction’s government, law, official forms, or public administration — \
-not for recipes, hobbies, general knowledge, software, weather, or unrelated chit-chat. If the topic does not match the skill’s scope, ignore that recipe entirely.";
+don't probe alternate hosts. Unless a skill's **`mandatory.md`** says otherwise, prefer **`fetch`** whenever you have a concrete URL; use **`brave_web_search`** when the recipe lists it in `requires` (and this turn matches that skill), when **`mandatory.md`** orders it, or when the user explicitly asked to search the open web.\n\
+**Skill scope discipline:** only invoke a skill when the current user message is clearly about that skill's topic. \
+A skill that fetches weather data must not be used for programming questions; a skill for government portals must not be used for recipes or general knowledge. \
+If the topic does not match the skill's scope, ignore that skill entirely for this turn.";
 
 /// True when the user (or cron) message is clearly about weather / forecast.
 pub fn user_message_suggests_weather(user_message: &str) -> bool {
@@ -254,41 +254,12 @@ pub fn user_message_suggests_weather(user_message: &str) -> bool {
         .any(|n| user_message_needle_match(user_message, n))
 }
 
-/// Default “only when talking about AT public administration” needles for known portal skill slugs.
-pub fn default_hint_needles_for_slug(slug: &str) -> Option<&'static [&'static str]> {
-    let s = slug.to_lowercase();
-    let portal = s == "austria-gv-data"
-        || s == "austrian-gv"
-        || s == "austrian-gv-data"
-        || s.contains("austria-gv")
-        || s.contains("austrian-gv")
-        || s.contains("oesterreich-gv")
-        || (s.contains("oesterreich") && s.contains("gv"))
-        || (s.contains("austria") && s.contains("gv") && s.contains("data"));
-    if !portal {
-        return None;
-    }
-    Some(&[
-        "oesterreich.gv",
-        ".gv.at",
-        "oesterreich",
-        "bundesrecht",
-        "verwaltung",
-        "behörde",
-        "behoerde",
-        "formular",
-        "bürgerservice",
-        "buergerservice",
-        "e-government",
-        "egov",
-        "ministerium",
-        "amt",
-        "landesregierung",
-        "gemeinde",
-        "bescheid",
-        "verordnung",
-        "österreich",
-    ])
+/// Returns skill-level hint-gate needles from the skill's own `hint_allow_substrings` field.
+/// Skills that have no `hint_allow_substrings` set pass the gate unconditionally (always included).
+/// This function exists for callers that want the needles without a full `Skill` struct; it
+/// always returns `None` here — all gating is driven by `Skill::hint_allow_substrings`.
+pub fn default_hint_needles_for_slug(_slug: &str) -> Option<&'static [&'static str]> {
+    None
 }
 
 /// Whether `skill` may appear in the skills system-prompt fragment for this turn.
@@ -507,7 +478,7 @@ fn read_dir_skills(dir: &Path, origin: SkillOrigin) -> Vec<Skill> {
     skills
 }
 
-/// Parse a skill’s `SKILL.md`. Frontmatter is the `---`-delimited YAML-ish block at the top.
+/// Parse a skill's `SKILL.md`. Frontmatter is the `---`-delimited YAML-ish block at the top.
 /// The parser is deliberately tiny — scalars, quoted strings, and inline `[a, b]` arrays only.
 pub fn parse_skill(slug: &str, raw: &str, origin: SkillOrigin) -> Result<Skill, String> {
     let (fm, body) = split_frontmatter(raw).ok_or("missing frontmatter block")?;
@@ -644,7 +615,7 @@ fn skill_triggers_brave_web_search(skill: &Skill, user_message: &str) -> bool {
 }
 
 /// Expose the billed `brave_web_search` tool when catalogued **search keywords** match
-/// ([`super::keywords::brave_search_allowed_by_keywords`]) or when an enabled skill’s
+/// ([`super::keywords::brave_search_allowed_by_keywords`]) or when an enabled skill's
 /// `requires` / `brave_allow_substrings` / tags gate this turn.
 pub fn allow_brave_web_search_for_message(store_path: &Path, user_message: &str) -> bool {
     if super::keywords::brave_search_allowed_by_keywords(user_message) {
@@ -973,7 +944,7 @@ pub struct ClawHubSearchOptions {
     pub sort: Option<String>,
     pub limit: Option<u32>,
     pub tag: Option<String>,
-    /// When true, fetch each skill’s public `/openclaw/{slug}` HTML for author + stats (slower).
+    /// When true, fetch each skill's public `/openclaw/{slug}` HTML for author + stats (slower).
     pub enrich: bool,
 }
 
@@ -1361,13 +1332,16 @@ mod tests {
     }
 
     #[test]
-    fn portal_skill_hint_gated_without_admin_keywords() {
+    fn portal_skill_hint_gated_by_hint_allow_substrings() {
+        // Skills declare their own gate via `hint_allow_substrings` — no hardcoded slug logic.
         let tmp = tempdir().unwrap();
         let fake_store = tmp.path().join("connection.json");
-        let gv = "---\nname: G\ndescription: d\ntags: []\n---\n\nGVONLY\n";
+        let gv = "---\nname: G\ndescription: d\ntags: []\nhint_allow_substrings: [oesterreich, formular, .gv.at, verwaltung]\n---\n\nGVONLY\n";
         write_custom_skill(&fake_store, "austria-gv-data", gv, None).unwrap();
+        // Non-matching message: skill must be excluded.
         let hint = skills_prompt_hint_for_turn(&fake_store, Some("wie ist das wetter"), None);
         assert!(!hint.contains("GVONLY"), "hint={hint}");
+        // Matching message: skill must be included.
         let hint2 =
             skills_prompt_hint_for_turn(&fake_store, Some("Formular auf oesterreich.gv.at"), None);
         assert!(hint2.contains("GVONLY"), "hint={hint2}");

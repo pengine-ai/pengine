@@ -1,7 +1,10 @@
 use crate::modules::ollama::cloud;
 use crate::modules::ollama::constants::{OLLAMA_CHAT_URL, OLLAMA_PS_URL, OLLAMA_TAGS_URL};
 use crate::shared::text::normalize_assistant_message_content;
-use std::sync::OnceLock;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, OnceLock,
+};
 
 static HTTP: OnceLock<reqwest::Client> = OnceLock::new();
 
@@ -299,6 +302,10 @@ pub struct ChatOptions {
     /// for plain chat requests (no tools); grammar masks invalid tokens so the
     /// model emits JSON matching the schema.
     pub format: Option<serde_json::Value>,
+    /// When set, the Ollama request uses streaming mode and each generated chunk
+    /// increments this counter by 1 (≈ 1 token/chunk). The spinner reads it
+    /// atomically every tick to show a live `out:N↑` display.
+    pub live_out_tokens: Option<Arc<AtomicU64>>,
 }
 
 impl Default for ChatOptions {
@@ -310,6 +317,7 @@ impl Default for ChatOptions {
             temperature: None,
             keep_alive: "30m",
             format: None,
+            live_out_tokens: None,
         }
     }
 }
@@ -342,6 +350,9 @@ pub async fn chat_with_tools(
     let has_tools = tools.as_array().is_some_and(|a| !a.is_empty());
 
     let mut payload = build_payload(model, messages, options);
+    if options.live_out_tokens.is_some() {
+        payload["stream"] = serde_json::Value::Bool(true);
+    }
     if has_tools {
         payload["tools"] = tools.clone();
         // `format` constrains the whole completion; tool turns need native `tool_calls` shape.
@@ -350,11 +361,16 @@ pub async fn chat_with_tools(
         }
     }
 
-    let (status, body) = post_chat(&payload).await?;
+    let (status, body) = if let Some(counter) = &options.live_out_tokens {
+        post_chat_streaming(&payload, counter).await?
+    } else {
+        post_chat(&payload).await?
+    };
 
     if !status.is_success() {
         let err_text = body["error"].as_str().unwrap_or("");
         if has_tools && err_text.contains("does not support tools") {
+            // Retry without tools using non-streaming (edge-case fallback).
             let plain = build_payload(model, messages, options);
             let (st, b) = post_chat(&plain).await?;
             if !st.is_success() {
@@ -448,6 +464,124 @@ If the daemon is not running, start `ollama serve`. Otherwise retry — long too
     } else {
         format!("Ollama chat transport error ({OLLAMA_CHAT_URL}): {err_msg}")
     }
+}
+
+/// Streaming variant of [`post_chat`]. Reads NDJSON chunks from Ollama's
+/// `"stream": true` response, accumulates content and tool_calls, and
+/// increments `token_counter` once per content/thinking chunk (≈ 1 per token).
+/// Returns a body shaped identically to the non-streaming response so the rest
+/// of the call stack can stay unchanged.
+async fn post_chat_streaming(
+    payload: &serde_json::Value,
+    token_counter: &Arc<AtomicU64>,
+) -> Result<(reqwest::StatusCode, serde_json::Value), String> {
+    let mut resp = http_client()
+        .post(OLLAMA_CHAT_URL)
+        .json(payload)
+        .timeout(std::time::Duration::from_secs(
+            OLLAMA_CHAT_REQUEST_TIMEOUT_SECS,
+        ))
+        .send()
+        .await
+        .map_err(|e| explain_ollama_chat_transport_error(&e.to_string()))?;
+
+    let status = resp.status();
+
+    // For non-success responses there is no NDJSON stream; read body normally.
+    if !status.is_success() {
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("ollama response JSON decode ({OLLAMA_CHAT_URL}): {e}"))?;
+        return Ok((status, body));
+    }
+
+    let mut content_buf = String::new();
+    let mut tool_calls_opt: Option<serde_json::Value> = None;
+    let mut done_chunk = serde_json::Value::Null;
+    // Raw bytes buffer for reassembling partial HTTP chunks into complete lines.
+    let mut byte_buf: Vec<u8> = Vec::with_capacity(4096);
+
+    'read: loop {
+        let Some(raw) = resp
+            .chunk()
+            .await
+            .map_err(|e| format!("ollama stream read ({OLLAMA_CHAT_URL}): {e}"))?
+        else {
+            break;
+        };
+        byte_buf.extend_from_slice(&raw);
+
+        // Drain every complete \n-terminated JSON line from the buffer.
+        while let Some(nl) = byte_buf.iter().position(|&b| b == b'\n') {
+            let line_bytes: Vec<u8> = byte_buf.drain(..=nl).collect();
+            let line = match std::str::from_utf8(&line_bytes) {
+                Ok(s) => s.trim().to_string(),
+                Err(_) => continue,
+            };
+            if line.is_empty() {
+                continue;
+            }
+            let Ok(ev) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
+
+            let msg = ev.get("message");
+
+            // Increment live counter for each content or thinking chunk (≈ 1 token).
+            let has_content = msg
+                .and_then(|m| m.get("content"))
+                .and_then(|c| c.as_str())
+                .is_some_and(|s| !s.is_empty());
+            let has_thinking = msg
+                .and_then(|m| m.get("thinking"))
+                .and_then(|t| t.as_str())
+                .is_some_and(|s| !s.is_empty());
+            if has_content || has_thinking {
+                token_counter.fetch_add(1, Ordering::Relaxed);
+            }
+
+            // Accumulate content (thinking is intentionally excluded — extract_message strips it).
+            if let Some(c) = msg
+                .and_then(|m| m.get("content"))
+                .and_then(|c| c.as_str())
+                .filter(|s| !s.is_empty())
+            {
+                content_buf.push_str(c);
+            }
+
+            // Ollama emits tool_calls as a complete object in a single chunk.
+            if let Some(tc) = msg.and_then(|m| m.get("tool_calls")) {
+                if tc.as_array().is_some_and(|a| !a.is_empty()) {
+                    tool_calls_opt = Some(tc.clone());
+                }
+            }
+
+            if ev.get("done").and_then(|v| v.as_bool()).unwrap_or(false) {
+                done_chunk = ev;
+                break 'read;
+            }
+        }
+    }
+
+    // Reconstruct a message object matching the non-streaming shape.
+    let mut message = serde_json::json!({
+        "role": "assistant",
+        "content": content_buf,
+    });
+    if let Some(tc) = tool_calls_opt {
+        message["tool_calls"] = tc;
+    }
+
+    // Carry forward the done-chunk's stat fields (prompt_eval_count, eval_count, …)
+    // and replace `message` with our reassembled version.
+    let mut body = match done_chunk.as_object() {
+        Some(obj) => serde_json::Value::Object(obj.clone()),
+        None => serde_json::json!({}),
+    };
+    body["message"] = message;
+
+    Ok((status, body))
 }
 
 async fn post_chat(

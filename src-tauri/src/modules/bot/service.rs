@@ -141,7 +141,7 @@ async fn text_handler(bot: Bot, msg: Message, state: AppState) -> ResponseResult
         return Ok(());
     }
 
-    let result = agent::run_turn(&state, &incoming).await;
+    let result = agent::run_turn(&state, &incoming, None).await;
     typing_task.abort();
 
     match result {

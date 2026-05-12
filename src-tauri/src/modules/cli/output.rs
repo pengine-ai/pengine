@@ -7,7 +7,10 @@
 use regex::Regex;
 use serde::Serialize;
 use std::io::{IsTerminal, Write};
-use std::sync::{Arc, OnceLock};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, OnceLock,
+};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
@@ -473,6 +476,7 @@ impl Progress {
     pub fn start(label: impl Into<String>) -> ProgressHandle {
         let start = Instant::now();
         let animate = std::io::stderr().is_terminal();
+        let token_counter = Arc::new(AtomicU64::new(0));
         let state = Arc::new(AsyncMutex::new(ProgressState {
             label: label.into(),
             last_status: None,
@@ -482,11 +486,17 @@ impl Progress {
         }));
         let task = if animate {
             let state = state.clone();
-            Some(tokio::spawn(spinner_loop(state, start)))
+            let tc = token_counter.clone();
+            Some(tokio::spawn(spinner_loop(state, start, tc)))
         } else {
             None
         };
-        ProgressHandle { task, start, state }
+        ProgressHandle {
+            task,
+            start,
+            state,
+            token_counter,
+        }
     }
 }
 
@@ -494,6 +504,7 @@ pub struct ProgressHandle {
     task: Option<JoinHandle<()>>,
     start: Instant,
     state: Arc<AsyncMutex<ProgressState>>,
+    token_counter: Arc<AtomicU64>,
 }
 
 pub struct ProgressStatus {
@@ -517,6 +528,12 @@ impl ProgressHandle {
         ProgressStatus {
             state: self.state.clone(),
         }
+    }
+
+    /// Returns a counter the caller can pass to the agent for live output-token display.
+    /// The spinner reads it atomically each tick and shows `out:N↑` in the status line.
+    pub fn token_counter(&self) -> Arc<AtomicU64> {
+        self.token_counter.clone()
     }
 
     pub async fn finish(self) -> Duration {
@@ -548,9 +565,116 @@ impl ProgressStatus {
     }
 }
 
-async fn spinner_loop(state: Arc<AsyncMutex<ProgressState>>, start: Instant) {
+/// Visible-character width of the terminal's stderr, capped for safety.
+/// Uses TIOCGWINSZ, then falls back to the COLUMNS env var, then 80.
+fn term_cols() -> usize {
+    #[cfg(unix)]
+    {
+        #[repr(C)]
+        struct Winsize {
+            ws_row: u16,
+            ws_col: u16,
+            ws_xpixel: u16,
+            ws_ypixel: u16,
+        }
+        // SAFETY: ioctl with TIOCGWINSZ only reads from the kernel into our
+        // local Winsize struct; no aliasing or other unsafe preconditions.
+        unsafe {
+            extern "C" {
+                fn ioctl(fd: i32, request: u64, ...) -> i32;
+            }
+            #[cfg(target_os = "macos")]
+            const TIOCGWINSZ: u64 = 0x40087468;
+            #[cfg(not(target_os = "macos"))]
+            const TIOCGWINSZ: u64 = 0x5413;
+            let mut ws = Winsize {
+                ws_row: 0,
+                ws_col: 0,
+                ws_xpixel: 0,
+                ws_ypixel: 0,
+            };
+            if ioctl(2, TIOCGWINSZ, &mut ws as *mut Winsize) == 0 && ws.ws_col > 20 {
+                return ws.ws_col as usize;
+            }
+        }
+    }
+    std::env::var("COLUMNS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&n: &usize| n > 20)
+        .unwrap_or(80)
+}
+
+/// Thousands-separator formatter for the live token counter (no dep on handlers).
+fn spinner_fmt_num(n: u64) -> String {
+    let s = n.to_string();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, ch) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out.chars().rev().collect()
+}
+
+/// Build the spinner line, capped to `cols` visible characters so it never
+/// wraps. Wrapping is the root cause of the spinner not overwriting in place:
+/// `\r\x1b[2K` clears only the current terminal line, so any wrapped
+/// continuation from the previous tick stays and accumulates.
+///
+/// `live_out` is the approximate output-token count so far (0 = hide).
+fn build_spinner_line(
+    frame: &str,
+    label: &str,
+    status: Option<&str>,
+    elapsed: &str,
+    live_out: u64,
+    cols: usize,
+) -> String {
+    // Leave a 1-char margin so the cursor never lands on column 0 of the next
+    // line due to an off-by-one in the terminal's auto-wrap logic.
+    let budget = cols.saturating_sub(1);
+
+    let tok = if live_out > 0 {
+        format!(" · out:{}↑", spinner_fmt_num(live_out))
+    } else {
+        String::new()
+    };
+
+    let base_with_status = match status {
+        Some(s) if !s.is_empty() => format!("{frame} {label} · {s} · {elapsed}"),
+        _ => format!("{frame} {label} · {elapsed}"),
+    };
+    let base_plain = format!("{frame} {label} · {elapsed}");
+
+    // Prefer longest line that fits; drop token suffix first, then status.
+    let visible: String = {
+        let full = format!("{base_with_status}{tok}");
+        if full.chars().count() <= budget {
+            full
+        } else if base_with_status.chars().count() <= budget {
+            base_with_status
+        } else if base_plain.chars().count() <= budget {
+            base_plain
+        } else {
+            let max = budget.saturating_sub(1);
+            format!("{}…", base_plain.chars().take(max).collect::<String>())
+        }
+    };
+
+    format!("\r\x1b[2K\x1b[2m{visible}\x1b[0m")
+}
+
+async fn spinner_loop(
+    state: Arc<AsyncMutex<ProgressState>>,
+    start: Instant,
+    token_counter: Arc<AtomicU64>,
+) {
     const FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
     let mut i: usize = 0;
+    // Read terminal width once; it rarely changes mid-turn.
+    let cols = term_cols();
     loop {
         // Check done + drain interjects + build line, all under the lock.
         let (line, interjects) = {
@@ -560,16 +684,15 @@ async fn spinner_loop(state: Arc<AsyncMutex<ProgressState>>, start: Instant) {
             }
             let interjects = std::mem::take(&mut st.interjects);
             let elapsed = fmt_elapsed(start.elapsed());
-            let line = match st.last_status.as_deref() {
-                Some(status) if !status.is_empty() => format!(
-                    "\r\x1b[2K\x1b[2m{} {} · {} · {}\x1b[0m",
-                    FRAMES[i], st.label, status, elapsed
-                ),
-                _ => format!(
-                    "\r\x1b[2K\x1b[2m{} {} · {}\x1b[0m",
-                    FRAMES[i], st.label, elapsed
-                ),
-            };
+            let live_out = token_counter.load(Ordering::Relaxed);
+            let line = build_spinner_line(
+                FRAMES[i],
+                &st.label,
+                st.last_status.as_deref(),
+                &elapsed,
+                live_out,
+                cols,
+            );
             (line, interjects)
         };
         // `StderrLock` is `!Send`; scope all writes so nothing crosses `.await`.

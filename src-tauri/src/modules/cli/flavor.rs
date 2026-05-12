@@ -20,19 +20,40 @@ pub fn fun_pair(a: &'static str, b: &'static str) -> String {
     }
 }
 
-/// Main spinner label (replaces a static "Thinking").
+/// Main spinner label — one funny invented word shown as a present participle.
+/// Format in the spinner: `⠹ Thonking · 4s`
 pub fn thinking_label() -> &'static str {
     pick_str(&[
-        "Thinking",
-        "Pondering",
-        "Consulting the weights",
-        "Herding tensors",
-        "Asking the model nicely",
-        "Brewing an answer",
-        "Entangling context",
-        "Feeding the prompt beast",
-        "One sec — math is happening",
-        "Staring at matrices until they blink",
+        "Thonking",     // thinking + honk
+        "Grokking",     // hacker lore: deep understanding
+        "Blorping",     // invented
+        "Wibbling",     // wobbly invented word
+        "Frobnifying",  // frobnicate = fiddle (hacker lore)
+        "Zorbulating",  // invented
+        "Kerfluffling", // from kerfuffle
+        "Discombobulating",
+        "Quuxing",       // quux: hacker placeholder (foo/bar/baz/quux)
+        "Schmozzling",   // invented
+        "Noodling",      // slang: loosely brainstorming
+        "Percolating",   // ideas brewing slowly
+        "Boffinating",   // boffin = British slang for a clever scientist
+        "Glonking",      // invented
+        "Tronking",      // Tron reference
+        "Flerbulating",  // invented
+        "Blorbinating",  // invented
+        "Cogitating",    // real but sounds delightfully stuffy
+        "Woolgathering", // real expression: absent-minded musing
+        "Slorbing",      // invented
+        "Murgling",      // invented
+        "Gnurfling",     // invented
+        "Zippulating",   // invented
+        "Bebboning",     // invented
+        "Snorkling",     // near-snorkeling, but for data
+        "Wuffling",      // invented
+        "Schmoogling",   // invented
+        "Grumpulating",  // invented
+        "Bewildering",   // turning confusion into answers
+        "Simmering",     // ideas on low heat
     ])
 }
 

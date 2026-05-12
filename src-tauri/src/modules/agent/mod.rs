@@ -14,6 +14,7 @@ use chrono::Utc;
 use serde_json::json;
 use std::collections::HashSet;
 use std::path::Path;
+use std::sync::{atomic::AtomicU64, Arc};
 use std::time::{Duration, Instant};
 
 /// Tool rounds + at least one completion-only step. Research flows (sitemap + several
@@ -546,6 +547,18 @@ fn message_implies_apply_repo_fix(msg: &str) -> bool {
         .any(|h| skills::user_message_needle_match(msg, h))
 }
 
+/// Extracts only the current turn's user message from the full context string.
+/// The full context passed to `run_model_turn` includes session history separated
+/// by "## New user message\n" markers; skill gates must only see the NEW message,
+/// not old turns (which may contain unrelated keywords like weather from a prior query).
+fn current_turn_message(user_message: &str) -> &str {
+    const MARKER: &str = "## New user message\n";
+    match user_message.rfind(MARKER) {
+        Some(pos) => user_message[pos + MARKER.len()..].trim_start(),
+        None => user_message,
+    }
+}
+
 /// Lint/fix flows plus explicit create/write/scaffold requests (`.pengine`, new files, etc.).
 fn user_expects_repo_write_followthrough(msg: &str) -> bool {
     message_implies_apply_repo_fix(msg)
@@ -756,6 +769,11 @@ pub struct TurnResult {
     pub prompt_tokens: u64,
     pub eval_tokens: u64,
     pub model: String,
+    /// Whether the model was asked to think (extended reasoning / chain-of-thought).
+    /// `eval_tokens` includes thinking tokens when this is `true`.
+    pub think_enabled: bool,
+    /// Number of agent steps taken (tool-call rounds + final completion).
+    pub steps: u32,
 }
 
 impl TurnResult {
@@ -767,6 +785,8 @@ impl TurnResult {
             prompt_tokens: 0,
             eval_tokens: 0,
             model: String::new(),
+            think_enabled: false,
+            steps: 0,
         }
     }
 
@@ -778,6 +798,8 @@ impl TurnResult {
             prompt_tokens: 0,
             eval_tokens: 0,
             model: String::new(),
+            think_enabled: false,
+            steps: 0,
         }
     }
 }
@@ -796,7 +818,7 @@ pub async fn run_system_turn(
     skills_slug_filter: Option<&[String]>,
 ) -> Result<TurnResult, String> {
     let think = decide_think(None, prompt).enabled();
-    let result = run_model_turn(state, prompt, think, skills_slug_filter).await?;
+    let result = run_model_turn(state, prompt, think, skills_slug_filter, None).await?;
     let body = result.text.trim();
     if !body.is_empty() {
         let tag = match result.source {
@@ -812,7 +834,11 @@ pub async fn run_system_turn(
     Ok(result)
 }
 
-pub async fn run_turn(state: &AppState, user_message: &str) -> Result<TurnResult, String> {
+pub async fn run_turn(
+    state: &AppState,
+    user_message: &str,
+    live_out_tokens: Option<Arc<AtomicU64>>,
+) -> Result<TurnResult, String> {
     let (think_override, user_message) = parse_think_override(user_message);
 
     if let Some(cmd) = memory::detect_session_command(user_message) {
@@ -835,7 +861,9 @@ pub async fn run_turn(state: &AppState, user_message: &str) -> Result<TurnResult
         .emit_log("run", &format!("think:{}", think.label()))
         .await;
 
-    let result = run_model_turn(state, user_message, think.enabled(), None).await?;
+    let mut result =
+        run_model_turn(state, user_message, think.enabled(), None, live_out_tokens).await?;
+    result.think_enabled = think.enabled();
     spawn_memory_save(state, user_message, &result.text).await;
     Ok(result)
 }
@@ -1160,7 +1188,9 @@ async fn build_system_prompt(
         String::new()
     };
 
-    let weather_directive = if skills::user_message_suggests_weather(user_message) {
+    let weather_directive = if skills::user_message_suggests_weather(current_turn_message(
+        user_message,
+    )) {
         "\n\n**This turn is weather-related:** Follow **skill:weather** only (wttr.in / Open-Meteo via **`fetch`**). Do not cite or prioritize government-portal skills (e.g. oesterreich.gv.at) for forecasts or current conditions unless the user explicitly asked for public administration, forms, or law."
     } else {
         ""
@@ -1168,7 +1198,7 @@ async fn build_system_prompt(
 
     let skills_raw = skills::skills_prompt_hint_for_turn(
         &state.store_path,
-        Some(user_message),
+        Some(current_turn_message(user_message)),
         skills_slug_filter,
     );
     let skills_cap = *state.skills_hint_max_bytes.read().await as usize;
@@ -1204,11 +1234,13 @@ async fn build_system_prompt(
     };
 
     format!(
-        "{PENGINE_OUTPUT_CONTRACT_LEAD}Assistant with tools. Use tools to fetch external data **or to act on the user's repository (read, edit, diff, commit)**; otherwise answer directly. \
+        "{PENGINE_OUTPUT_CONTRACT_LEAD}Assistant with tools. Use tools to act on the user's repository (read, edit, diff, commit) or to fetch **live/current data the user cannot know from training** (weather, prices, current events, real-time status); otherwise answer directly from training knowledge. \
+         **Do NOT call `fetch` for:** programming language syntax, code examples, algorithms, library APIs, design patterns, software concepts, math, science, or any topic covered by training data — answer those immediately without tools. \
          After tool results, answer immediately. Be concise. \
          `brave_web_search` is only in the tool list when the user asked to search the open web (e.g. \"search the internet\", \"suche im Internet\", \"suche nach ...\") or a skill's `requires` matches this turn — otherwise prefer **`fetch`** on any `http(s)` URL you have (including from the user). \
          At most one `brave_web_search` per user message when it is available. \
-         After an allowed search, the host may auto-`fetch` several top result URLs — use those excerpts and end with **Quellen** listing every source URL.{fs_hint}{code_edit_hint}{scaffold_hint}{mem_hint}{weather_directive}{skills_hint}"
+         After an allowed search, the host may auto-`fetch` several top result URLs — use those excerpts and end with **Quellen** listing every source URL. \
+         **Skill discipline:** each skill in the list below defines fetch URLs for a specific domain. Only call those URLs when the user message is actually about that skill's topic.{fs_hint}{code_edit_hint}{scaffold_hint}{mem_hint}{weather_directive}{skills_hint}"
     )
 }
 
@@ -1217,9 +1249,11 @@ async fn run_model_turn(
     user_message: &str,
     think: bool,
     skills_slug_filter: Option<&[String]>,
+    live_out_tokens: Option<Arc<AtomicU64>>,
 ) -> Result<TurnResult, String> {
     let plan_mode = *state.plan_mode.read().await;
-    let repo_write_followthrough = user_expects_repo_write_followthrough(user_message);
+    let repo_write_followthrough =
+        user_expects_repo_write_followthrough(current_turn_message(user_message));
     let max_steps = if repo_write_followthrough {
         MAX_STEPS_APPLY_FIX
     } else {
@@ -1263,8 +1297,10 @@ async fn run_model_turn(
     // memory provider exists, not only after explicit memory keywords.
     let cli_session_active = state.cli_session.read().await.is_some();
 
-    let allow_brave_web_search =
-        skills::allow_brave_web_search_for_message(&state.store_path, user_message);
+    let allow_brave_web_search = skills::allow_brave_web_search_for_message(
+        &state.store_path,
+        current_turn_message(user_message),
+    );
 
     let mut tool_ctx = {
         let reg = state.mcp.read().await;
@@ -1345,12 +1381,13 @@ async fn run_model_turn(
         };
         let post_tool = tool_rounds > 0;
         let json_only_user_reply = !has_tools;
-        let chat_opts = chat_options_for_agent_step(
+        let mut chat_opts = chat_options_for_agent_step(
             post_tool,
             think,
             json_only_user_reply,
             repo_write_followthrough,
         );
+        chat_opts.live_out_tokens = live_out_tokens.clone();
 
         let inject_post_tool = post_tool;
         if inject_post_tool {
@@ -1444,6 +1481,8 @@ async fn run_model_turn(
                 r.prompt_tokens = tokens_in;
                 r.eval_tokens = tokens_out;
                 r.model = model.clone();
+                r.think_enabled = think;
+                r.steps = step as u32 + 1;
                 return Ok(r);
             }
             if tool_results.is_empty() {
@@ -1451,6 +1490,8 @@ async fn run_model_turn(
                 r.prompt_tokens = tokens_in;
                 r.eval_tokens = tokens_out;
                 r.model = model.clone();
+                r.think_enabled = think;
+                r.steps = step as u32 + 1;
                 return Ok(r);
             }
             if repo_write_followthrough
@@ -1685,6 +1726,8 @@ async fn run_model_turn(
                 prompt_tokens: tokens_in,
                 eval_tokens: tokens_out,
                 model: model.clone(),
+                think_enabled: think,
+                steps: step as u32 + 1,
             });
         }
     }
@@ -1712,6 +1755,7 @@ async fn run_model_turn(
             num_predict: Some(SUMMARY_NUM_PREDICT),
             temperature: Some(SUMMARY_TEMPERATURE),
             format: Some(ollama::summarize_reply_json_schema()),
+            live_out_tokens: live_out_tokens.clone(),
             ..ChatOptions::default()
         };
         let t0 = Instant::now();
@@ -1747,6 +1791,8 @@ async fn run_model_turn(
                 prompt_tokens: tokens_in,
                 eval_tokens: tokens_out,
                 model: model.clone(),
+                think_enabled: think,
+                steps: max_steps as u32,
             });
         }
 
@@ -1758,6 +1804,8 @@ async fn run_model_turn(
             prompt_tokens: tokens_in,
             eval_tokens: tokens_out,
             model: model.clone(),
+            think_enabled: think,
+            steps: max_steps as u32,
         });
     }
 

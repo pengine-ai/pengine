@@ -5,6 +5,7 @@
 //! special to this file lives outside line editing and history management.
 
 use super::banner::CLI_WELCOME;
+use super::commands;
 use super::dispatch::{dispatch_line, format_repl_line_for_audit, DispatchContext};
 use super::flavor;
 use super::folder_trust::{self, PromptOutcome};
@@ -12,9 +13,14 @@ use super::output::{render_reply, CliReply, OutputSink, RenderStyle, TerminalSin
 use super::session::{self, CliSession};
 use crate::modules::mcp::service as mcp_service;
 use crate::shared::state::AppState;
+use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
+use rustyline::highlight::Highlighter;
+use rustyline::hint::{Hint, Hinter};
 use rustyline::history::FileHistory;
-use rustyline::{Config, Editor};
+use rustyline::validate::Validator;
+use rustyline::{CompletionType, Config, Context, Editor, Helper};
+use std::borrow::Cow;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -22,6 +28,137 @@ use std::time::{Duration, Instant};
 /// Window for "press Ctrl+C twice to exit". A second interrupt within this
 /// duration breaks the REPL loop instead of just clearing the line.
 const DOUBLE_INTERRUPT_WINDOW: Duration = Duration::from_secs(2);
+
+// ── Slash-command completion / hint ─────────────────────────────────────────
+
+/// Ghost-text hint returned by [`SlashHelper`].
+struct SlashHint(String);
+
+impl Hint for SlashHint {
+    fn display(&self) -> &str {
+        &self.0
+    }
+    fn completion(&self) -> Option<&str> {
+        None
+    }
+}
+
+/// rustyline [`Helper`] that provides:
+/// - Tab-completion of `/command` names with their summaries
+/// - Ghost-text hint that updates as the user types (filters live)
+/// - Cyan highlight of the `/command` portion
+struct SlashHelper;
+
+impl Completer for SlashHelper {
+    type Candidate = Pair;
+
+    fn complete(
+        &self,
+        line: &str,
+        pos: usize,
+        _ctx: &Context<'_>,
+    ) -> rustyline::Result<(usize, Vec<Pair>)> {
+        let Some(slash) = line[..pos].find('/') else {
+            return Ok((0, vec![]));
+        };
+        let filter = line[slash + 1..pos].to_lowercase();
+
+        let max_name = commands::COMMANDS
+            .iter()
+            .map(|c| c.name.len())
+            .max()
+            .unwrap_or(8);
+
+        let candidates = commands::COMMANDS
+            .iter()
+            .filter(|c| {
+                c.name != "quit"
+                    && (filter.is_empty()
+                        || c.name.contains(filter.as_str())
+                        || c.summary.to_lowercase().contains(filter.as_str()))
+            })
+            .map(|c| Pair {
+                display: format!("/{:<width$}  {}", c.name, c.summary, width = max_name),
+                replacement: format!("/{}", c.name),
+            })
+            .collect();
+
+        Ok((slash, candidates))
+    }
+}
+
+impl Hinter for SlashHelper {
+    type Hint = SlashHint;
+
+    fn hint(&self, line: &str, pos: usize, _ctx: &Context<'_>) -> Option<SlashHint> {
+        // Only show when the cursor is at the end of the line.
+        if pos < line.len() {
+            return None;
+        }
+        let slash = line.find('/')?;
+        // Ignore `/` that appears in the middle of a sentence.
+        if slash > 0 && !line[..slash].trim().is_empty() {
+            return None;
+        }
+        let filter = line[slash + 1..].to_lowercase();
+
+        let matches: Vec<_> = commands::COMMANDS
+            .iter()
+            .filter(|c| {
+                c.name != "quit"
+                    && (filter.is_empty()
+                        || c.name.starts_with(filter.as_str())
+                        || c.summary.to_lowercase().contains(filter.as_str()))
+            })
+            .collect();
+
+        if matches.is_empty() {
+            return Some(SlashHint("\n\x1b[2m  (no matching command)\x1b[0m".into()));
+        }
+
+        let max_name = matches.iter().map(|c| c.name.len()).max().unwrap_or(8);
+        let mut out = String::new();
+
+        for cmd in &matches {
+            // Clamp summary to avoid wrapping on narrow terminals.
+            let summary: &str = if cmd.summary.len() > 58 {
+                &cmd.summary[..58]
+            } else {
+                cmd.summary
+            };
+            out.push_str(&format!(
+                "\n  \x1b[1;36m/{:<width$}\x1b[0m  \x1b[2m{summary}\x1b[0m",
+                cmd.name,
+                width = max_name
+            ));
+        }
+
+        Some(SlashHint(out))
+    }
+}
+
+impl Highlighter for SlashHelper {
+    fn highlight<'l>(&self, line: &'l str, _pos: usize) -> Cow<'l, str> {
+        if line.trim_start().starts_with('/') {
+            Cow::Owned(format!("\x1b[1;36m{line}\x1b[0m"))
+        } else {
+            Cow::Borrowed(line)
+        }
+    }
+
+    fn highlight_hint<'h>(&self, hint: &'h str) -> Cow<'h, str> {
+        Cow::Borrowed(hint)
+    }
+
+    fn highlight_char(&self, line: &str, _pos: usize, _forced: bool) -> bool {
+        // Re-render on every keystroke while in slash-command mode so the hint
+        // updates live as the user types filter characters.
+        line.trim_start().starts_with('/')
+    }
+}
+
+impl Validator for SlashHelper {}
+impl Helper for SlashHelper {}
 
 /// Continuation prompt shown for additional lines while a backslash-escaped
 /// multi-line edit is in progress.
@@ -291,9 +428,14 @@ fn clear_screen(tty: bool) {
     let _ = out.flush();
 }
 
-fn build_editor() -> Result<Editor<(), FileHistory>, String> {
-    let cfg = Config::builder().auto_add_history(false).build();
-    Editor::with_config(cfg).map_err(|e| e.to_string())
+fn build_editor() -> Result<Editor<SlashHelper, FileHistory>, String> {
+    let cfg = Config::builder()
+        .auto_add_history(false)
+        .completion_type(CompletionType::List)
+        .build();
+    let mut rl = Editor::with_config(cfg).map_err(|e| e.to_string())?;
+    rl.set_helper(Some(SlashHelper));
+    Ok(rl)
 }
 
 fn history_path(store_path: &std::path::Path) -> PathBuf {

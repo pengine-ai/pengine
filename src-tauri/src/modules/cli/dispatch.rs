@@ -140,6 +140,13 @@ async fn dispatch_native(
             }
             handlers::compact_session(state).await
         }
+        "session" => {
+            if ctx.telegram_surface {
+                return CliReply::error("session: not supported over Telegram.");
+            }
+            let (action, tail) = split_first(rest);
+            handlers::session_cmd(state, action, tail).await
+        }
         "new" => {
             if ctx.telegram_surface {
                 return CliReply::error("new: not supported over Telegram.");

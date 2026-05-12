@@ -14,6 +14,8 @@ use std::path::{Path, PathBuf};
 const SESSIONS_DIRNAME: &str = "cli_sessions";
 const LAST_POINTER: &str = "cli_session_last.json";
 const BY_PATH_POINTER: &str = "cli_session_by_path.json";
+const MANIFEST_FILE: &str = "manifest.json";
+const SUMMARY_SNIPPET_LEN: usize = 120;
 
 /// Cap applied when building the context prefix for a new turn.
 /// Keeps the prompt size predictable across long sessions.
@@ -60,8 +62,36 @@ impl ProjectContext {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManifestEntry {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    pub started_at: DateTime<Utc>,
+    #[serde(default)]
+    pub last_turn_at: Option<DateTime<Utc>>,
+    pub turn_count: usize,
+    #[serde(default)]
+    pub prompt_tokens_total: u64,
+    #[serde(default)]
+    pub eval_tokens_total: u64,
+    #[serde(default)]
+    pub summary_snippet: Option<String>,
+    pub cwd: PathBuf,
+    #[serde(default)]
+    pub git_branch: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SessionManifest {
+    pub entries: Vec<ManifestEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CliSession {
     pub id: String,
+    /// Optional user-given name (set via `/session new <name>` or `/session rename`).
+    #[serde(default)]
+    pub name: Option<String>,
     pub started_at: DateTime<Utc>,
     pub turns: Vec<SessionTurn>,
     /// Set by `/compact`. When present, replaces the older turns when
@@ -80,6 +110,7 @@ impl CliSession {
         let now = Utc::now();
         Self {
             id: now.format("%Y%m%dT%H%M%S").to_string(),
+            name: None,
             started_at: now,
             turns: Vec::new(),
             summary: None,
@@ -190,6 +221,101 @@ pub fn apply_compaction(session: &mut CliSession, summary: String, keep: usize) 
     session.summary = Some(summary);
 }
 
+fn manifest_path(store_path: &Path) -> PathBuf {
+    sessions_dir(store_path).join(MANIFEST_FILE)
+}
+
+pub fn load_manifest(store_path: &Path) -> SessionManifest {
+    let path = manifest_path(store_path);
+    let Ok(body) = fs::read_to_string(&path) else {
+        return SessionManifest::default();
+    };
+    serde_json::from_str(&body).unwrap_or_default()
+}
+
+fn save_manifest(store_path: &Path, manifest: &SessionManifest) -> Result<(), String> {
+    let dir = sessions_dir(store_path);
+    fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    let body =
+        serde_json::to_string_pretty(manifest).map_err(|e| format!("encode manifest: {e}"))?;
+    fs::write(manifest_path(store_path), body).map_err(|e| format!("write manifest: {e}"))
+}
+
+fn make_manifest_entry(session: &CliSession) -> ManifestEntry {
+    let last_turn_at = session.turns.last().map(|t| t.at);
+    let summary_snippet = session.summary.as_deref().map(|s| {
+        let t = s.trim();
+        let chars: String = t.chars().take(SUMMARY_SNIPPET_LEN).collect();
+        if t.chars().count() > SUMMARY_SNIPPET_LEN {
+            format!("{chars}…")
+        } else {
+            chars
+        }
+    });
+    let (cwd, git_branch) = session
+        .project
+        .as_ref()
+        .map(|p| (p.cwd.clone(), p.git_branch.clone()))
+        .unwrap_or_else(|| (PathBuf::from("."), None));
+    ManifestEntry {
+        id: session.id.clone(),
+        name: session.name.clone(),
+        started_at: session.started_at,
+        last_turn_at,
+        turn_count: session.turns.len(),
+        prompt_tokens_total: session.prompt_tokens_total,
+        eval_tokens_total: session.eval_tokens_total,
+        summary_snippet,
+        cwd,
+        git_branch,
+    }
+}
+
+fn upsert_manifest_entry(store_path: &Path, session: &CliSession) {
+    let mut manifest = load_manifest(store_path);
+    let entry = make_manifest_entry(session);
+    if let Some(pos) = manifest.entries.iter().position(|e| e.id == session.id) {
+        manifest.entries[pos] = entry;
+    } else {
+        manifest.entries.push(entry);
+    }
+    if let Err(e) = save_manifest(store_path, &manifest) {
+        log::warn!("session: manifest update failed: {e}");
+    }
+}
+
+/// Look up a session by name (case-insensitive, most recent first) or by full/prefix id.
+pub fn load_by_name_or_id(store_path: &Path, query: &str) -> Result<Option<CliSession>, String> {
+    let manifest = load_manifest(store_path);
+    let q_lower = query.to_ascii_lowercase();
+    // Exact name match (most recent entry wins on duplicates).
+    if let Some(e) = manifest.entries.iter().rev().find(|e| {
+        e.name
+            .as_deref()
+            .map(|n| n.eq_ignore_ascii_case(query))
+            .unwrap_or(false)
+    }) {
+        let id = e.id.clone();
+        return load_by_id(store_path, &id);
+    }
+    // Exact id match.
+    if let Some(e) = manifest.entries.iter().rev().find(|e| e.id == query) {
+        let id = e.id.clone();
+        return load_by_id(store_path, &id);
+    }
+    // Id prefix match (useful for typing just the date portion).
+    if let Some(e) = manifest
+        .entries
+        .iter()
+        .rev()
+        .find(|e| e.id.to_ascii_lowercase().starts_with(&q_lower))
+    {
+        let id = e.id.clone();
+        return load_by_id(store_path, &id);
+    }
+    Ok(None)
+}
+
 fn sessions_dir(store_path: &Path) -> PathBuf {
     store_path
         .parent()
@@ -252,6 +378,7 @@ pub fn save(store_path: &Path, session: &CliSession) -> Result<(), String> {
     let path = dir.join(format!("{}.json", session.id));
     let body = serde_json::to_string_pretty(session).map_err(|e| format!("encode: {e}"))?;
     fs::write(&path, body).map_err(|e| format!("write {}: {e}", path.display()))?;
+    upsert_manifest_entry(store_path, session);
     let pointer = LastPointer {
         last_session_id: session.id.clone(),
     };
@@ -269,6 +396,22 @@ pub fn save(store_path: &Path, session: &CliSession) -> Result<(), String> {
         if let Err(e) = write_by_path(store_path, &by_path) {
             log::warn!("session: by_path pointer write failed: {e}");
         }
+    }
+    Ok(())
+}
+
+/// Remove a session file and its manifest entry. Does not touch the last/by-path pointers
+/// (those will simply point to a missing file, which callers handle as `Ok(None)`).
+pub fn delete(store_path: &Path, id: &str) -> Result<(), String> {
+    let dir = sessions_dir(store_path);
+    let path = dir.join(format!("{id}.json"));
+    if path.exists() {
+        fs::remove_file(&path).map_err(|e| format!("remove {}: {e}", path.display()))?;
+    }
+    let mut manifest = load_manifest(store_path);
+    manifest.entries.retain(|e| e.id != id);
+    if let Err(e) = save_manifest(store_path, &manifest) {
+        log::warn!("session: manifest update after delete failed: {e}");
     }
     Ok(())
 }
@@ -296,7 +439,7 @@ pub fn load_last_for_path(store_path: &Path, key: &Path) -> Result<Option<CliSes
     load_by_id(store_path, id)
 }
 
-fn load_by_id(store_path: &Path, id: &str) -> Result<Option<CliSession>, String> {
+pub fn load_by_id(store_path: &Path, id: &str) -> Result<Option<CliSession>, String> {
     let dir = sessions_dir(store_path);
     let path = dir.join(format!("{id}.json"));
     let body = match fs::read_to_string(&path) {
