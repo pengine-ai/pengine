@@ -12,12 +12,23 @@ use std::io::IsTerminal;
 use tauri::Manager;
 use tauri_plugin_cli::{ArgData, CliExt, Matches};
 
-pub fn handle_cli_or_continue(app: &tauri::App) {
+/// Returns `true` when the caller should open the main GUI window.
+///
+/// All CLI paths call [`std::process::exit`] and never return; `false` is
+/// therefore unreachable in practice, but the explicit type makes `app.rs`
+/// defensive: `open_main_window` is guarded behind `if handle_cli_or_continue(…)`
+/// and will not run unless this function explicitly signals GUI mode.
+pub fn handle_cli_or_continue(app: &tauri::App) -> bool {
     if consume_gui_spawn_env() {
         set_macos_activation_policy(app, tauri::ActivationPolicy::Regular);
-        return;
+        return true;
     }
-    set_macos_activation_policy(app, tauri::ActivationPolicy::Accessory);
+    // Keep the process completely invisible to all macOS UI surfaces
+    // (Dock, App Switcher, Stage Manager, Mission Control).
+    // Prohibited cannot be upgraded to Regular later, which is safe because
+    // every CLI path ends in `process::exit`. The GUI spawn path (above)
+    // already returned with Regular before reaching this line.
+    set_macos_activation_policy(app, tauri::ActivationPolicy::Prohibited);
 
     let matches = match app.cli().matches() {
         Ok(m) => m,
@@ -97,7 +108,7 @@ pub fn handle_cli_or_continue(app: &tauri::App) {
                 }
                 if !tty {
                     set_macos_activation_policy(app, tauri::ActivationPolicy::Regular);
-                    return;
+                    return true;
                 }
                 let sink = TerminalSink::new();
                 let state = match build_state(app) {
@@ -477,7 +488,7 @@ where
     match first.as_str() {
         "--help" | "-h" | "help" => ArgvIntent::Help,
         "--version" | "-V" | "version" => ArgvIntent::Version,
-        "--json" | "--continue" | "-p" | "--print" | "--output-format" => ArgvIntent::CommandLike,
+        "--json" | "-p" | "--print" | "--output-format" => ArgvIntent::CommandLike,
         other if !other.starts_with('-') && commands::lookup(other).is_some() => {
             ArgvIntent::CommandLike
         }
@@ -572,5 +583,13 @@ mod tests {
     #[test]
     fn argv_intent_none_for_shell_flag_alone() {
         assert_eq!(argv_intent_from(vec!["--shell"]), ArgvIntent::None);
+    }
+
+    #[test]
+    fn argv_intent_none_for_continue_alone() {
+        // `pengine --continue` alone should enter the REPL (resuming the last
+        // session). The ArgvIntent::None path reads the --continue flag from
+        // tauri-plugin-cli matches and calls resume_session before starting repl::run.
+        assert_eq!(argv_intent_from(vec!["--continue"]), ArgvIntent::None);
     }
 }

@@ -36,30 +36,39 @@ const PROMPT_PLAIN: &str = "> ";
 pub async fn run(state: &AppState) -> CliReply {
     let sink = TerminalSink::new();
 
-    // Capture project context (cwd + git root + branch) and preset the
-    // session so banners, persistence, and per-folder `--continue` all
-    // use the same identity. If `--continue` already loaded a session
-    // for this folder, keep it; otherwise create a fresh one.
+    // Capture project context (cwd + git root + branch) and preset the session.
+    // If bootstrap already loaded a session (e.g. `--continue`), keep it.
+    // Otherwise auto-resume the most recent session for this project so the AI
+    // remembers prior turns without the user needing `--continue` every time.
     let project = std::env::current_dir()
         .ok()
         .map(|cwd| session::detect_project_context(&cwd));
-    {
+
+    let resumed_turns = {
         let mut guard = state.cli_session.write().await;
         match guard.as_mut() {
             Some(existing) if existing.project.is_none() => {
                 existing.project = project.clone();
+                existing.turns.len()
             }
-            Some(_) => {}
+            Some(existing) => existing.turns.len(),
             None => {
-                *guard = Some(match project.clone() {
-                    Some(p) => CliSession::fresh_with_project(p),
-                    None => CliSession::fresh(),
+                // Auto-resume: try per-project first, fall back to global last.
+                let loaded = auto_load_session(&state.store_path, project.as_ref());
+                let n = loaded.as_ref().map(|s| s.turns.len()).unwrap_or(0);
+                *guard = Some(match loaded {
+                    Some(s) => s,
+                    None => match project.clone() {
+                        Some(p) => CliSession::fresh_with_project(p),
+                        None => CliSession::fresh(),
+                    },
                 });
+                n
             }
         }
-    }
+    };
 
-    sink.render(&CliReply::text(format!(
+    let mut banner = format!(
         "{}\
 \n\
 Pengine REPL — slash commands + free text; /exit or Ctrl+D to quit.\n\
@@ -67,7 +76,14 @@ store:     {}{}",
         CLI_WELCOME.trim_start_matches('\n'),
         state.store_path.display(),
         format_project_banner_lines(project.as_ref()),
-    )));
+    );
+    if resumed_turns > 0 {
+        banner.push_str(&format!(
+            "\nsession:   resumed {resumed_turns} turn(s)  \
+             — /compact to summarize, /new to start fresh"
+        ));
+    }
+    sink.render(&CliReply::text(banner));
     if std::io::stdout().is_terminal() {
         sink.render(&CliReply::text(format!(
             "\n\x1b[2m{}\x1b[0m",
@@ -241,6 +257,21 @@ store:     {}{}",
 
     let _ = rl.save_history(&history_path);
     CliReply::text("bye.")
+}
+
+/// Try to load the most recent CLI session for `project` from disk.
+/// Falls back to the global last session when no project-specific one exists.
+/// Returns `None` when there are no saved sessions at all.
+fn auto_load_session(
+    store_path: &std::path::Path,
+    project: Option<&session::ProjectContext>,
+) -> Option<session::CliSession> {
+    if let Some(p) = project {
+        if let Ok(Some(s)) = session::load_last_for_path(store_path, p.match_key()) {
+            return Some(s);
+        }
+    }
+    session::load_last(store_path).ok().flatten()
 }
 
 fn is_clear_command(line: &str) -> bool {

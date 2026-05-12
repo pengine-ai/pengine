@@ -2,7 +2,7 @@ use super::commands::{self, NativeCommand};
 use super::flavor;
 use super::mentions;
 use super::output::{fmt_elapsed, CliReply, Progress, ProgressStatus};
-use super::session::{self, CliSession};
+use super::session::{self, CliSession, HISTORY_TURN_BUDGET};
 use crate::build_info;
 use crate::infrastructure::audit_log;
 use crate::infrastructure::bot_lifecycle;
@@ -567,6 +567,133 @@ pub async fn ask(state: &AppState, text: &str) -> CliReply {
     ask_in_session(state, text, true).await
 }
 
+/// `/new` — discard the in-memory session and start fresh for the current project.
+/// The previous session is still on disk and will be auto-resumed on the next REPL start.
+pub async fn new_session(state: &AppState) -> CliReply {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let project = session::detect_project_context(&cwd);
+    *state.cli_session.write().await = Some(CliSession::fresh_with_project(project));
+    CliReply::text(
+        "started a new session — history cleared in memory. \
+         Previous session is still on disk and will auto-resume on next restart.",
+    )
+}
+
+/// `/compact` — call the AI to summarize old turns, store as `session.summary`,
+/// and keep only the last `HISTORY_TURN_BUDGET` turns verbatim.
+pub async fn compact_session(state: &AppState) -> CliReply {
+    let (to_compact, prior_summary, _drop_upto) = {
+        let guard = state.cli_session.read().await;
+        let Some(sess) = guard.as_ref() else {
+            return CliReply::error("no active session — start a conversation first");
+        };
+        if sess.turns.is_empty() {
+            return CliReply::text("session is empty — nothing to compact");
+        }
+        let keep = HISTORY_TURN_BUDGET.min(sess.turns.len());
+        let drop_upto = sess.turns.len().saturating_sub(keep);
+        if drop_upto == 0 && sess.summary.is_none() {
+            return CliReply::text(format!(
+                "session has {} turn(s) — within the {HISTORY_TURN_BUDGET}-turn keep budget; nothing to compact",
+                sess.turns.len()
+            ));
+        }
+        // Compact ALL turns (not just the excess) so a re-compact also merges the prior summary.
+        (sess.turns.clone(), sess.summary.clone(), drop_upto)
+    };
+
+    let prompt = session::compact_prompt(prior_summary.as_deref(), &to_compact);
+    let progress = Progress::start("Compacting session…");
+    let result = agent::run_system_turn(state, &prompt, None).await;
+    let elapsed = progress.finish().await;
+    emit_baked_line(elapsed);
+
+    match result {
+        Ok(turn) => {
+            let compacted_count = to_compact.len();
+            let keep = HISTORY_TURN_BUDGET.min(compacted_count);
+            let mut guard = state.cli_session.write().await;
+            if let Some(sess) = guard.as_mut() {
+                session::apply_compaction(sess, turn.text, keep);
+                let snapshot = sess.clone();
+                drop(guard);
+                if let Err(e) = session::save(&state.store_path, &snapshot) {
+                    state.emit_log("cli", &format!("compact save: {e}")).await;
+                }
+            }
+            CliReply::text(format!(
+                "Compacted {compacted_count} turn(s) → summary + {keep} recent turn(s) kept verbatim."
+            ))
+        }
+        Err(e) => CliReply::error(format!("compact: {e}")),
+    }
+}
+
+/// Trigger background auto-compaction when the session grows beyond the threshold.
+/// Runs silently after a turn completes; the compacted session is ready for the next turn.
+pub(super) async fn spawn_compaction_if_needed(state: &AppState) {
+    let needs = {
+        let g = state.cli_session.read().await;
+        g.as_ref()
+            .map(|s| s.turns.len() > session::COMPACT_THRESHOLD)
+            .unwrap_or(false)
+    };
+    if !needs {
+        return;
+    }
+    let state = state.clone();
+    tauri::async_runtime::spawn(async move {
+        compact_session_background(&state).await;
+    });
+}
+
+async fn compact_session_background(state: &AppState) {
+    let (to_compact, prior_summary, keep) = {
+        let g = state.cli_session.read().await;
+        let Some(sess) = g.as_ref() else { return };
+        if sess.turns.len() <= session::COMPACT_THRESHOLD {
+            return;
+        }
+        let keep = HISTORY_TURN_BUDGET;
+        let drop_upto = sess.turns.len().saturating_sub(keep);
+        (
+            sess.turns[..drop_upto].to_vec(),
+            sess.summary.clone(),
+            keep,
+        )
+    };
+
+    if to_compact.is_empty() {
+        return;
+    }
+
+    let prompt = session::compact_prompt(prior_summary.as_deref(), &to_compact);
+    match agent::run_system_turn(state, &prompt, None).await {
+        Ok(result) => {
+            let mut g = state.cli_session.write().await;
+            if let Some(sess) = g.as_mut() {
+                if sess.turns.len() > HISTORY_TURN_BUDGET {
+                    session::apply_compaction(sess, result.text, keep);
+                    let snapshot = sess.clone();
+                    drop(g);
+                    if let Err(e) = session::save(&state.store_path, &snapshot) {
+                        state.emit_log("cli", &format!("auto-compact save: {e}")).await;
+                    } else {
+                        state
+                            .emit_log("cli", "session auto-compacted in background")
+                            .await;
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            state
+                .emit_log("cli", &format!("auto-compact failed: {e}"))
+                .await;
+        }
+    }
+}
+
 /// `ask` variant that lets callers (one-shot CLI vs REPL vs Telegram) decide
 /// whether to extend the persistent session.
 pub async fn ask_in_session(state: &AppState, text: &str, persist_session: bool) -> CliReply {
@@ -663,6 +790,7 @@ pub async fn ask_in_session(state: &AppState, text: &str, persist_session: bool)
                 if let Err(e) = session::save(&state.store_path, &snapshot) {
                     state.emit_log("cli", &format!("session save: {e}")).await;
                 }
+                spawn_compaction_if_needed(state).await;
             }
             let mut body = turn.text;
             if !expanded.errors.is_empty() {

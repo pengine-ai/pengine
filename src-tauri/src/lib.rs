@@ -9,6 +9,7 @@ mod shared;
 pub fn run() {
     #[cfg(target_os = "macos")]
     if prelaunch::is_cli_invocation() {
+        prelaunch::rename_to_cli();
         prelaunch::hide_dock_icon();
     }
     app::run();

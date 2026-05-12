@@ -40,7 +40,9 @@ pub fn run() {
             // CLI mode short-circuits UI startup (`process::exit`) or returns early
             // for a GUI child (`PENGINE_OPEN_GUI=1` from `pengine app`). Otherwise
             // setup continues and `open_main_window` runs at the end.
-            cli_bootstrap::handle_cli_or_continue(app);
+            if !cli_bootstrap::handle_cli_or_continue(app) {
+                return Ok(());
+            }
             let path = store_path(app);
             let (mcp_path, mcp_src) = mcp_service::resolve_mcp_config_path(&path);
 

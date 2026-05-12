@@ -83,6 +83,24 @@ pub const COMMANDS: &[NativeCommand] = &[
             "Usage: pengine ask \"<prompt>\"\n\nRuns one agent turn. In REPL, free text without a leading `/` is the same\npath. Prefix with /think or /nothink to override reasoning mode.\n\nFile mentions: tokens like @path/to/file are inlined (capped at 64 KB)\nbefore the prompt is sent.",
     },
     NativeCommand {
+        name: "compact",
+        summary: "Summarize old session turns into a compact memory (REPL-only).",
+        details: "Usage: /compact\n\n\
+                  Calls the AI to summarize all turns beyond the recent-turn keep budget\n\
+                  (last 6 turns are preserved verbatim). The resulting summary is prepended\n\
+                  to future context so the AI retains key decisions without consuming the\n\
+                  full prompt window. Compaction also runs automatically in the background\n\
+                  when the session exceeds 12 turns.",
+    },
+    NativeCommand {
+        name: "new",
+        summary: "Start a fresh session (clears in-memory history; disk copy is kept) (REPL-only).",
+        details: "Usage: /new\n\n\
+                  Creates an empty session for the current project. The previous session\n\
+                  is still saved on disk and can be resumed by restarting pengine\n\
+                  (sessions auto-resume per project).",
+    },
+    NativeCommand {
         name: "clear",
         summary: "Clear the REPL screen (REPL-only).",
         details: "Usage: /clear  (REPL-only; same as Ctrl+L on most terminals)",

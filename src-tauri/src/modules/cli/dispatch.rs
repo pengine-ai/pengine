@@ -134,6 +134,18 @@ async fn dispatch_native(
             handlers::logs(state, tail, follow).await
         }
         "ask" => handlers::ask_in_session(state, rest, !ctx.telegram_surface).await,
+        "compact" => {
+            if ctx.telegram_surface {
+                return CliReply::error("compact: not supported over Telegram.");
+            }
+            handlers::compact_session(state).await
+        }
+        "new" => {
+            if ctx.telegram_surface {
+                return CliReply::error("new: not supported over Telegram.");
+            }
+            handlers::new_session(state).await
+        }
         "app" => {
             if ctx.telegram_surface {
                 return CliReply::error("app: starting the GUI is not supported over Telegram.");

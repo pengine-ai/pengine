@@ -17,8 +17,12 @@ const BY_PATH_POINTER: &str = "cli_session_by_path.json";
 
 /// Cap applied when building the context prefix for a new turn.
 /// Keeps the prompt size predictable across long sessions.
-const HISTORY_TURN_BUDGET: usize = 6;
+pub const HISTORY_TURN_BUDGET: usize = 6;
 const HISTORY_BYTES_BUDGET: usize = 12_000;
+
+/// When the session exceeds this many turns, a background compaction is
+/// triggered automatically after the next turn completes.
+pub const COMPACT_THRESHOLD: usize = HISTORY_TURN_BUDGET * 2;
 
 /// Max bytes read from the hidden project file `.pengine` (file only, not a directory).
 const DOT_PENGINE_MAX_BYTES: usize = 32_768;
@@ -146,6 +150,44 @@ impl CliSession {
         }
         out
     }
+}
+
+/// Build a prompt asking the AI to summarize `turns` into a compact memory block.
+/// Merges `prior_summary` when present so repeated compactions accumulate.
+pub fn compact_prompt(prior_summary: Option<&str>, turns: &[SessionTurn]) -> String {
+    let mut out = String::from(
+        "Summarize the following conversation for future context. \
+         Capture: key decisions, file paths or commands used, outcomes, open questions, \
+         anything the AI should remember for follow-up turns. \
+         If a prior summary is included, merge it into the new summary. \
+         Output ONLY the merged summary — no preamble, no meta-commentary.\n\n",
+    );
+    if let Some(s) = prior_summary.filter(|s| !s.trim().is_empty()) {
+        out.push_str("## Prior summary (merge this in)\n");
+        out.push_str(s.trim());
+        out.push_str("\n\n");
+    }
+    out.push_str("## Turns to summarize\n");
+    for t in turns {
+        out.push_str(&format!(
+            "[user] {}\n[assistant] {}\n\n",
+            t.user.trim(),
+            t.assistant.trim()
+        ));
+    }
+    out
+}
+
+/// Compact the session in place: drain `turns[0..len-keep]`, store `summary`.
+/// Caller is responsible for saving the session afterward.
+pub fn apply_compaction(session: &mut CliSession, summary: String, keep: usize) {
+    let drop_upto = session.turns.len().saturating_sub(keep);
+    if drop_upto == 0 {
+        session.summary = Some(summary);
+        return;
+    }
+    session.turns.drain(0..drop_upto);
+    session.summary = Some(summary);
 }
 
 fn sessions_dir(store_path: &Path) -> PathBuf {
