@@ -525,18 +525,97 @@ pub fn read_dot_pengine_context(ctx: &ProjectContext) -> Option<String> {
     None
 }
 
+/// Walk `root` and return a sorted list of source files, mapped to `mcp_prefix + rel_path`.
+/// Skips common build / vendor dirs. Capped at `max_files` entries.
+pub fn project_file_listing(root: &Path, mcp_prefix: &str, max_files: usize) -> Vec<String> {
+    const SKIP_DIRS: &[&str] = &[
+        "node_modules",
+        "target",
+        ".git",
+        "dist",
+        "build",
+        ".next",
+        "__pycache__",
+        ".cache",
+        "coverage",
+        ".turbo",
+        "Pods",
+        ".venv",
+        "venv",
+        ".pengine",
+    ];
+    let mut out: Vec<String> = Vec::new();
+    let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = match fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let mut children: Vec<PathBuf> = entries
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .collect();
+        children.sort();
+        for path in children {
+            if path.is_dir() {
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if !SKIP_DIRS.contains(&name) {
+                    stack.push(path);
+                }
+            } else if path.is_file() {
+                if let Ok(rel) = path.strip_prefix(root) {
+                    if out.len() >= max_files {
+                        out.push(format!("… ({} files shown, more exist)", max_files));
+                        return out;
+                    }
+                    out.push(format!("{mcp_prefix}/{}", rel.display()));
+                }
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
 /// Markdown block prepended **before** session history so the agent sees stable
-/// project context first.
-pub fn dot_pengine_prompt_block(ctx: &ProjectContext) -> String {
-    read_dot_pengine_context(ctx).map_or_else(String::new, |body| {
-        format!(
-            "## Project context (.pengine)\n\
-             {body}\n\n\
-             > **Do NOT call `directory_tree` on the repo root** — output is truncated and will \
-             incorrectly appear to show missing files. Use `read_file` directly on the paths \
-             listed above, or call `list_directory` / `search_files` on a narrow sub-path.\n\n"
-        )
-    })
+/// project context first. `mcp_prefix` is the `/app/<name>` container path for the
+/// project root (pass `None` when unknown — the file listing will be omitted).
+pub fn dot_pengine_prompt_block(ctx: &ProjectContext, mcp_prefix: Option<&str>) -> String {
+    let root = ctx.git_root.as_deref().unwrap_or(&ctx.cwd);
+
+    // User-written notes from the .pengine file (optional).
+    let notes = read_dot_pengine_context(ctx);
+
+    // Auto-generated file listing (only when we know the MCP prefix).
+    let file_listing = mcp_prefix.map(|prefix| {
+        let files = project_file_listing(root, prefix, 300);
+        if files.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "## Project files ({prefix})\n\
+                 > Use `read_file` on these paths directly. \
+                 Do **NOT** call `directory_tree` on the repo root — \
+                 output is truncated on large repos and will incorrectly appear to show missing files.\n\n\
+                 {}\n\n",
+                files.join("\n")
+            )
+        }
+    });
+
+    match (notes, file_listing) {
+        (None, None) => String::new(),
+        (notes, listing) => {
+            let mut block = String::from("## Project context (.pengine)\n\n");
+            if let Some(n) = notes {
+                block.push_str(&n);
+                block.push_str("\n\n");
+            }
+            if let Some(l) = listing.filter(|s| !s.is_empty()) {
+                block.push_str(&l);
+            }
+            block
+        }
+    }
 }
 
 fn detect_git(start: &Path) -> (Option<PathBuf>, Option<String>) {
@@ -734,7 +813,7 @@ mod tests {
             git_root: None,
             git_branch: None,
         };
-        let b = dot_pengine_prompt_block(&ctx);
+        let b = dot_pengine_prompt_block(&ctx, None);
         assert!(b.starts_with("## Project context (.pengine)"));
         assert!(b.contains("x"));
     }

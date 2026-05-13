@@ -12,6 +12,7 @@ use crate::modules::mcp::service as mcp_service;
 use crate::modules::ollama::service::{self as ollama, ModelInfo};
 use crate::modules::secure_store;
 use crate::modules::skills::service as skills_service;
+use crate::modules::tool_engine::service::workspace_app_bind_pairs;
 use crate::shared::state::{AppState, ConnectionData, ConnectionMetadata, LogEntry};
 use crate::shared::user_settings;
 use chrono::Utc;
@@ -944,7 +945,25 @@ pub async fn ask_in_session(state: &AppState, text: &str, persist_session: bool)
         (String::new(), session::detect_project_context(&cwd))
     };
 
-    let dot_prefix = session::dot_pengine_prompt_block(&project_for_dot);
+    let mcp_prefix_for_dot: Option<String> = {
+        let fs_paths = state.cached_filesystem_paths.read().await.clone();
+        let pairs = workspace_app_bind_pairs(&fs_paths);
+        let root = project_for_dot
+            .git_root
+            .as_deref()
+            .unwrap_or(&project_for_dot.cwd);
+        pairs.into_iter().find_map(|(host, container)| {
+            let hp = std::path::Path::new(host.trim());
+            let hcanon = std::fs::canonicalize(hp).unwrap_or_else(|_| hp.to_path_buf());
+            if root.starts_with(&hcanon) {
+                Some(container)
+            } else {
+                None
+            }
+        })
+    };
+    let dot_prefix =
+        session::dot_pengine_prompt_block(&project_for_dot, mcp_prefix_for_dot.as_deref());
 
     let prompt_for_agent = {
         let mut head = String::new();
@@ -1008,6 +1027,45 @@ pub async fn ask_in_session(state: &AppState, text: &str, persist_session: bool)
                 body.push_str("\n\n_Note: ");
                 body.push_str(&expanded.errors.join("; "));
                 body.push('_');
+            }
+            // Auto-attach a git diff when the model changed files but didn't embed one.
+            if !body.contains("```diff") {
+                if let Some(git_root) = project_for_dot.git_root.as_deref() {
+                    let stat = std::process::Command::new("git")
+                        .args(["diff", "--stat"])
+                        .current_dir(git_root)
+                        .output()
+                        .ok()
+                        .map(|o| String::from_utf8_lossy(&o.stdout).trim_end().to_string())
+                        .filter(|s| !s.is_empty());
+                    let full = std::process::Command::new("git")
+                        .args(["diff"])
+                        .current_dir(git_root)
+                        .output()
+                        .ok()
+                        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                        .filter(|s| !s.trim().is_empty());
+                    if let Some(diff_text) = full {
+                        const DIFF_CAP: usize = 20_000;
+                        let diff_capped = if diff_text.len() > DIFF_CAP {
+                            format!(
+                                "{}\n…(truncated at {} chars)",
+                                &diff_text[..DIFF_CAP],
+                                DIFF_CAP
+                            )
+                        } else {
+                            diff_text
+                        };
+                        if let Some(s) = stat {
+                            body.push_str("\n\n```\n");
+                            body.push_str(&s);
+                            body.push_str("\n```");
+                        }
+                        body.push_str("\n\n```diff\n");
+                        body.push_str(&diff_capped);
+                        body.push_str("\n```");
+                    }
+                }
             }
             CliReply::text(body)
         }
@@ -1283,20 +1341,31 @@ fn emit_turn_footer(elapsed: std::time::Duration, turn: &agent::TurnResult) {
 
 /// Format a token count with thousands separators: 1234 → "1,234".
 fn fmt_num(n: u64) -> String {
-    let s = n.to_string();
-    let mut out = String::with_capacity(s.len() + s.len() / 3);
-    for (i, ch) in s.chars().rev().enumerate() {
-        if i > 0 && i % 3 == 0 {
-            out.push(',');
-        }
-        out.push(ch);
+    if n < 1_000 {
+        return n.to_string();
     }
-    out.chars().rev().collect()
+    if n < 10_000 {
+        return format!("{:.1}k", n as f64 / 1_000.0);
+    }
+    format!("{}k", n / 1_000)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fmt_num_uses_k_suffix() {
+        assert_eq!(fmt_num(0), "0");
+        assert_eq!(fmt_num(512), "512");
+        assert_eq!(fmt_num(999), "999");
+        assert_eq!(fmt_num(1_000), "1.0k");
+        assert_eq!(fmt_num(1_711), "1.7k");
+        assert_eq!(fmt_num(9_012), "9.0k");
+        assert_eq!(fmt_num(10_000), "10k");
+        assert_eq!(fmt_num(13_362), "13k");
+        assert_eq!(fmt_num(100_000), "100k");
+    }
 
     #[test]
     fn inline_tool_block_rewrites_step_call() {

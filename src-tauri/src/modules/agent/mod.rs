@@ -1154,14 +1154,14 @@ async fn build_system_prompt(
         let base = if has_edit && has_diff {
             "\nCode changes: when the user asks for a review with changes, a fix, a refactor, or any \
              modification to repo files, **apply the change yourself** with **`edit_file`** / **`write_file`** \
-             — do not write a markdown summary describing what to change. After editing, call **`git_diff`** \
-             (unstaged) and embed the diff inside `<pengine_reply>` as a fenced ```diff block, followed by a \
-             brief one-line rationale per file. If the user only asked for a review without changes, answer \
-             with prose only and do not edit."
+             — do not write a markdown summary describing what to change. After editing, reply with **1-2 \
+             sentences** summarising what you changed and why. Do **NOT** call `git_diff` or embed a diff \
+             block — the system renders the diff automatically after your reply. \
+             If the user only asked for a review without changes, answer with prose only and do not edit."
         } else if has_edit {
             "\nCode changes: when the user asks for changes/fixes/refactors, apply them yourself with \
-             **`edit_file`** / **`write_file`** instead of describing them. End with a short bullet list of the \
-             files you changed."
+             **`edit_file`** / **`write_file`** instead of describing them. Reply with 1-2 sentences \
+             summarising what changed."
         } else {
             ""
         };
