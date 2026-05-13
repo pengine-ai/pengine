@@ -980,6 +980,20 @@ pub async fn ask_in_session(state: &AppState, text: &str, persist_session: bool)
         }
     };
 
+    // Snapshot unstaged diff before the turn so we can show only the model's new changes.
+    let diff_before: String = project_for_dot
+        .git_root
+        .as_deref()
+        .and_then(|r| {
+            std::process::Command::new("git")
+                .args(["diff"])
+                .current_dir(r)
+                .output()
+                .ok()
+        })
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+
     let progress = Progress::start(flavor::thinking_label().to_string());
     let token_counter = progress.token_counter();
     let forwarder = spawn_status_forwarder(state, progress.status_sender()).await;
@@ -995,7 +1009,11 @@ pub async fn ask_in_session(state: &AppState, text: &str, persist_session: bool)
             CliReply::text("(no reply)")
         }
         Ok(turn) => {
-            if turn.text.trim().is_empty() {
+            // When the model ran tool calls but produced no final text (e.g. the
+            // <pengine_reply> block was empty or missing), fall through with a
+            // placeholder so the auto-diff block still gets appended. Only bail
+            // early when there were genuinely no tool calls either (steps ≤ 1).
+            if turn.text.trim().is_empty() && turn.steps <= 1 {
                 emit_baked_line(elapsed);
                 return CliReply::text("(no reply)");
             }
@@ -1022,48 +1040,48 @@ pub async fn ask_in_session(state: &AppState, text: &str, persist_session: bool)
                 spawn_compaction_if_needed(state).await;
             }
             emit_turn_footer(elapsed, &turn);
-            let mut body = turn.text;
+            let mut body = if turn.text.trim().is_empty() {
+                String::from("Done.")
+            } else {
+                turn.text
+            };
             if !expanded.errors.is_empty() {
                 body.push_str("\n\n_Note: ");
                 body.push_str(&expanded.errors.join("; "));
                 body.push('_');
             }
-            // Auto-attach a git diff when the model changed files but didn't embed one.
+            // Auto-attach only the diff the model introduced this turn.
             if !body.contains("```diff") {
                 if let Some(git_root) = project_for_dot.git_root.as_deref() {
-                    let stat = std::process::Command::new("git")
-                        .args(["diff", "--stat"])
-                        .current_dir(git_root)
-                        .output()
-                        .ok()
-                        .map(|o| String::from_utf8_lossy(&o.stdout).trim_end().to_string())
-                        .filter(|s| !s.is_empty());
-                    let full = std::process::Command::new("git")
+                    let diff_after: String = std::process::Command::new("git")
                         .args(["diff"])
                         .current_dir(git_root)
                         .output()
                         .ok()
                         .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-                        .filter(|s| !s.trim().is_empty());
-                    if let Some(diff_text) = full {
-                        const DIFF_CAP: usize = 20_000;
-                        let diff_capped = if diff_text.len() > DIFF_CAP {
-                            format!(
-                                "{}\n…(truncated at {} chars)",
-                                &diff_text[..DIFF_CAP],
-                                DIFF_CAP
-                            )
-                        } else {
-                            diff_text
-                        };
-                        if let Some(s) = stat {
-                            body.push_str("\n\n```\n");
-                            body.push_str(&s);
+                        .unwrap_or_default();
+
+                    let delta = diff_new_sections(&diff_before, &diff_after);
+                    if !delta.trim().is_empty() {
+                        const FILE_DIFF_CAP: usize = 8_000;
+                        for section in diff_file_sections(&delta) {
+                            let (label, content) = section;
+                            body.push_str("\n\n`");
+                            body.push_str(&label);
+                            body.push('`');
+                            let capped = if content.len() > FILE_DIFF_CAP {
+                                format!(
+                                    "{}\n…(truncated at {} chars)",
+                                    &content[..FILE_DIFF_CAP],
+                                    FILE_DIFF_CAP
+                                )
+                            } else {
+                                content
+                            };
+                            body.push_str("\n```diff\n");
+                            body.push_str(&capped);
                             body.push_str("\n```");
                         }
-                        body.push_str("\n\n```diff\n");
-                        body.push_str(&diff_capped);
-                        body.push_str("\n```");
                     }
                 }
             }
@@ -1350,6 +1368,80 @@ fn fmt_num(n: u64) -> String {
     format!("{}k", n / 1_000)
 }
 
+/// Split a unified diff into `(display_label, diff_content)` per file.
+/// Label is the `b/<path>` portion from the `diff --git` header, stripped to a relative path.
+fn diff_file_sections(diff: &str) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut current_label = String::new();
+    let mut current_buf = String::new();
+
+    for line in diff.lines() {
+        if let Some(rest) = line.strip_prefix("diff --git ") {
+            if !current_label.is_empty() {
+                out.push((current_label.clone(), std::mem::take(&mut current_buf)));
+            }
+            // "a/<path> b/<path>" → take b/ side as the display label
+            current_label = rest
+                .split_once(" b/")
+                .map(|(_, b)| b.to_string())
+                .unwrap_or_else(|| rest.to_string());
+            current_buf.clear();
+        } else {
+            current_buf.push_str(line);
+            current_buf.push('\n');
+        }
+    }
+    if !current_label.is_empty() {
+        out.push((current_label, current_buf));
+    }
+    out
+}
+
+/// Return the sections of `after` that are absent from `before` (new or modified files).
+/// Each section starts with a `diff --git …` line.
+fn diff_new_sections(before: &str, after: &str) -> String {
+    if after == before {
+        return String::new();
+    }
+    fn split_sections(s: &str) -> Vec<&str> {
+        let mut out = Vec::new();
+        let mut start = 0;
+        let bytes = s.as_bytes();
+        let marker = b"\ndiff --git ";
+        let mut i = 0;
+        while i + marker.len() <= bytes.len() {
+            if bytes[i..].starts_with(marker) {
+                if i > start {
+                    out.push(&s[start..i]);
+                }
+                start = i + 1; // skip the leading newline
+                i += marker.len();
+            } else {
+                i += 1;
+            }
+        }
+        if start < s.len() {
+            out.push(&s[start..]);
+        }
+        out
+    }
+
+    let before_sections: std::collections::HashSet<&str> = split_sections(before)
+        .into_iter()
+        .map(str::trim_end)
+        .collect();
+    let mut out = String::new();
+    for section in split_sections(after) {
+        if !before_sections.contains(section.trim_end()) {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(section);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1380,6 +1472,30 @@ mod tests {
             out.contains("[host] auto-fetch https://example.com"),
             "got: {out}"
         );
+    }
+
+    #[test]
+    fn diff_new_sections_returns_only_added_file() {
+        let before =
+            "diff --git a/old.rs b/old.rs\n--- a/old.rs\n+++ b/old.rs\n@@ -1 +1 @@\n-old\n+new\n";
+        let after = format!(
+            "{before}diff --git a/new.rs b/new.rs\n--- a/new.rs\n+++ b/new.rs\n@@ -0,0 +1 @@\n+added\n"
+        );
+        let delta = diff_new_sections(before, &after);
+        assert!(
+            delta.contains("new.rs"),
+            "expected new.rs in delta: {delta}"
+        );
+        assert!(
+            !delta.contains("old.rs"),
+            "old.rs should not appear: {delta}"
+        );
+    }
+
+    #[test]
+    fn diff_new_sections_empty_when_unchanged() {
+        let diff = "diff --git a/x.rs b/x.rs\n+something\n";
+        assert!(diff_new_sections(diff, diff).is_empty());
     }
 
     #[test]

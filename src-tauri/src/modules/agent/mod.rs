@@ -59,8 +59,9 @@ const SUMMARY_SYSTEM_PROMPT: &str = "You synthesize tool results for the user. R
    **<translated word>**\n\
    1. https://example.com/page-one\n\
    2. https://example.com/page-two\n\
-   Copy URLs exactly as they appear in the Data (fetch headers like `--- fetch (auto: https://…) ---`, HTML links, or Location lines).\n\
-   **If the Data contains no web fetches or searches (e.g. only filesystem reads, git output, local tool results), omit this block entirely.** Do not invent or guess URLs.\n\
+   Only list **https:// or http:// URLs** that appear in the Data (fetch headers like `--- fetch (auto: https://…) ---`, HTML links, or Location lines). \
+   **Never** list local file paths (`/app/…`, `/Users/…`, relative paths) as sources — those are filesystem reads, not web references.\n\
+   **If the Data contains no web fetches or searches (e.g. only filesystem reads, git output, code edits, local tool results), omit this block entirely.** Do not invent or guess URLs.\n\
 5) No chain-of-thought, planning, or English meta: write only text that should appear in the user's chat bubble.";
 
 const REPO_WRITE_CONTINUE_AFTER_PROSE: &str = "CONTINUE (repo files): This turn is **not** finished. Either you have not called **`edit_file`** / **`write_file`** / **`create_directory`** yet, or the **latest** tool output still shows a compile/clippy/lint/pre-commit failure. \

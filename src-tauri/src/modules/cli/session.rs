@@ -551,9 +551,7 @@ pub fn project_file_listing(root: &Path, mcp_prefix: &str, max_files: usize) -> 
             Ok(e) => e,
             Err(_) => continue,
         };
-        let mut children: Vec<PathBuf> = entries
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .collect();
+        let mut children: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
         children.sort();
         for path in children {
             if path.is_dir() {
