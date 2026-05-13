@@ -663,7 +663,17 @@ fn build_spinner_line(
         }
     };
 
-    format!("\r\x1b[2K\x1b[2m{visible}\x1b[0m")
+    // Blue spinner: bold bright-blue frame + medium-blue label + dim-blue suffix.
+    // Split at the first " · " to colour frame+label vs. the trailing detail.
+    let colored = if let Some((head, tail)) = visible.split_once(" · ") {
+        // head = "⠹ Thonking", tail = "status · 4s" or just "4s"
+        format!(
+            "\x1b[1;38;2;79;172;255m{head}\x1b[0m \x1b[38;2;99;160;220m·\x1b[0m \x1b[2;38;2;120;170;220m{tail}\x1b[0m"
+        )
+    } else {
+        format!("\x1b[1;38;2;79;172;255m{visible}\x1b[0m")
+    };
+    format!("\r\x1b[2K{colored}")
 }
 
 async fn spinner_loop(

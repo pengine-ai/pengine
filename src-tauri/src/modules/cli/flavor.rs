@@ -24,36 +24,61 @@ pub fn fun_pair(a: &'static str, b: &'static str) -> String {
 /// Format in the spinner: `⠹ Thonking · 4s`
 pub fn thinking_label() -> &'static str {
     pick_str(&[
-        "Thonking",     // thinking + honk
-        "Grokking",     // hacker lore: deep understanding
-        "Blorping",     // invented
-        "Wibbling",     // wobbly invented word
-        "Frobnifying",  // frobnicate = fiddle (hacker lore)
-        "Zorbulating",  // invented
+        // ── classic hacker lore ──
+        "Grokking",    // deep understanding (Heinlein)
+        "Frobnifying", // frobnicate = to fiddle with knobs
+        "Quuxing",     // quux: the fourth hacker placeholder
+        "Thonking",    // thinking + honk
+        // ── sounds like real work ──
+        "Cogitating",    // stuffy but correct
+        "Percolating",   // ideas slowly brewing
+        "Woolgathering", // absent-minded musing
+        "Deliberating",  // weighing all options solemnly
+        "Ruminating",    // chewing on the problem
+        "Pontificating", // making it sound important
+        "Extrapolating", // going beyond the data boldly
+        "Triangulating", // finding the answer from three bad clues
+        "Defragmenting", // classic Windows nostalgia
+        "Overclocking",  // pushing silicon to its limits
+        "Compiling",     // it's always compiling
+        "Initialising",  // British spelling for extra gravitas
+        // ── invented nonsense ──
+        "Blorping",
+        "Wibbling",
+        "Zorbulating",
         "Kerfluffling", // from kerfuffle
         "Discombobulating",
-        "Quuxing",       // quux: hacker placeholder (foo/bar/baz/quux)
-        "Schmozzling",   // invented
-        "Noodling",      // slang: loosely brainstorming
-        "Percolating",   // ideas brewing slowly
-        "Boffinating",   // boffin = British slang for a clever scientist
-        "Glonking",      // invented
-        "Tronking",      // Tron reference
-        "Flerbulating",  // invented
-        "Blorbinating",  // invented
-        "Cogitating",    // real but sounds delightfully stuffy
-        "Woolgathering", // real expression: absent-minded musing
-        "Slorbing",      // invented
-        "Murgling",      // invented
-        "Gnurfling",     // invented
-        "Zippulating",   // invented
-        "Bebboning",     // invented
-        "Snorkling",     // near-snorkeling, but for data
-        "Wuffling",      // invented
-        "Schmoogling",   // invented
-        "Grumpulating",  // invented
-        "Bewildering",   // turning confusion into answers
-        "Simmering",     // ideas on low heat
+        "Schmozzling",
+        "Glonking",
+        "Flerbulating",
+        "Blorbinating",
+        "Slorbing",
+        "Murgling",
+        "Gnurfling",
+        "Zippulating",
+        "Snorkling",
+        "Wuffling",
+        "Schmoogling",
+        "Grumpulating",
+        "Boffinating", // boffin = British clever scientist
+        "Tronking",    // Tron cinematic universe
+        "Noodling",    // loosely brainstorming
+        "Simmering",   // on low heat
+        "Bewildering", // turning confusion into answers
+        "Splorching",
+        "Frumbling",
+        "Zibulating",
+        "Plonkulating",
+        "Greebling",     // greeble: tiny surface details on a spaceship
+        "Yak-shaving",   // solving the meta-problem of the meta-problem
+        "Wiggling",      // sometimes you just need to wiggle it
+        "Bamboozling",   // bamboozle reversed
+        "Spelunking",    // exploring deep caves of context
+        "Untangling",    // knots, conceptual and otherwise
+        "Manifolding",   // higher-dimensional problem solving
+        "Vibing",        // when the model just knows
+        "Debugging",     // always, everywhere
+        "Hallucinating", // (briefly, before correcting itself)
     ])
 }
 

@@ -543,6 +543,13 @@ fn message_implies_apply_repo_fix(msg: &str) -> bool {
         "make the change",
         "update the file",
         "patch the file",
+        "code review",
+        "code clean",
+        "clean up",
+        "cleanup",
+        "refactor",
+        "improve the code",
+        "change some code",
     ];
     HINTS
         .iter()
@@ -1155,16 +1162,24 @@ async fn build_system_prompt(
         let base = if has_edit && has_diff {
             "\nCode changes: when the user asks for a review with changes, a fix, a refactor, or any \
              modification to repo files, **apply the change yourself** with **`edit_file`** / **`write_file`** \
-             — do not write a markdown summary describing what to change. After editing, reply with **1-2 \
-             sentences** summarising what you changed and why. Do **NOT** call `git_diff` or embed a diff \
-             block — the system renders the diff automatically after your reply. \
+             — do not write a markdown summary describing what to change. \
+             **IMPORTANT:** Do **NOT** write `--- a/…` / `+++ b/…` diff text inline in your reply — \
+             that has no effect. Use `edit_file` / `write_file` to actually modify files; \
+             the system renders the real diff automatically. \
+             After editing, reply with **1-2 sentences** summarising what you changed and why. \
              If the user only asked for a review without changes, answer with prose only and do not edit."
         } else if has_edit {
             "\nCode changes: when the user asks for changes/fixes/refactors, apply them yourself with \
-             **`edit_file`** / **`write_file`** instead of describing them. Reply with 1-2 sentences \
-             summarising what changed."
+             **`edit_file`** / **`write_file`** instead of describing them. \
+             Do **NOT** write inline `--- a/…` diff text — use the tools. \
+             Reply with 1-2 sentences summarising what changed."
         } else {
-            ""
+            // No file-edit tools available — forbid fake diffs so the model gives
+            // a useful prose review instead of inventing changes it cannot apply.
+            "\nCode review: you do **not** have file-editing tools in this session. \
+             Provide a prose-only review: list findings, suggest improvements, explain reasoning. \
+             **Do NOT write inline diffs, `--- a/…` hunks, or pretend to apply changes** — \
+             you have no way to actually modify files right now."
         };
         let apply_fix = if message_implies_apply_repo_fix(user_message) && has_edit {
             "\n**Apply-fix order (pre-commit / lint / format):** (1) read or search if needed; (2) **you must \

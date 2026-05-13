@@ -583,21 +583,44 @@ pub fn dot_pengine_prompt_block(ctx: &ProjectContext, mcp_prefix: Option<&str>) 
     // User-written notes from the .pengine file (optional).
     let notes = read_dot_pengine_context(ctx);
 
-    // Auto-generated file listing (only when we know the MCP prefix).
+    // Auto-generated file listing grouped by top-level directory (only when MCP prefix is known).
     let file_listing = mcp_prefix.map(|prefix| {
         let files = project_file_listing(root, prefix, 300);
         if files.is_empty() {
-            String::new()
-        } else {
-            format!(
-                "## Project files ({prefix})\n\
-                 > Use `read_file` on these paths directly. \
-                 Do **NOT** call `directory_tree` on the repo root — \
-                 output is truncated on large repos and will incorrectly appear to show missing files.\n\n\
-                 {}\n\n",
-                files.join("\n")
-            )
+            return String::new();
         }
+        // Group by the first path component after the prefix (e.g. "src", "src-tauri", …).
+        let mut groups: Vec<(String, Vec<String>)> = Vec::new();
+        for path in &files {
+            // path = "/app/pengine/src-tauri/src/…" — strip prefix to get relative
+            let rel = path.strip_prefix(prefix).unwrap_or(path.as_str());
+            let top = rel
+                .trim_start_matches('/')
+                .split('/')
+                .next()
+                .unwrap_or(".")
+                .to_string();
+            if let Some(g) = groups.iter_mut().find(|(k, _)| k == &top) {
+                g.1.push(path.clone());
+            } else {
+                groups.push((top, vec![path.clone()]));
+            }
+        }
+        let mut out = format!(
+            "## Project files ({prefix})\n\
+             > Use `read_file` on these exact paths. \
+             Do **NOT** call `directory_tree` on the repo root — \
+             it is truncated on large repos and will incorrectly appear to show missing files.\n\n"
+        );
+        for (dir, paths) in &groups {
+            out.push_str(&format!("### {dir}/\n"));
+            for p in paths {
+                out.push_str(p);
+                out.push('\n');
+            }
+            out.push('\n');
+        }
+        out
     });
 
     match (notes, file_listing) {
