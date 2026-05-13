@@ -529,7 +529,13 @@ pub fn read_dot_pengine_context(ctx: &ProjectContext) -> Option<String> {
 /// project context first.
 pub fn dot_pengine_prompt_block(ctx: &ProjectContext) -> String {
     read_dot_pengine_context(ctx).map_or_else(String::new, |body| {
-        format!("## Project context (.pengine)\n{body}\n\n")
+        format!(
+            "## Project context (.pengine)\n\
+             {body}\n\n\
+             > **Do NOT call `directory_tree` on the repo root** — output is truncated and will \
+             incorrectly appear to show missing files. Use `read_file` directly on the paths \
+             listed above, or call `list_directory` / `search_files` on a narrow sub-path.\n\n"
+        )
     })
 }
 

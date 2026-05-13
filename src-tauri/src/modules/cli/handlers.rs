@@ -787,7 +787,6 @@ async fn session_rename(state: &AppState, name: &str) -> CliReply {
     CliReply::text(format!("session renamed to: {name}"))
 }
 
-
 /// `/compact` — call the AI to summarize old turns, store as `session.summary`,
 /// and keep only the last `HISTORY_TURN_BUDGET` turns verbatim.
 pub async fn compact_session(state: &AppState) -> CliReply {

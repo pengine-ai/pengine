@@ -54,13 +54,14 @@ const SUMMARY_SYSTEM_PROMPT: &str = "You synthesize tool results for the user. R
 1) Use ONLY the text in the user message's Data section (tool outputs). Do not add facts, legal claims, or country-specific rules that are not clearly supported there.\n\
 2) If the Data is insufficient, say so briefly and list what is missing — do not invent answers.\n\
 3) Language: match the user's question where possible.\n\
-4) After the substantive answer, add a final section **Quellen** with a bullet list of every relevant full URL you relied on:\n\
-   - Include URLs from `brave_web_search` results and from every `fetch` block (including lines like `--- fetch (auto: https://…) ---`).\n\
-   - Copy URLs exactly as they appear in the Data (fetch bodies, HTML links, or Location lines).\n\
-   - If the Data shows only page text without URLs, write one bullet per tool block naming the fetch target if it appears in the `--- fetch ---` headers or quoted links in the excerpt.\n\
-   - Never omit **Quellen** when the Data came from web search or fetches.\n\
-5) Keep the body concise but do not drop **Quellen** to save space.\n\
-6) No chain-of-thought, planning, or English meta: write only text that should appear in the user's chat bubble.";
+4) **Sources section — only when web content was fetched or searched:**\n\
+   If the Data contains output from `fetch` calls or `brave_web_search` results, end with a sources block. Use the word for \"References\" translated into the same language as the user's message (e.g. \"References\" (English), \"Quellen\" (German), \"Sources\" (French), \"Fuentes\" (Spanish), \"Fonti\" (Italian), \"Referências\" (Portuguese), \"Bronnen\" (Dutch), \"Källor\" (Swedish), \"Kilder\" (Danish/Norwegian), \"Lähteet\" (Finnish), \"Источники\" (Russian), \"来源\" (Chinese), \"参考文献\" (Japanese), \"출처\" (Korean), \"Kaynak\" (Turkish), \"Zdroje\" (Czech/Slovak), \"Źródła\" (Polish), \"Surse\" (Romanian), \"Πηγές\" (Greek), \"מקורות\" (Hebrew), \"المصادر\" (Arabic)). Format it exactly like this:\n---\n\
+   **<translated word>**\n\
+   1. https://example.com/page-one\n\
+   2. https://example.com/page-two\n\
+   Copy URLs exactly as they appear in the Data (fetch headers like `--- fetch (auto: https://…) ---`, HTML links, or Location lines).\n\
+   **If the Data contains no web fetches or searches (e.g. only filesystem reads, git output, local tool results), omit this block entirely.** Do not invent or guess URLs.\n\
+5) No chain-of-thought, planning, or English meta: write only text that should appear in the user's chat bubble.";
 
 const REPO_WRITE_CONTINUE_AFTER_PROSE: &str = "CONTINUE (repo files): This turn is **not** finished. Either you have not called **`edit_file`** / **`write_file`** / **`create_directory`** yet, or the **latest** tool output still shows a compile/clippy/lint/pre-commit failure. \
 Your next step must be **tool calls** on the repo (absolute **`/app/...`** paths): create missing files/folders the user asked for, or patch what the log cites — then verify if appropriate. \
@@ -1239,7 +1240,7 @@ async fn build_system_prompt(
          After tool results, answer immediately. Be concise. \
          `brave_web_search` is only in the tool list when the user asked to search the open web (e.g. \"search the internet\", \"suche im Internet\", \"suche nach ...\") or a skill's `requires` matches this turn — otherwise prefer **`fetch`** on any `http(s)` URL you have (including from the user). \
          At most one `brave_web_search` per user message when it is available. \
-         After an allowed search, the host may auto-`fetch` several top result URLs — use those excerpts and end with **Quellen** listing every source URL. \
+         After an allowed search, the host may auto-`fetch` several top result URLs — use those excerpts and end with a sources block (after `---`) using the word for \"References\" in the user's language (e.g. \"Quellen\" in German, \"References\" in English, \"Sources\" in French) with a numbered URL list. Only add this block when the reply actually used web fetches or search results — never for code reviews, filesystem reads, or answers from training knowledge. \
          **Skill discipline:** each skill in the list below defines fetch URLs for a specific domain. Only call those URLs when the user message is actually about that skill's topic.{fs_hint}{code_edit_hint}{scaffold_hint}{mem_hint}{weather_directive}{skills_hint}"
     )
 }

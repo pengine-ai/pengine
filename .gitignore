@@ -29,5 +29,6 @@ playwright-report/
 test-results/
 
 .env
+.pengine
 # Apple signing
 certificate-base64.txt
