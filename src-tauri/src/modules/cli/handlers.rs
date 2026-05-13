@@ -594,16 +594,15 @@ fn session_help() -> CliReply {
         "bash",
         "\
 /session list                    list all saved sessions (newest first)
-/session new [name]              start a fresh session; save and compact current first
-/session switch <name-or-id>     resume a saved session; save current first
-/session rename <name>           give the active session a name
-/session delete <name-or-id>     delete a saved session from disk (cannot delete the active one)
+/session new <name>              create a named session and switch to it immediately
+/session switch <name-or-id>     resume a saved session; saves current first
+/session rename <name>           rename the active session
+/session delete <name-or-id>     delete a saved session from disk (not the active one)
 /session help                    show this help
 
 Notes:
   - Sessions persist on disk across restarts.
-  - Auto-compaction runs in the background when a session exceeds 12 turns.
-  - /new is a shortcut for /session new (no name)."
+  - Auto-compaction runs in the background when a session exceeds 12 turns."
             .trim_end(),
     )
 }
@@ -620,13 +619,14 @@ async fn session_list(state: &AppState) -> CliReply {
         .as_ref()
         .map(|s| s.id.clone());
     let mut out = format!(
-        "{:<3}  {:<15}  {:<22}  {:<5}  {}\n{}\n",
+        "{:<3}  {:<15}  {:<22}  {:<5}  {:<10}  {}\n{}\n",
         " ",
         "id",
         "name",
         "turns",
+        "in",
         "branch",
-        "─".repeat(72),
+        "─".repeat(84),
     );
     for e in manifest.entries.iter().rev() {
         let marker = if active_id.as_deref() == Some(e.id.as_str()) {
@@ -636,8 +636,9 @@ async fn session_list(state: &AppState) -> CliReply {
         };
         let name = e.name.as_deref().unwrap_or("—");
         let branch = e.git_branch.as_deref().unwrap_or("—");
+        let tokens_in = fmt_num(e.prompt_tokens_total);
         out.push_str(&format!(
-            "{marker:<3}  {:<15}  {name:<22}  {:<5}  {branch}\n",
+            "{marker:<3}  {:<15}  {name:<22}  {:<5}  {tokens_in:<10}  {branch}\n",
             e.id, e.turn_count,
         ));
         if let Some(snippet) = &e.summary_snippet {
@@ -786,10 +787,6 @@ async fn session_rename(state: &AppState, name: &str) -> CliReply {
     CliReply::text(format!("session renamed to: {name}"))
 }
 
-/// `/new` — shortcut for `/session new` (no name).
-pub async fn new_session(state: &AppState) -> CliReply {
-    session_new(state, "").await
-}
 
 /// `/compact` — call the AI to summarize old turns, store as `session.summary`,
 /// and keep only the last `HISTORY_TURN_BUDGET` turns verbatim.

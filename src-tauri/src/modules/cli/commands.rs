@@ -103,15 +103,7 @@ pub const COMMANDS: &[NativeCommand] = &[
                   /session help                  # show all session subcommands\n\n\
                   Sessions persist across restarts. Each session keeps a turn history and\n\
                   a compacted summary for context. /session switch saves the current session\n\
-                  before switching. The previous /new command is a shortcut for /session new.",
-    },
-    NativeCommand {
-        name: "new",
-        summary: "Start a fresh session (shortcut for /session new) (REPL-only).",
-        details: "Usage: /new\n\n\
-                  Creates an empty session for the current project. The previous session\n\
-                  is still saved on disk and can be resumed with /session switch.\n\
-                  Shortcut for /session new.",
+                  before switching. Run /session help for the full subcommand list.",
     },
     NativeCommand {
         name: "clear",
