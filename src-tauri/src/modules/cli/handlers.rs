@@ -19,6 +19,11 @@ use chrono::Utc;
 use serde::Deserialize;
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+use tokio::sync::mpsc;
 
 pub fn help(topic: Option<&str>) -> CliReply {
     if let Some(t) = topic.map(str::trim).filter(|s| !s.is_empty()) {
@@ -575,6 +580,259 @@ pub async fn ask(state: &AppState, text: &str) -> CliReply {
     ask_in_session(state, text, true).await
 }
 
+// ── Streaming reply filter ────────────────────────────────────────────────────
+
+enum StreamFilterState {
+    Buffering,
+    Streaming,
+    Done,
+}
+
+/// Extracts the content of `<pengine_reply>…</pengine_reply>` from an
+/// incremental token stream. `feed()` returns text to print as it arrives;
+/// `finish()` flushes any trailing buffer when the channel closes.
+struct ReplyStreamFilter {
+    state: StreamFilterState,
+    buf: String,
+}
+
+impl ReplyStreamFilter {
+    fn new() -> Self {
+        Self {
+            state: StreamFilterState::Buffering,
+            buf: String::new(),
+        }
+    }
+
+    fn feed(&mut self, chunk: &str) -> Option<String> {
+        match self.state {
+            StreamFilterState::Done => None,
+            StreamFilterState::Buffering => self.feed_buffering(chunk),
+            StreamFilterState::Streaming => self.feed_streaming(chunk),
+        }
+    }
+
+    fn feed_buffering(&mut self, chunk: &str) -> Option<String> {
+        const OPEN: &str = "<pengine_reply>";
+        self.buf.push_str(chunk);
+        if let Some(pos) = self.buf.find(OPEN) {
+            let rest = self.buf[pos + OPEN.len()..].to_string();
+            self.buf.clear();
+            self.state = StreamFilterState::Streaming;
+            if rest.is_empty() {
+                return None;
+            }
+            return self.feed_streaming(&rest);
+        }
+        // Keep only the last (OPEN.len()-1) chars to detect a tag split across chunks.
+        let keep = OPEN.len() - 1;
+        if self.buf.len() > keep {
+            self.buf = self.buf[self.buf.len() - keep..].to_string();
+        }
+        None
+    }
+
+    fn feed_streaming(&mut self, chunk: &str) -> Option<String> {
+        const CLOSE: &str = "</pengine_reply>";
+        self.buf.push_str(chunk);
+        if let Some(pos) = self.buf.find(CLOSE) {
+            self.state = StreamFilterState::Done;
+            let content = self.buf[..pos].to_string();
+            self.buf.clear();
+            return if content.is_empty() {
+                None
+            } else {
+                Some(content)
+            };
+        }
+        // Safe to emit everything except the last (CLOSE.len()-1) bytes,
+        // which might be the start of a split closing tag.
+        let safe = self.buf.len().saturating_sub(CLOSE.len() - 1);
+        if safe == 0 {
+            return None;
+        }
+        let out = self.buf[..safe].to_string();
+        self.buf = self.buf[safe..].to_string();
+        Some(out)
+    }
+
+    fn finish(&mut self) -> Option<String> {
+        if matches!(self.state, StreamFilterState::Streaming) && !self.buf.is_empty() {
+            self.state = StreamFilterState::Done;
+            Some(std::mem::take(&mut self.buf))
+        } else {
+            None
+        }
+    }
+}
+
+/// Consume text chunks from the agent's streaming channel, filter for the
+/// `<pengine_reply>` block, and render live to stdout with REPL chrome.
+/// Sets `did_stream` to `true` when at least one content chunk was printed.
+async fn run_stream_consumer(
+    mut rx: mpsc::UnboundedReceiver<String>,
+    status: ProgressStatus,
+    did_stream: Arc<AtomicBool>,
+) {
+    let mut filter = ReplyStreamFilter::new();
+    let mut started = false;
+    let mut at_line_start = true;
+
+    while let Some(chunk) = rx.recv().await {
+        let Some(content) = filter.feed(&chunk) else {
+            continue;
+        };
+        if content.is_empty() {
+            continue;
+        }
+        if !started {
+            started = true;
+            // Stop the spinner and wait one tick so it clears its stderr line.
+            status.stop_spinner().await;
+            tokio::time::sleep(std::time::Duration::from_millis(95)).await;
+            super::output::repl_reply_section_open();
+            // Print first-line prefix (no trailing newline so content follows immediately).
+            let prefix = if std::io::stdout().is_terminal() {
+                super::output::REPL_FIRST_PREFIX
+            } else {
+                super::output::REPL_FIRST_PREFIX_PLAIN
+            };
+            print!("{prefix}");
+            let _ = std::io::stdout().flush();
+            at_line_start = false;
+        }
+        write_stream_chunk(&content, &mut at_line_start);
+    }
+
+    // Flush any buffered tail (e.g. content right before `</pengine_reply>`).
+    if let Some(tail) = filter.finish() {
+        if !tail.is_empty() {
+            if !started {
+                started = true;
+                status.stop_spinner().await;
+                tokio::time::sleep(std::time::Duration::from_millis(95)).await;
+                super::output::repl_reply_section_open();
+                let prefix = if std::io::stdout().is_terminal() {
+                    super::output::REPL_FIRST_PREFIX
+                } else {
+                    super::output::REPL_FIRST_PREFIX_PLAIN
+                };
+                print!("{prefix}");
+                let _ = std::io::stdout().flush();
+                at_line_start = false;
+            }
+            write_stream_chunk(&tail, &mut at_line_start);
+        }
+    }
+
+    if started {
+        if !at_line_start {
+            println!();
+        }
+        super::output::repl_reply_section_close();
+        did_stream.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Print `content` to stdout, inserting continuation prefixes after each newline.
+fn write_stream_chunk(content: &str, at_line_start: &mut bool) {
+    let mut out = String::with_capacity(content.len() + 16);
+    for ch in content.chars() {
+        if *at_line_start && ch != '\n' {
+            out.push_str(super::output::REPL_CONT_PREFIX);
+            *at_line_start = false;
+        }
+        out.push(ch);
+        if ch == '\n' {
+            *at_line_start = true;
+        }
+    }
+    print!("{out}");
+    let _ = std::io::stdout().flush();
+}
+
+/// `/retry` — re-run the most recent user message with a fresh agent turn.
+pub async fn retry(state: &AppState) -> CliReply {
+    let last_msg = {
+        let guard = state.cli_session.read().await;
+        guard
+            .as_ref()
+            .and_then(|s| s.turns.last().map(|t| t.user.clone()))
+    };
+    match last_msg {
+        None => CliReply::error("retry: no turns in the current session — nothing to retry"),
+        Some(msg) => ask_in_session(state, &msg, true).await,
+    }
+}
+
+/// `/search` — case-insensitive substring search across the active session's turns.
+pub async fn search(state: &AppState, query: &str) -> CliReply {
+    let query = query.trim();
+    if query.is_empty() {
+        return CliReply::error("search: query is empty");
+    }
+    let q_lower = query.to_lowercase();
+    let turns = {
+        let guard = state.cli_session.read().await;
+        guard.as_ref().map(|s| s.turns.clone()).unwrap_or_default()
+    };
+    if turns.is_empty() {
+        return CliReply::text("search: session is empty — no turns to search".to_string());
+    }
+    let mut results: Vec<String> = Vec::new();
+    for (i, turn) in turns.iter().enumerate() {
+        let num = i + 1;
+        if turn.user.to_lowercase().contains(&q_lower) {
+            results.push(format!(
+                "Turn {num} (you):    {}",
+                search_snippet(&turn.user, &q_lower, 120)
+            ));
+        }
+        if turn.assistant.to_lowercase().contains(&q_lower) {
+            results.push(format!(
+                "Turn {num} (agent):  {}",
+                search_snippet(&turn.assistant, &q_lower, 120)
+            ));
+        }
+    }
+    if results.is_empty() {
+        return CliReply::text(format!("search: no matches for `{query}`"));
+    }
+    let count = results.len();
+    CliReply::code(
+        "bash",
+        format!("{count} match(es) for `{query}`\n\n{}", results.join("\n")),
+    )
+}
+
+/// Extract up to `ctx_chars` characters centred on the first match of `needle` in `text`.
+fn search_snippet(text: &str, needle: &str, ctx_chars: usize) -> String {
+    let lower = text.to_lowercase();
+    let pos = lower.find(needle).unwrap_or_default();
+    let start = pos.saturating_sub(ctx_chars / 3);
+    let end = (pos + needle.len() + ctx_chars * 2 / 3).min(text.len());
+    // Safety: find() returns valid UTF-8 byte boundary in `lower`; the same
+    // offset is valid in `text` because both strings have identical byte layout.
+    let end = text
+        .char_indices()
+        .map(|(i, _)| i)
+        .find(|&i| i >= end)
+        .unwrap_or(text.len());
+    let start = text
+        .char_indices()
+        .map(|(i, _)| i)
+        .find(|&i| i >= start)
+        .unwrap_or(0);
+    let mut out = text[start..end].replace('\n', " ");
+    if start > 0 {
+        out.insert(0, '…');
+    }
+    if end < text.len() {
+        out.push('…');
+    }
+    out
+}
+
 /// `/session` — named session management: list, new, switch, rename.
 pub async fn session_cmd(state: &AppState, action: &str, rest: &str) -> CliReply {
     match action.trim() {
@@ -997,11 +1255,30 @@ pub async fn ask_in_session(state: &AppState, text: &str, persist_session: bool)
     let progress = Progress::start(flavor::thinking_label().to_string());
     let token_counter = progress.token_counter();
     let forwarder = spawn_status_forwarder(state, progress.status_sender()).await;
-    let result = agent::run_turn(state, &prompt_for_agent, Some(token_counter)).await;
+
+    // On TTY: wire a live-streaming channel so content appears as it's generated.
+    let did_stream = Arc::new(AtomicBool::new(false));
+    let (maybe_text_tx, stream_task) = if std::io::stdout().is_terminal() {
+        let (text_tx, text_rx) = mpsc::unbounded_channel::<String>();
+        let stream_status = progress.status_sender();
+        let did_stream2 = did_stream.clone();
+        let task = tokio::spawn(run_stream_consumer(text_rx, stream_status, did_stream2));
+        (Some(text_tx), Some(task))
+    } else {
+        (None, None)
+    };
+
+    let result =
+        agent::run_turn(state, &prompt_for_agent, Some(token_counter), maybe_text_tx).await;
     if let Some(h) = forwarder {
         h.abort();
     }
+    // Wait for the streaming consumer to finish (it exits when the channel closes).
+    if let Some(t) = stream_task {
+        let _ = t.await;
+    }
     let elapsed = progress.finish().await;
+    let streamed = did_stream.load(Ordering::Relaxed);
 
     match result {
         Ok(turn) if turn.suppress_telegram_reply => {
@@ -1013,7 +1290,7 @@ pub async fn ask_in_session(state: &AppState, text: &str, persist_session: bool)
             // <pengine_reply> block was empty or missing), fall through with a
             // placeholder so the auto-diff block still gets appended. Only bail
             // early when there were genuinely no tool calls either (steps ≤ 1).
-            if turn.text.trim().is_empty() && turn.steps <= 1 {
+            if turn.text.trim().is_empty() && turn.steps <= 1 && !streamed {
                 emit_baked_line(elapsed);
                 return CliReply::text("(no reply)");
             }
@@ -1040,6 +1317,11 @@ pub async fn ask_in_session(state: &AppState, text: &str, persist_session: bool)
                 spawn_compaction_if_needed(state).await;
             }
             emit_turn_footer(elapsed, &turn);
+            emit_skill_nudge(turn.steps);
+            // Body was already rendered live — return empty so render_reply is a no-op.
+            if streamed {
+                return CliReply::text(String::new());
+            }
             let mut body = if turn.text.trim().is_empty() {
                 String::from("Done.")
             } else {
@@ -1286,6 +1568,25 @@ fn summarize_log_for_status(ev: &LogEntry) -> Option<String> {
         // Suppress unknown kinds to avoid raw debug strings in the spinner.
         _ => None,
     }
+}
+
+/// After 5+ agent steps, suggest capturing the workflow as a reusable skill.
+/// Prints a dim hint to stderr — consistent with the footer, invisible to piped consumers.
+fn emit_skill_nudge(steps: u32) {
+    const THRESHOLD: u32 = 5;
+    if steps < THRESHOLD || !std::io::stderr().is_terminal() {
+        return;
+    }
+    // Rotate tip text based on step count so repeated heavy tasks vary slightly.
+    let tip = match steps % 3 {
+        0 => "This multi-step workflow could become a skill — ask the agent to `create_skill` with a recipe.",
+        1 => "Tip: tell the agent to save this pattern as a skill so it finds it faster next time.",
+        _ => "That took effort — ask the agent to use `create_skill` to encode the approach for future turns.",
+    };
+    let line = format!("  \x1b[2m⎿\x1b[0m  \x1b[2m{tip}\x1b[0m\n");
+    let mut err = std::io::stderr().lock();
+    let _ = err.write_all(line.as_bytes());
+    let _ = err.flush();
 }
 
 /// `  ⎿  Baked for 4.8s — quip` on stderr — used when no token data is available

@@ -245,9 +245,9 @@ pub enum RenderStyle {
     ReplIndent,
 }
 
-const REPL_FIRST_PREFIX: &str = "  \x1b[2m⎿\x1b[0m  ";
-const REPL_FIRST_PREFIX_PLAIN: &str = "  ⎿  ";
-const REPL_CONT_PREFIX: &str = "     ";
+pub(super) const REPL_FIRST_PREFIX: &str = "  \x1b[2m⎿\x1b[0m  ";
+pub(super) const REPL_FIRST_PREFIX_PLAIN: &str = "  ⎿  ";
+pub(super) const REPL_CONT_PREFIX: &str = "     ";
 
 /// Width of dim rules framing each REPL reply (app-like section separators).
 const REPL_REPLY_RULE_WIDTH: usize = 52;
@@ -259,7 +259,7 @@ fn repl_reply_rule_bar(left: char, mid: char, right: char) {
 }
 
 /// Soft panel header/footer so replies feel scoped like an in-app card (TTY only).
-fn repl_reply_section_open() {
+pub(super) fn repl_reply_section_open() {
     if !is_terminal_stdout() {
         return;
     }
@@ -267,7 +267,7 @@ fn repl_reply_section_open() {
     repl_reply_rule_bar('╭', '─', '╮');
 }
 
-fn repl_reply_section_close() {
+pub(super) fn repl_reply_section_close() {
     if !is_terminal_stdout() {
         return;
     }
@@ -292,6 +292,10 @@ pub(crate) fn repl_reply_use_section_chrome(reply: &CliReply) -> bool {
 /// Central rendering helper. Handles diff-fence splitting for `Text` replies
 /// in REPL mode so ` ```diff ``` ` blocks get coloured inline.
 pub fn render_reply(sink: &dyn OutputSink, reply: &CliReply, style: RenderStyle) {
+    // Empty text is a no-op — content was already streamed live to the terminal.
+    if matches!(reply.kind, ReplyKind::Text) && reply.body.is_empty() {
+        return;
+    }
     match style {
         RenderStyle::Plain => sink.render(reply),
         RenderStyle::ReplIndent => {
@@ -562,6 +566,14 @@ impl ProgressStatus {
             return;
         }
         st.interjects.push(line.into());
+    }
+
+    /// Signal the spinner to stop. The spinner task will clear its line and
+    /// exit within one tick (≤90 ms). Callers should wait ~95 ms before
+    /// printing to stdout so the line is clear.
+    pub async fn stop_spinner(&self) {
+        let mut st = self.state.lock().await;
+        st.done = true;
     }
 }
 

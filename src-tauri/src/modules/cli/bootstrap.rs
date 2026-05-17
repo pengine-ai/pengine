@@ -80,9 +80,15 @@ pub fn handle_cli_or_continue(app: &tauri::App) -> bool {
             }
         }
         let reply = tauri::async_runtime::block_on(async {
-            if let Err(e) = mcp_service::rebuild_registry_into_state(&state).await {
-                return CliReply::error(format!("mcp warmup failed: {e}"));
-            }
+            // Rebuild MCP in the background so native tools (dice, task_spawner,
+            // skill_manager, …) are available immediately. Podman/stdio servers
+            // connect incrementally and become available mid-turn as they finish.
+            let state_bg = state.clone();
+            tokio::spawn(async move {
+                if let Err(e) = mcp_service::rebuild_registry_into_state(&state_bg).await {
+                    state_bg.emit_log("mcp", &format!("rebuild: {e}")).await;
+                }
+            });
             handlers::ask_in_session(&state, &prompt, flag_true(&matches.args, "continue")).await
         });
         let is_error = matches!(reply.kind, crate::modules::cli::output::ReplyKind::Error);
@@ -266,9 +272,13 @@ async fn dispatch_stateful(
         }
         "ask" => {
             let text = single_string(args, "text").unwrap_or_default();
-            if let Err(e) = mcp_service::rebuild_registry_into_state(state).await {
-                return CliReply::error(format!("mcp warmup failed: {e}"));
-            }
+            // Rebuild MCP in background so native tools are available immediately.
+            let state_bg = state.clone();
+            tokio::spawn(async move {
+                if let Err(e) = mcp_service::rebuild_registry_into_state(&state_bg).await {
+                    state_bg.emit_log("mcp", &format!("rebuild: {e}")).await;
+                }
+            });
             let cont = flag_true(args, "continue");
             if cont {
                 if let Some(s) = resume_session(state) {

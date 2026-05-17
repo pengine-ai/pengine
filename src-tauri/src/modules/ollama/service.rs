@@ -5,6 +5,7 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc, OnceLock,
 };
+use tokio::sync::mpsc::UnboundedSender;
 
 static HTTP: OnceLock<reqwest::Client> = OnceLock::new();
 
@@ -284,10 +285,10 @@ pub struct ChatOptions {
     /// `Some(false)` disables it, `None` omits the field so the model's own
     /// default applies.
     pub think: Option<bool>,
-    /// Ollama `options.num_ctx`. Controls the KV-cache window. Default 2048 is
-    /// smaller than our turn-1 prompt (~6k tokens) which forces a silent
-    /// recompute; setting this explicitly lets Ollama reuse the cached prefix
-    /// across turns.
+    /// Ollama `options.num_ctx`. Controls the KV-cache window. 16384 fits a
+    /// typical multi-turn session (system prompt + history + tool context)
+    /// without forcing a mid-session recompute; larger values improve KV-cache
+    /// hit rate but require proportionally more VRAM.
     pub num_ctx: u32,
     /// Ollama `options.num_predict`. Caps completion length — critical for
     /// qwen3-class models that still emit long hidden chains when synthesizing
@@ -306,18 +307,23 @@ pub struct ChatOptions {
     /// increments this counter by 1 (≈ 1 token/chunk). The spinner reads it
     /// atomically every tick to show a live `out:N↑` display.
     pub live_out_tokens: Option<Arc<AtomicU64>>,
+    /// When set, each content chunk from the model is sent to this channel so
+    /// the REPL can stream text to the terminal character-by-character.
+    /// Enables streaming even when `live_out_tokens` is not set.
+    pub text_chunk_tx: Option<UnboundedSender<String>>,
 }
 
 impl Default for ChatOptions {
     fn default() -> Self {
         Self {
             think: None,
-            num_ctx: 8192,
+            num_ctx: 16384,
             num_predict: None,
             temperature: None,
             keep_alive: "30m",
             format: None,
             live_out_tokens: None,
+            text_chunk_tx: None,
         }
     }
 }
@@ -350,7 +356,8 @@ pub async fn chat_with_tools(
     let has_tools = tools.as_array().is_some_and(|a| !a.is_empty());
 
     let mut payload = build_payload(model, messages, options);
-    if options.live_out_tokens.is_some() {
+    let should_stream = options.live_out_tokens.is_some() || options.text_chunk_tx.is_some();
+    if should_stream {
         payload["stream"] = serde_json::Value::Bool(true);
     }
     if has_tools {
@@ -361,8 +368,13 @@ pub async fn chat_with_tools(
         }
     }
 
-    let (status, body) = if let Some(counter) = &options.live_out_tokens {
-        post_chat_streaming(&payload, counter).await?
+    let (status, body) = if should_stream {
+        post_chat_streaming(
+            &payload,
+            options.live_out_tokens.as_ref(),
+            options.text_chunk_tx.as_ref(),
+        )
+        .await?
     } else {
         post_chat(&payload).await?
     };
@@ -469,11 +481,14 @@ If the daemon is not running, start `ollama serve`. Otherwise retry — long too
 /// Streaming variant of [`post_chat`]. Reads NDJSON chunks from Ollama's
 /// `"stream": true` response, accumulates content and tool_calls, and
 /// increments `token_counter` once per content/thinking chunk (≈ 1 per token).
+/// When `text_tx` is set, each raw content chunk is also forwarded for
+/// character-level terminal streaming.
 /// Returns a body shaped identically to the non-streaming response so the rest
 /// of the call stack can stay unchanged.
 async fn post_chat_streaming(
     payload: &serde_json::Value,
-    token_counter: &Arc<AtomicU64>,
+    token_counter: Option<&Arc<AtomicU64>>,
+    text_tx: Option<&UnboundedSender<String>>,
 ) -> Result<(reqwest::StatusCode, serde_json::Value), String> {
     let mut resp = http_client()
         .post(OLLAMA_CHAT_URL)
@@ -529,25 +544,27 @@ async fn post_chat_streaming(
             let msg = ev.get("message");
 
             // Increment live counter for each content or thinking chunk (≈ 1 token).
-            let has_content = msg
+            let chunk_content = msg
                 .and_then(|m| m.get("content"))
                 .and_then(|c| c.as_str())
-                .is_some_and(|s| !s.is_empty());
+                .filter(|s| !s.is_empty());
             let has_thinking = msg
                 .and_then(|m| m.get("thinking"))
                 .and_then(|t| t.as_str())
                 .is_some_and(|s| !s.is_empty());
-            if has_content || has_thinking {
-                token_counter.fetch_add(1, Ordering::Relaxed);
+            if chunk_content.is_some() || has_thinking {
+                if let Some(tc) = token_counter {
+                    tc.fetch_add(1, Ordering::Relaxed);
+                }
             }
 
             // Accumulate content (thinking is intentionally excluded — extract_message strips it).
-            if let Some(c) = msg
-                .and_then(|m| m.get("content"))
-                .and_then(|c| c.as_str())
-                .filter(|s| !s.is_empty())
-            {
+            if let Some(c) = chunk_content {
                 content_buf.push_str(c);
+                // Forward raw chunk to the text streaming channel (terminal streaming).
+                if let Some(tx) = text_tx {
+                    let _ = tx.send(c.to_string());
+                }
             }
 
             // Ollama emits tool_calls as a complete object in a single chunk.

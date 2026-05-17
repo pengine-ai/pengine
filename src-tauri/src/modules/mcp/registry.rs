@@ -187,6 +187,16 @@ impl ToolRegistry {
         self.cached_ollama_tools.clone()
     }
 
+    /// True when every connected provider is a native server (no podman/stdio/http tools).
+    /// Used to select a compact system prompt that omits fetch/filesystem/git instructions.
+    pub fn has_only_native_providers(&self) -> bool {
+        !self.providers.is_empty()
+            && self
+                .providers
+                .iter()
+                .all(|p| matches!(p, Provider::Native(_)))
+    }
+
     /// Tools for one model turn: keyword + **recent-use** ranking, always-on
     /// tools, and (when relevant) memory MCP tools — including while a **full chat
     /// session** is recording (`chat_session_recording`), so the model can call

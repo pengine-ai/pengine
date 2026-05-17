@@ -286,6 +286,10 @@ fn default_config_value() -> serde_json::Value {
             "cron_manager": {
                 "type": "native",
                 "id": "cron_manager"
+            },
+            "skill_manager": {
+                "type": "native",
+                "id": "skill_manager"
             }
         }
     })
@@ -669,6 +673,7 @@ pub async fn rebuild_registry_into_state(
             native::TOOL_MANAGER_ID,
             native::CRON_MANAGER_ID,
             native::TASK_SPAWNER_ID,
+            native::SKILL_MANAGER_ID,
         ] {
             if !cfg.servers.contains_key(id) {
                 cfg.servers
@@ -718,15 +723,33 @@ pub async fn rebuild_registry_into_state(
         }
     }
 
-    // Publish the registry after each *successful* connect so native tools (e.g. dice) are usable
-    // while slow stdio servers (Podman-backed Tool Engine, npx, …) are still connecting. Failed
-    // connects only emit a log line — no need to rebuild the registry.
+    // Two-phase connect: native servers are instantaneous and must be registered before the
+    // agent's first turn; stdio/http servers (Podman, npx, …) can take minutes and are
+    // connected in a background task so the caller is not blocked.
     //
-    // Emit `pengine-registry-changed` after each incremental update so the dashboard reloads MCP
-    // commands as soon as a server connects, instead of waiting for every server in `mcp.json`
-    // (install returns before background rebuild finishes; stdio can take minutes).
+    // Phase 1 — native servers (synchronous, < 1 ms each).
     let mut providers = Vec::new();
     for (server_key, entry) in &cfg.servers {
+        if !matches!(entry, ServerEntry::Native { .. }) {
+            continue;
+        }
+        let (prov, line) = connect_one_server(server_key, entry, Some(state)).await;
+        state.emit_log("mcp", &line).await;
+        let Some(p) = prov else { continue };
+        providers.push(p);
+    }
+    if !providers.is_empty() {
+        *state.mcp.write().await = ToolRegistry::new(providers.clone());
+        emit_registry_changed_event(state).await;
+    }
+
+    // Phase 2 — stdio/http servers (background, incremental publish).
+    // Emit `pengine-registry-changed` after each connect so the dashboard reloads
+    // as soon as a server is ready without waiting for the full set.
+    for (server_key, entry) in &cfg.servers {
+        if matches!(entry, ServerEntry::Native { .. }) {
+            continue;
+        }
         let (prov, line) = connect_one_server(server_key, entry, Some(state)).await;
         state.emit_log("mcp", &line).await;
         let Some(p) = prov else { continue };

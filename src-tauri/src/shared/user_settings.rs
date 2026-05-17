@@ -4,8 +4,9 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// Default cap for the combined skills fragment in the system prompt (bytes, UTF-8).
-pub const DEFAULT_SKILLS_HINT_MAX_BYTES: u32 = 10 * 1024;
-pub const MIN_SKILLS_HINT_MAX_BYTES: u32 = 4 * 1024;
+/// Sized for ~1 500 tokens — enough for 2–3 detailed skills without ballooning context.
+pub const DEFAULT_SKILLS_HINT_MAX_BYTES: u32 = 6 * 1024;
+pub const MIN_SKILLS_HINT_MAX_BYTES: u32 = 1024;
 pub const MAX_SKILLS_HINT_MAX_BYTES: u32 = 256 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

@@ -16,6 +16,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::{atomic::AtomicU64, Arc};
 use std::time::{Duration, Instant};
+use tokio::sync::mpsc::UnboundedSender;
 
 /// Tool rounds + at least one completion-only step. Research flows (sitemap + several
 /// `fetch` calls) otherwise exhaust the loop and fall through to summarize, which
@@ -268,6 +269,7 @@ async fn run_task_spawn_inline(
     let started = std::time::Instant::now();
     // `Box::pin` breaks the cycle [run_model_turn → run_task_spawn_inline → run_system_turn → run_model_turn]
     // that would otherwise produce an infinitely-sized future.
+    // Subagents never stream to the terminal — they run in the background.
     let result = Box::pin(run_system_turn(state, &prompt, None)).await;
     state.task_spawn_depth.fetch_sub(1, Ordering::AcqRel);
 
@@ -827,7 +829,7 @@ pub async fn run_system_turn(
     skills_slug_filter: Option<&[String]>,
 ) -> Result<TurnResult, String> {
     let think = decide_think(None, prompt).enabled();
-    let result = run_model_turn(state, prompt, think, skills_slug_filter, None).await?;
+    let result = run_model_turn(state, prompt, think, skills_slug_filter, None, None).await?;
     let body = result.text.trim();
     if !body.is_empty() {
         let tag = match result.source {
@@ -847,6 +849,7 @@ pub async fn run_turn(
     state: &AppState,
     user_message: &str,
     live_out_tokens: Option<Arc<AtomicU64>>,
+    text_chunk_tx: Option<UnboundedSender<String>>,
 ) -> Result<TurnResult, String> {
     let (think_override, user_message) = parse_think_override(user_message);
 
@@ -870,8 +873,15 @@ pub async fn run_turn(
         .emit_log("run", &format!("think:{}", think.label()))
         .await;
 
-    let mut result =
-        run_model_turn(state, user_message, think.enabled(), None, live_out_tokens).await?;
+    let mut result = run_model_turn(
+        state,
+        user_message,
+        think.enabled(),
+        None,
+        live_out_tokens,
+        text_chunk_tx,
+    )
+    .await?;
     result.think_enabled = think.enabled();
     spawn_memory_save(state, user_message, &result.text).await;
     Ok(result)
@@ -1091,6 +1101,23 @@ async fn build_system_prompt(
         return format!("{PENGINE_OUTPUT_CONTRACT_LEAD}Answer concisely.");
     }
 
+    // Compact prompt when only native tools are connected (no fetch/filesystem/git tools).
+    // Skips the verbose fetch/search/repository instructions that add ~600 tokens of dead weight.
+    let native_only = state.mcp.read().await.has_only_native_providers();
+    if native_only {
+        let skills_raw = skills::skills_prompt_hint_for_turn(
+            &state.store_path,
+            Some(user_message),
+            skills_slug_filter,
+        );
+        let skills_cap = *state.skills_hint_max_bytes.read().await as usize;
+        let (skills_hint, _) = skills::limit_skills_hint_bytes(skills_raw, skills_cap);
+        return format!(
+            "{PENGINE_OUTPUT_CONTRACT_LEAD}Answer from training knowledge. \
+             Use tools when they directly serve the request. Be concise.{skills_hint}"
+        );
+    }
+
     let fs_hint = {
         // Gate on whether the filesystem MCP server is actually connected — checking
         // `workspace_roots` alone wrongly advertises `directory_tree`/`list_directory`
@@ -1267,6 +1294,7 @@ async fn run_model_turn(
     think: bool,
     skills_slug_filter: Option<&[String]>,
     live_out_tokens: Option<Arc<AtomicU64>>,
+    text_chunk_tx: Option<UnboundedSender<String>>,
 ) -> Result<TurnResult, String> {
     let plan_mode = *state.plan_mode.read().await;
     let repo_write_followthrough =
@@ -1405,6 +1433,11 @@ async fn run_model_turn(
             repo_write_followthrough,
         );
         chat_opts.live_out_tokens = live_out_tokens.clone();
+        // Only stream text on first step (step 0) or post-tool synthesis.
+        // Tool-call steps produce empty content so sending is a no-op, but we
+        // only wire the sender when not injecting a post-tool reminder (tool rounds
+        // inject ephemeral system messages that distort the stream position).
+        chat_opts.text_chunk_tx = text_chunk_tx.clone();
 
         let inject_post_tool = post_tool;
         if inject_post_tool {

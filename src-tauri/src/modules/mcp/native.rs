@@ -1,5 +1,6 @@
 use super::types::ToolDef;
 use crate::modules::mcp::service as mcp_service;
+use crate::modules::skills::service as skills_service;
 use crate::modules::tool_engine::runtime as tool_engine_runtime;
 use crate::modules::tool_engine::service as tool_engine_service;
 use crate::shared::state::AppState;
@@ -17,6 +18,9 @@ pub const CRON_MANAGER_ID: &str = "cron_manager";
 /// Server key / native id used in `mcp.json` for the built-in task spawner.
 pub const TASK_SPAWNER_ID: &str = "task_spawner";
 
+/// Server key / native id used in `mcp.json` for the built-in skill manager.
+pub const SKILL_MANAGER_ID: &str = "skill_manager";
+
 /// Hard cap on `task_spawn` recursion. A value of 1 means: a top-level turn may
 /// spawn child tasks, but those child tasks cannot spawn further children.
 /// Bumping this allows deeper trees but multiplies cost and latency exponentially.
@@ -26,6 +30,7 @@ enum NativeKind {
     Dice,
     ToolManager(AppState),
     CronManager(AppState),
+    SkillManager(AppState),
     /// Task spawner: tool definition only. The actual recursive `run_model_turn`
     /// is invoked by the agent dispatcher, not via [`Provider::call_tool`], so
     /// that `Provider::call_tool`'s future stays `Send` (parallel tool dispatch
@@ -48,6 +53,7 @@ impl NativeProvider {
             NativeKind::Dice => handle_dice(tool_name, args),
             NativeKind::ToolManager(state) => handle_tool_manager(tool_name, args, state).await,
             NativeKind::CronManager(state) => handle_cron_manager(tool_name, args, state).await,
+            NativeKind::SkillManager(state) => handle_skill_manager(tool_name, args, state).await,
             NativeKind::TaskSpawner => Err(
                 "task_spawn is dispatched by the agent loop, not via Provider::call_tool. \
                  If you see this error, the dispatcher missed an interception point."
@@ -678,6 +684,187 @@ async fn set_cron_enabled(state: &AppState, job_id: &str, enabled: bool) -> Resu
     Ok(format!("Job '{}' {verb}.", updated.name))
 }
 
+// ── Skill Manager ───────────────────────────────────────────────────
+
+pub fn skill_manager_named(server_key: &str, state: AppState) -> NativeProvider {
+    NativeProvider {
+        server_name: server_key.to_string(),
+        tools: vec![{
+            let mut t = ToolDef {
+                server_name: server_key.to_string(),
+                name: "manage_skills".to_string(),
+                description: Some(
+                    "Create, list, or delete custom skills (reusable agent recipes). \
+                     Use 'list' to see all installed skills. \
+                     Use 'create' to write a new skill (or overwrite an existing one) from scratch — \
+                     provide slug, name, description, body, and optionally tags and mandatory. \
+                     Use 'delete' to remove a custom skill by slug. \
+                     When a workflow requires many steps or domain-specific knowledge, \
+                     save it as a skill so future agent turns find and reuse the recipe automatically."
+                        .to_string(),
+                ),
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["action"],
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["list", "create", "delete"],
+                            "description": "'list' lists all skills; 'create' writes/overwrites a skill; 'delete' removes a custom skill by slug"
+                        },
+                        "slug": {
+                            "type": "string",
+                            "description": "Required for 'create' and 'delete'. Lowercase a-z 0-9 hyphens/underscores, 1–64 chars (e.g. 'my-recipe')."
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": "Human-readable display name (for 'create')."
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": "One-line description of what this skill does (for 'create')."
+                        },
+                        "body": {
+                            "type": "string",
+                            "description": "Markdown recipe body shown to the agent at each matching turn (for 'create'). Include concrete URLs, steps, and examples."
+                        },
+                        "tags": {
+                            "type": "string",
+                            "description": "Optional comma-separated tags (for 'create'), e.g. 'weather, forecast'."
+                        },
+                        "mandatory": {
+                            "type": "string",
+                            "description": "Optional strict rules always injected before other skills (for 'create'). Omit or leave empty to skip."
+                        }
+                    }
+                }),
+                direct_return: false,
+                category: None,
+                risk: super::types::ToolRisk::Low,
+            };
+            super::tool_metadata::apply(&mut t);
+            t
+        }],
+        kind: NativeKind::SkillManager(state),
+    }
+}
+
+async fn handle_skill_manager(
+    _tool_name: &str,
+    args: &Value,
+    state: &AppState,
+) -> Result<String, String> {
+    let action = args
+        .get("action")
+        .and_then(|v| v.as_str())
+        .ok_or("missing 'action' parameter")?;
+
+    match action {
+        "list" => {
+            let skills = skills_service::list_skills(&state.store_path);
+            if skills.is_empty() {
+                return Ok("No skills installed.".to_string());
+            }
+            let lines: Vec<String> = skills
+                .iter()
+                .map(|s| {
+                    let status = if s.enabled { "enabled" } else { "disabled" };
+                    let origin = format!("{:?}", s.origin).to_lowercase();
+                    format!("- {} (slug: {}, {}, {})", s.name, s.slug, origin, status)
+                })
+                .collect();
+            Ok(format!("Skills:\n{}", lines.join("\n")))
+        }
+        "create" => {
+            let slug = args
+                .get("slug")
+                .and_then(|v| v.as_str())
+                .ok_or("missing 'slug' for create")?
+                .trim();
+            let name = args
+                .get("name")
+                .and_then(|v| v.as_str())
+                .ok_or("missing 'name' for create")?
+                .trim();
+            let description = args
+                .get("description")
+                .and_then(|v| v.as_str())
+                .ok_or("missing 'description' for create")?
+                .trim();
+            let body = args
+                .get("body")
+                .and_then(|v| v.as_str())
+                .ok_or("missing 'body' for create")?
+                .trim();
+
+            let tags_raw = args
+                .get("tags")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            let tags_line = if tags_raw.is_empty() {
+                "tags: []".to_string()
+            } else {
+                let tags: Vec<String> = tags_raw
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+                    .collect();
+                format!("tags: [{}]", tags.join(", "))
+            };
+
+            let markdown = format!(
+                "---\nname: {name}\ndescription: {description}\n{tags_line}\n---\n\n{body}\n"
+            );
+
+            let mandatory_raw = args.get("mandatory").and_then(|v| v.as_str());
+            let mandatory_update = mandatory_raw.map(str::trim);
+
+            let skill = tokio::task::spawn_blocking({
+                let store = state.store_path.clone();
+                let slug = slug.to_string();
+                let markdown = markdown.clone();
+                let mandatory = mandatory_update.map(str::to_string);
+                move || {
+                    skills_service::write_custom_skill(
+                        &store,
+                        &slug,
+                        &markdown,
+                        mandatory.as_deref(),
+                    )
+                }
+            })
+            .await
+            .map_err(|e| format!("skill write task: {e}"))??;
+
+            Ok(format!(
+                "Skill '{}' (slug: {}) created successfully. \
+                 It will appear in future agent turns when the topic matches.",
+                skill.name, skill.slug
+            ))
+        }
+        "delete" => {
+            let slug = args
+                .get("slug")
+                .and_then(|v| v.as_str())
+                .ok_or("missing 'slug' for delete")?
+                .trim();
+
+            let slug_owned = slug.to_string();
+            let store = state.store_path.clone();
+            tokio::task::spawn_blocking(move || {
+                skills_service::delete_custom_skill(&store, &slug_owned)
+            })
+            .await
+            .map_err(|e| format!("skill delete task: {e}"))??;
+
+            Ok(format!("Skill '{slug}' deleted."))
+        }
+        _ => Err(format!("unknown action: {action}")),
+    }
+}
+
 // ── Task Spawner ────────────────────────────────────────────────────
 
 pub fn task_spawner_named(server_key: &str) -> NativeProvider {
@@ -739,6 +926,10 @@ pub fn native_for(
         CRON_MANAGER_ID => {
             let state = app_state.ok_or_else(|| format!("{CRON_MANAGER_ID} requires AppState"))?;
             Ok(cron_manager_named(server_key, state.clone()))
+        }
+        SKILL_MANAGER_ID => {
+            let state = app_state.ok_or_else(|| format!("{SKILL_MANAGER_ID} requires AppState"))?;
+            Ok(skill_manager_named(server_key, state.clone()))
         }
         TASK_SPAWNER_ID => Ok(task_spawner_named(server_key)),
         _ => Err(format!("unknown native id: {id}")),

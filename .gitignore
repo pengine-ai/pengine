@@ -32,3 +32,6 @@ test-results/
 .pengine
 # Apple signing
 certificate-base64.txt
+
+# Parity test metrics (local history, not for VCS)
+src-tauri/parity-results.ndjson
