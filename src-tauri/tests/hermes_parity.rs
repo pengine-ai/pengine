@@ -317,8 +317,12 @@ fn ask_with_timeout(prompt: &str, secs: u64) -> RunResult {
         "  ← [{:.1}s] kind={} in={} out={} | reply: {:?}",
         elapsed.as_secs_f64(),
         envelope.reply.kind,
-        in_tokens.map(|t| t.to_string()).unwrap_or_else(|| "?".into()),
-        out_tokens.map(|t| t.to_string()).unwrap_or_else(|| "?".into()),
+        in_tokens
+            .map(|t| t.to_string())
+            .unwrap_or_else(|| "?".into()),
+        out_tokens
+            .map(|t| t.to_string())
+            .unwrap_or_else(|| "?".into()),
         envelope.reply.body.chars().take(80).collect::<String>(),
     );
     RunResult {
@@ -580,7 +584,11 @@ fn token_budget_simple_query() {
         r.in_tokens.map(|t| format!("in_tokens={t}")).as_deref(),
     );
 
-    assert!(content_ok, "expected PONG in reply: {}", r.envelope.reply.body);
+    assert!(
+        content_ok,
+        "expected PONG in reply: {}",
+        r.envelope.reply.body
+    );
     if let Some(t) = r.in_tokens {
         assert!(
             t < 3000,
@@ -593,7 +601,10 @@ fn token_budget_simple_query() {
             r.elapsed.as_secs_f64()
         );
     } else {
-        eprintln!("  (audit log unavailable — skipping budget assert)  {:.2}s", r.elapsed.as_secs_f64());
+        eprintln!(
+            "  (audit log unavailable — skipping budget assert)  {:.2}s",
+            r.elapsed.as_secs_f64()
+        );
     }
 }
 
@@ -635,7 +646,11 @@ fn skills_gate_weather_skill_injects() {
     };
     record("skills_gate_weather", &r_wx, content_ok, Some(&note));
 
-    assert!(content_ok, "weather query returned empty reply: {}", r_wx.envelope.reply.body);
+    assert!(
+        content_ok,
+        "weather query returned empty reply: {}",
+        r_wx.envelope.reply.body
+    );
 
     if let (Some(base), Some(wx)) = (base_tokens, wx_tokens) {
         let diff = wx as i64 - base as i64;
@@ -656,7 +671,10 @@ fn skills_gate_weather_skill_injects() {
         );
         eprintln!("  ✓ skill injection confirmed (+{diff} tokens)");
     } else {
-        eprintln!("  (audit log unavailable — skipping injection assert)  {:.2}s", r_wx.elapsed.as_secs_f64());
+        eprintln!(
+            "  (audit log unavailable — skipping injection assert)  {:.2}s",
+            r_wx.elapsed.as_secs_f64()
+        );
     }
 }
 
@@ -690,10 +708,7 @@ fn skills_gate_offtopic_stays_compact() {
             t < 3000,
             "off-topic query used {t} tokens — skill injection may be leaking (budget: 3000)",
         );
-        eprintln!(
-            "  in={t}  {:.2}s  ✓ compact",
-            r.elapsed.as_secs_f64()
-        );
+        eprintln!("  in={t}  {:.2}s  ✓ compact", r.elapsed.as_secs_f64());
     } else {
         eprintln!("  (audit log unavailable)  {:.2}s", r.elapsed.as_secs_f64());
     }
@@ -728,13 +743,19 @@ fn mcp_time_tool_reports_time() {
         || body.to_lowercase().contains("time");
     let passed = r.envelope.reply.kind == "text" && looks_like_time;
 
-    record("mcp_time_tool", &r, passed, Some(&format!("reply_snippet={}", &body[..body.len().min(60)])));
-
-    assert!(
+    record(
+        "mcp_time_tool",
+        &r,
         passed,
-        "expected time-like string in reply, got: {body}"
+        Some(&format!("reply_snippet={}", &body[..body.len().min(60)])),
     );
-    eprintln!("  time reply: {:?}  {:.2}s", &body[..body.len().min(60)], r.elapsed.as_secs_f64());
+
+    assert!(passed, "expected time-like string in reply, got: {body}");
+    eprintln!(
+        "  time reply: {:?}  {:.2}s",
+        &body[..body.len().min(60)],
+        r.elapsed.as_secs_f64()
+    );
 }
 
 // ── context window ────────────────────────────────────────────────────────────
@@ -882,7 +903,10 @@ fn zzz_print_parity_summary() {
         let avg_in_tok = if in_tok_runs.is_empty() {
             "   –".into()
         } else {
-            format!("{:>8}", in_tok_runs.iter().sum::<u64>() / in_tok_runs.len() as u64)
+            format!(
+                "{:>8}",
+                in_tok_runs.iter().sum::<u64>() / in_tok_runs.len() as u64
+            )
         };
         eprintln!(
             "║  {indicator} {:<29} {:>5}  {:>5}%  {:>7}ms  {avg_in_tok}  ║",

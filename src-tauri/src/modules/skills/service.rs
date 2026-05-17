@@ -1239,7 +1239,8 @@ mod tests {
         let tmp = tempdir().unwrap();
         let fake_store = tmp.path().join("connection.json");
         // mandatory:true so the skill passes the hint gate without needing a matching user message.
-        let weather_md = "---\nname: weather\ndescription: test\ntags: []\nmandatory: true\n---\n\n# x\n";
+        let weather_md =
+            "---\nname: weather\ndescription: test\ntags: []\nmandatory: true\n---\n\n# x\n";
         let mandatory = "**MANDATORY for skill:weather:** use wttr.in; Open-Meteo retry with countryCode; see How to answer.\n";
         write_custom_skill(&fake_store, "weather", weather_md, Some(mandatory)).unwrap();
         let hint = skills_prompt_hint(&fake_store);
@@ -1410,13 +1411,25 @@ mod tests {
         write_custom_skill(&fake_store, "skill-b", b, None).unwrap();
         // Use position lookup rather than [0] — bundled skills may sort before the custom ones.
         let alpha = list_skills(&fake_store);
-        let pa = alpha.iter().position(|s| s.slug == "skill-a").expect("skill-a");
-        let pb = alpha.iter().position(|s| s.slug == "skill-b").expect("skill-b");
+        let pa = alpha
+            .iter()
+            .position(|s| s.slug == "skill-a")
+            .expect("skill-a");
+        let pb = alpha
+            .iter()
+            .position(|s| s.slug == "skill-b")
+            .expect("skill-b");
         assert!(pa < pb, "skill-a should precede skill-b in default order");
         set_skill_slug_order(&fake_store, &["skill-b".into(), "skill-a".into()]).unwrap();
         let re = list_skills(&fake_store);
-        let rb = re.iter().position(|s| s.slug == "skill-b").expect("skill-b");
-        let ra = re.iter().position(|s| s.slug == "skill-a").expect("skill-a");
+        let rb = re
+            .iter()
+            .position(|s| s.slug == "skill-b")
+            .expect("skill-b");
+        let ra = re
+            .iter()
+            .position(|s| s.slug == "skill-a")
+            .expect("skill-a");
         assert!(rb < ra, "skill-b should precede skill-a after order change");
     }
 }
