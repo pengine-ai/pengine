@@ -67,9 +67,9 @@ export function createPengineViteLogger(
     const env = opts.environment ? `${opts.environment} ` : "";
     const lvl = type.toUpperCase();
     if (opts.timestamp) {
-      return `${timeFmt.format(new Date())} [pengine:dev] [${lvl}] ${env}${msg}`;
+      return `${timeFmt.format(new Date())} (pengine:dev) [${lvl}] ${env}${msg}`;
     }
-    return `[pengine:dev] [${lvl}] ${env}${msg}`;
+    return `(pengine:dev) [${lvl}] ${env}${msg}`;
   }
 
   function output(type: LogType, msg: string, opts: LogOptions = {}) {

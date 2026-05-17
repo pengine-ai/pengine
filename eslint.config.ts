@@ -14,6 +14,21 @@ export default tseslint.config(
       "test-results/**",
     ],
   },
+  // Node ESM smoke scripts under tools/ (console + process; not browser code).
+  {
+    files: ["tools/mcp-probe-filemanager/**/*.mjs"],
+    languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: "module",
+      globals: {
+        console: "readonly",
+        process: "readonly",
+      },
+    },
+    rules: {
+      "no-console": "off",
+    },
+  },
   {
     files: ["**/*.{ts,tsx,js,jsx}"],
     plugins: {

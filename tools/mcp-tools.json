@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-04-14T00:00:00Z",
-  "catalog_revision": 7,
-  "valid_until": "2026-05-14T00:00:00Z",
+  "generated_at": "2026-04-29T00:00:00Z",
+  "catalog_revision": 8,
+  "valid_until": "2026-05-29T00:00:00Z",
   "minimum_pengine_version": "0.5.0",
   "tools": [
     {
@@ -42,7 +42,7 @@
         { "name": "list_directory_with_sizes", "description": "List directory with sizes and optional sort" },
         { "name": "move_file", "description": "Move or rename a file or directory" },
         { "name": "search_files", "description": "Recursive glob search under a path" },
-        { "name": "directory_tree", "description": "Recursive JSON tree of directory contents" },
+        { "name": "directory_tree", "description": "Recursive JSON tree; requires absolute `path` under a mounted root (e.g. /app/<folder>)" },
         { "name": "get_file_info", "description": "Metadata: size, times, type, permissions" },
         { "name": "list_allowed_directories", "description": "List MCP roots currently allowed" }
       ],
@@ -240,6 +240,188 @@
         { "name": "brave_image_search", "description": "Image search with automatic fetching" },
         { "name": "brave_news_search", "description": "News search with freshness controls and breaking-news indicators" },
         { "name": "brave_summarizer", "description": "AI-powered summaries from web search results" }
+      ],
+      "limits": {
+        "cpus": "0.5",
+        "memory": "512m",
+        "timeout_secs": 60
+      }
+    },
+    {
+      "id": "pengine/shell",
+      "name": "Shell",
+      "description": "Sandboxed shell-exec MCP. Runs commands inside the container; only paths you bind via MCP folders are visible to it. Pair with `pengine/file-manager` so the model can build, test, and run code it just wrote (Claude Code `Bash` parity).",
+      "image": "ghcr.io/pengine-ai/pengine-shell",
+      "current": "0.1.0",
+      "versions": [
+        {
+          "version": "0.1.0",
+          "digest": "sha256:placeholder",
+          "released_at": "2026-04-29T00:00:00Z",
+          "yanked": false,
+          "revoked": false,
+          "security": false
+        }
+      ],
+      "container_read_only_rootfs": false,
+      "mount_read_only": false,
+      "mount_workspace": true,
+      "append_workspace_roots": false,
+      "direct_return": false,
+      "upstream_mcp_npm": {
+        "package": "@mako10k/mcp-shell-server",
+        "version": "2.7.1"
+      },
+      "mcp_server_cmd": [],
+      "commands": [
+        { "name": "shell_execute", "description": "Run a shell command (foreground / background / detached / adaptive)" },
+        { "name": "process_get_execution", "description": "Detailed execution info for a previous run" },
+        { "name": "shell_set_default_workdir", "description": "Set the default working directory for subsequent shell calls" },
+        { "name": "process_list", "description": "List running processes with filtering" },
+        { "name": "process_terminate", "description": "Terminate a process with a specific signal" },
+        { "name": "process_monitor", "description": "Start real-time monitoring for a running process" },
+        { "name": "terminal_create", "description": "Create an interactive PTY-backed terminal session" },
+        { "name": "terminal_send_input", "description": "Send input (with control codes) to a terminal" },
+        { "name": "terminal_get_output", "description": "Read terminal output (ANSI-aware)" },
+        { "name": "terminal_get_info", "description": "Get terminal session details" },
+        { "name": "terminal_resize", "description": "Resize a terminal session" },
+        { "name": "terminal_close", "description": "Close a terminal session" },
+        { "name": "list_execution_outputs", "description": "List captured output files" },
+        { "name": "read_execution_output", "description": "Read a captured output file" },
+        { "name": "delete_execution_outputs", "description": "Delete captured output files" },
+        { "name": "get_cleanup_suggestions", "description": "Recommend output files to clean up" },
+        { "name": "perform_auto_cleanup", "description": "Apply retention policies to captured outputs" },
+        { "name": "security_set_restrictions", "description": "Set runtime security restrictions" },
+        { "name": "monitoring_get_stats", "description": "System-wide stats from the shell MCP" }
+      ],
+      "limits": {
+        "cpus": "1.0",
+        "memory": "1024m",
+        "timeout_secs": 300
+      }
+    },
+    {
+      "id": "pengine/ripgrep",
+      "name": "Ripgrep",
+      "description": "High-throughput content search across mounted folders via the `rg` binary (Claude Code `Grep` parity). Use with `pengine/file-manager` for navigation; this server is read-only.",
+      "image": "ghcr.io/pengine-ai/pengine-ripgrep",
+      "current": "0.1.0",
+      "versions": [
+        {
+          "version": "0.1.0",
+          "digest": "sha256:placeholder",
+          "released_at": "2026-04-29T00:00:00Z",
+          "yanked": false,
+          "revoked": false,
+          "security": false
+        }
+      ],
+      "container_read_only_rootfs": true,
+      "mount_read_only": true,
+      "mount_workspace": true,
+      "append_workspace_roots": false,
+      "direct_return": false,
+      "network_isolated": true,
+      "upstream_mcp_npm": {
+        "package": "mcp-ripgrep",
+        "version": "0.4.0"
+      },
+      "mcp_server_cmd": [],
+      "commands": [
+        { "name": "search", "description": "ripgrep search with regex, file-type filters, and context lines" },
+        { "name": "advanced-search", "description": "Search with extra ripgrep flags (multiline, fixed-strings, glob, …)" },
+        { "name": "list-files", "description": "List files ripgrep would search under a path (respects .gitignore)" },
+        { "name": "list-file-types", "description": "List the file-type aliases ripgrep understands" }
+      ],
+      "limits": {
+        "cpus": "1.0",
+        "memory": "512m",
+        "timeout_secs": 60
+      }
+    },
+    {
+      "id": "pengine/lsp",
+      "name": "Language Server (LSP)",
+      "description": "Code intelligence via cclsp: go-to-definition, find-references, rename, diagnostics. Image bakes in TypeScript, Python, Go, and Rust LSPs (typescript-language-server, pylsp, gopls, rust-analyzer). Extend by deriving from this image and editing `/mcp/cclsp.json`.",
+      "image": "ghcr.io/pengine-ai/pengine-lsp",
+      "current": "0.1.0",
+      "versions": [
+        {
+          "version": "0.1.0",
+          "digest": "sha256:placeholder",
+          "released_at": "2026-04-29T00:00:00Z",
+          "yanked": false,
+          "revoked": false,
+          "security": false
+        }
+      ],
+      "container_read_only_rootfs": false,
+      "mount_read_only": false,
+      "mount_workspace": true,
+      "append_workspace_roots": false,
+      "direct_return": false,
+      "upstream_mcp_npm": {
+        "package": "cclsp",
+        "version": "0.7.0"
+      },
+      "mcp_server_cmd": [],
+      "commands": [
+        { "name": "find_definition", "description": "Find the definition of a symbol by name and kind in a file" },
+        { "name": "find_references", "description": "Find all references to a symbol across the workspace" },
+        { "name": "rename_symbol", "description": "Rename a symbol across the workspace (supports dry-run)" },
+        { "name": "rename_symbol_strict", "description": "Rename a symbol at a specific position in a file" },
+        { "name": "get_diagnostics", "description": "Errors / warnings / hints for a file from the language server" },
+        { "name": "restart_server", "description": "Restart one or all backing LSP servers" }
+      ],
+      "limits": {
+        "cpus": "1.0",
+        "memory": "1024m",
+        "timeout_secs": 120
+      }
+    },
+    {
+      "id": "pengine/notebook",
+      "name": "Notebook",
+      "description": "Jupyter-notebook (`.ipynb`) editor MCP — create, edit, move, search cells without a running kernel (Claude Code `NotebookEdit` parity). Operates on files under your mounted folders; `--allow-root /app` is baked in.",
+      "image": "ghcr.io/pengine-ai/pengine-notebook",
+      "current": "0.1.0",
+      "versions": [
+        {
+          "version": "0.1.0",
+          "digest": "sha256:placeholder",
+          "released_at": "2026-04-29T00:00:00Z",
+          "yanked": false,
+          "revoked": false,
+          "security": false
+        }
+      ],
+      "container_read_only_rootfs": false,
+      "mount_read_only": false,
+      "mount_workspace": true,
+      "append_workspace_roots": false,
+      "direct_return": false,
+      "upstream_mcp_pypi": {
+        "package": "cursor-notebook-mcp",
+        "version": "0.3.1"
+      },
+      "mcp_server_cmd": [],
+      "commands": [
+        { "name": "notebook_create", "description": "Create a new empty notebook file" },
+        { "name": "notebook_delete", "description": "Delete a notebook file" },
+        { "name": "notebook_rename", "description": "Move or rename a notebook" },
+        { "name": "notebook_read", "description": "Read full notebook structure" },
+        { "name": "notebook_read_cell", "description": "Read a single cell's source" },
+        { "name": "notebook_add_cell", "description": "Insert a code/markdown cell after a given index" },
+        { "name": "notebook_edit_cell", "description": "Replace a cell's source content" },
+        { "name": "notebook_delete_cell", "description": "Delete a cell at a given index" },
+        { "name": "notebook_change_cell_type", "description": "Convert between code / markdown / raw" },
+        { "name": "notebook_duplicate_cell", "description": "Duplicate a cell N times" },
+        { "name": "notebook_get_cell_count", "description": "Total cell count" },
+        { "name": "notebook_read_metadata", "description": "Read notebook-level metadata" },
+        { "name": "notebook_edit_metadata", "description": "Update notebook-level metadata" },
+        { "name": "notebook_search", "description": "Search across cells with context" },
+        { "name": "notebook_export", "description": "Export to Python / HTML / PDF" },
+        { "name": "notebook_validate", "description": "Validate against the nbformat schema" }
       ],
       "limits": {
         "cpus": "0.5",

@@ -1,4 +1,5 @@
 pub mod client;
+pub mod http_transport;
 pub mod native;
 pub mod protocol;
 pub mod registry;

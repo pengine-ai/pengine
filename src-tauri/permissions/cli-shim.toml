@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-cli-shim"
+description = "Install or remove the terminal `pengine-cli` launcher (script that runs the app binary with CLI-only mode)."
+commands.allow = ["cli_shim_status", "cli_shim_install", "cli_shim_remove"]

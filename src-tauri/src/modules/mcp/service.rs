@@ -54,6 +54,19 @@ pub fn read_config(path: &Path) -> Result<McpConfig, String> {
         )
     })?;
 
+    // Claude Code config shape compat: when the file uses Anthropic's
+    // `mcpServers: { name: { command|url, args, env, type } }` shape (no
+    // `servers` key), translate to pengine's internal layout. Lets users
+    // drop a Claude-style `mcp.json` straight in.
+    if value.get("servers").is_none() && value.get("mcpServers").is_some() {
+        let servers = parse_claude_mcp_servers(&value)?;
+        return Ok(McpConfig {
+            workspace_roots: Vec::new(),
+            servers,
+            custom_tools: Vec::new(),
+        });
+    }
+
     // Must run before serde deserialises into `ServerEntry::Stdio` — the old field name
     // (`catalog_passthrough`) no longer exists on the struct, so a plain `from_value` would
     // silently drop any pre-migration secrets that are still sitting in `mcp.json`.
@@ -349,6 +362,105 @@ pub fn load_or_init_config(path: &Path) -> Result<McpConfig, String> {
 
 /// Connect one server from config (native or stdio). Shared by tests and incremental rebuilds.
 /// `app_state` is needed for stateful native tools (e.g. `tool_manager`); pass `None` in tests.
+/// Translate Claude Code's `{ "mcpServers": {...} }` shape into pengine's
+/// internal `BTreeMap<String, ServerEntry>`. Each entry is interpreted as:
+/// - `type == "http"` (or `"sse"`, or no type with a `url`) → [`ServerEntry::Http`]
+/// - `type == "stdio"` (or no type with a `command`) → [`ServerEntry::Stdio`]
+/// - anything else → an error tagged with the offending server name
+pub fn parse_claude_mcp_servers(
+    raw: &serde_json::Value,
+) -> Result<std::collections::BTreeMap<String, ServerEntry>, String> {
+    let map = raw
+        .get("mcpServers")
+        .and_then(|v| v.as_object())
+        .ok_or_else(|| "no `mcpServers` key".to_string())?;
+    let mut out = std::collections::BTreeMap::new();
+    for (name, server) in map {
+        let entry = parse_claude_one_server(server).map_err(|e| format!("server `{name}`: {e}"))?;
+        out.insert(name.clone(), entry);
+    }
+    Ok(out)
+}
+
+fn parse_claude_one_server(s: &serde_json::Value) -> Result<ServerEntry, String> {
+    let kind = s.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    let has_url = s.get("url").is_some();
+    let has_command = s.get("command").is_some();
+
+    if kind == "http" || kind == "sse" || (kind.is_empty() && has_url && !has_command) {
+        let url = s
+            .get("url")
+            .and_then(|v| v.as_str())
+            .ok_or("http server requires `url`")?
+            .to_string();
+        let headers = string_string_map(s.get("headers"));
+        return Ok(ServerEntry::Http {
+            url,
+            headers,
+            direct_return: s
+                .get("direct_return")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+        });
+    }
+    if kind == "stdio" || kind.is_empty() {
+        let command = s
+            .get("command")
+            .and_then(|v| v.as_str())
+            .ok_or("stdio server requires `command`")?
+            .to_string();
+        let args = s
+            .get("args")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(str::to_string))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let env = string_string_map(s.get("env"));
+        return Ok(ServerEntry::Stdio {
+            command,
+            args,
+            env,
+            direct_return: s
+                .get("direct_return")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            private_host_path: None,
+            catalog_passthrough_keys: Vec::new(),
+        });
+    }
+    Err(format!("unsupported `type`: `{kind}`"))
+}
+
+fn string_string_map(v: Option<&serde_json::Value>) -> std::collections::HashMap<String, String> {
+    v.and_then(|v| v.as_object())
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, val)| val.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Read a project-local `.mcp.json` (Claude Code shape) at `cwd`, if present.
+/// Returns `None` if the file is absent or unparseable. Project servers are
+/// merged into the live registry only — they are never persisted to the
+/// global `mcp.json`.
+pub fn load_project_mcp_servers(
+    cwd: &Path,
+) -> Option<(PathBuf, std::collections::BTreeMap<String, ServerEntry>)> {
+    let path = cwd.join(".mcp.json");
+    if !path.is_file() {
+        return None;
+    }
+    let raw = std::fs::read_to_string(&path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let servers = parse_claude_mcp_servers(&value).ok()?;
+    Some((path, servers))
+}
+
 pub async fn connect_one_server(
     server_key: &str,
     entry: &ServerEntry,
@@ -397,6 +509,27 @@ pub async fn connect_one_server(
                 Err(e) => (None, format!("{server_key} stdio failed: {e}")),
             }
         }
+        ServerEntry::Http {
+            url,
+            headers,
+            direct_return,
+        } => match McpClient::connect_http(
+            server_key.to_string(),
+            url.clone(),
+            headers.clone(),
+            *direct_return,
+        )
+        .await
+        {
+            Ok(client) => {
+                let n = client.tools().len();
+                let cmd_word = if n == 1 { "command" } else { "commands" };
+                let dr = if *direct_return { " direct_return" } else { "" };
+                let msg = format!("{server_key} http ({n} {cmd_word}{dr})");
+                (Some(Provider::Mcp(Arc::new(client))), msg)
+            }
+            Err(e) => (None, format!("{server_key} http failed: {e}")),
+        },
     }
 }
 
@@ -473,7 +606,7 @@ pub async fn rebuild_registry_into_state(
 ) -> Result<(), String> {
     let _rebuild = state.mcp_rebuild_mutex.lock().await;
     let catalog_result = crate::modules::tool_engine::service::load_catalog().await;
-    let cfg = {
+    let mut cfg = {
         let _cfg_guard = state.mcp_config_mutex.lock().await;
         let mut cfg = match load_or_init_config(&state.mcp_config_path) {
             Ok(c) => c,
@@ -532,7 +665,11 @@ pub async fn rebuild_registry_into_state(
 
         // Ensure built-in native tools are always present (auto-add for existing configs).
         let mut inserted_any = false;
-        for id in [native::TOOL_MANAGER_ID, native::CRON_MANAGER_ID] {
+        for id in [
+            native::TOOL_MANAGER_ID,
+            native::CRON_MANAGER_ID,
+            native::TASK_SPAWNER_ID,
+        ] {
             if !cfg.servers.contains_key(id) {
                 cfg.servers
                     .insert(id.to_string(), ServerEntry::Native { id: id.to_string() });
@@ -558,6 +695,28 @@ pub async fn rebuild_registry_into_state(
     }
 
     *state.cached_filesystem_paths.write().await = filesystem_allowed_paths(&cfg);
+
+    // Project-local `.mcp.json` (Claude Code shape) overlays the global config
+    // for this rebuild only — it is never persisted. Project keys win on
+    // collision so a workspace can override a globally-configured server.
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Some((proj_path, proj_servers)) = load_project_mcp_servers(&cwd) {
+            let n = proj_servers.len();
+            for (k, v) in proj_servers {
+                cfg.servers.insert(k, v);
+            }
+            state
+                .emit_log(
+                    "mcp",
+                    &format!(
+                        "loaded project `.mcp.json` ({} server(s)) from {}",
+                        n,
+                        proj_path.display()
+                    ),
+                )
+                .await;
+        }
+    }
 
     // Publish the registry after each *successful* connect so native tools (e.g. dice) are usable
     // while slow stdio servers (Podman-backed Tool Engine, npx, …) are still connecting. Failed
@@ -698,5 +857,86 @@ mod tests {
         );
         assert_eq!(tool_id_from_catalog_server_key("te_custom_my-tool"), None);
         assert_eq!(tool_id_from_catalog_server_key("dice"), None);
+    }
+
+    #[test]
+    fn parse_claude_servers_translates_stdio_and_http() {
+        let raw: serde_json::Value = serde_json::from_str(
+            r#"{
+                "mcpServers": {
+                    "fs":  { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/x"] },
+                    "gh":  { "type": "http", "url": "https://example.com/mcp", "headers": { "Authorization": "Bearer t" } },
+                    "sse": { "type": "sse", "url": "https://example.com/sse" }
+                }
+            }"#,
+        )
+        .unwrap();
+        let parsed = parse_claude_mcp_servers(&raw).unwrap();
+        match parsed.get("fs").unwrap() {
+            ServerEntry::Stdio { command, args, .. } => {
+                assert_eq!(command, "npx");
+                assert_eq!(args.len(), 3);
+            }
+            _ => panic!("expected stdio for fs"),
+        }
+        match parsed.get("gh").unwrap() {
+            ServerEntry::Http { url, headers, .. } => {
+                assert_eq!(url, "https://example.com/mcp");
+                assert_eq!(headers.get("Authorization").unwrap(), "Bearer t");
+            }
+            _ => panic!("expected http for gh"),
+        }
+        match parsed.get("sse").unwrap() {
+            ServerEntry::Http { url, .. } => assert_eq!(url, "https://example.com/sse"),
+            _ => panic!("expected http for sse"),
+        }
+    }
+
+    #[test]
+    fn parse_claude_servers_rejects_unknown_type() {
+        let raw: serde_json::Value =
+            serde_json::from_str(r#"{"mcpServers":{"x":{"type":"weird"}}}"#).unwrap();
+        let err = parse_claude_mcp_servers(&raw).unwrap_err();
+        assert!(err.contains("server `x`"));
+    }
+
+    #[test]
+    fn read_config_accepts_claude_shape() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("claude.json");
+        std::fs::write(
+            &path,
+            r#"{"mcpServers":{"echo":{"command":"true","args":["a","b"]}}}"#,
+        )
+        .unwrap();
+        let cfg = read_config(&path).unwrap();
+        assert_eq!(cfg.servers.len(), 1);
+        assert!(matches!(
+            cfg.servers.get("echo").unwrap(),
+            ServerEntry::Stdio { .. }
+        ));
+    }
+
+    #[test]
+    fn load_project_mcp_servers_returns_none_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(load_project_mcp_servers(dir.path()).is_none());
+    }
+
+    #[test]
+    fn load_project_mcp_servers_parses_present_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".mcp.json"),
+            r#"{"mcpServers":{"x":{"type":"http","url":"https://x.example"}}}"#,
+        )
+        .unwrap();
+        let (path, servers) = load_project_mcp_servers(dir.path()).unwrap();
+        assert!(path.ends_with(".mcp.json"));
+        assert_eq!(servers.len(), 1);
+        assert!(matches!(
+            servers.get("x").unwrap(),
+            ServerEntry::Http { .. }
+        ));
     }
 }

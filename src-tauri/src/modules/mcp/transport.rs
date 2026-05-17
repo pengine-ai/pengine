@@ -16,6 +16,9 @@ pub struct StdioTransport {
     #[allow(dead_code)]
     child: Child,
     stdin: Mutex<ChildStdin>,
+    /// JSON-RPC over stdio must be strictly serialized (one request in flight); parallel
+    /// `tools/call` / `notify` would interleave NDJSON lines and corrupt the MCP session.
+    rpc_mutex: Mutex<()>,
     next_id: AtomicU64,
     pending: Pending,
 }
@@ -93,14 +96,15 @@ impl StdioTransport {
         Ok(Self {
             child,
             stdin: Mutex::new(stdin),
+            rpc_mutex: Mutex::new(()),
             next_id: AtomicU64::new(1),
             pending,
         })
     }
 
-    /// Default for ongoing `tools/call` traffic (container cold start is already paid at connect).
+    /// Default for `call()` when no explicit deadline is passed (prefer [`McpClient::call_tool`] timeouts).
     pub fn default_call_timeout() -> Duration {
-        Duration::from_secs(120)
+        Duration::from_secs(60)
     }
 
     pub async fn call(&self, method: &str, params: Option<Value>) -> Result<Value, String> {
@@ -114,6 +118,7 @@ impl StdioTransport {
         params: Option<Value>,
         timeout: Duration,
     ) -> Result<Value, String> {
+        let _rpc_guard = self.rpc_mutex.lock().await;
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let req = JsonRpcRequest::new(id, method, params);
         let mut payload = serde_json::to_vec(&req).map_err(|e| format!("encode request: {e}"))?;
@@ -157,6 +162,7 @@ impl StdioTransport {
     }
 
     pub async fn notify(&self, method: &str, params: Option<Value>) -> Result<(), String> {
+        let _rpc_guard = self.rpc_mutex.lock().await;
         let mut msg = serde_json::json!({
             "jsonrpc": "2.0",
             "method": method,

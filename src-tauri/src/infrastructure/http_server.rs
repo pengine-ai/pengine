@@ -1,7 +1,9 @@
 use crate::build_info;
 use crate::infrastructure::audit_log;
 use crate::infrastructure::bot_lifecycle;
-use crate::modules::bot::{agent as bot_agent, repository, service as bot_service};
+use crate::modules::agent as bot_agent;
+use crate::modules::bot::{repository, service as bot_service};
+use crate::modules::cli::commands as cli_commands;
 use crate::modules::cron::{
     repository as cron_repository, scheduler as cron_scheduler, service as cron_service,
     types::{CronFile, CronJob, Schedule},
@@ -121,6 +123,12 @@ pub struct PutUserSettingsBody {
     pub skills_hint_max_bytes: u32,
 }
 
+#[derive(Serialize)]
+pub struct CliCommandsResponse {
+    /// Same entries as `modules::cli::commands::COMMANDS` (native CLI surface).
+    pub commands: Vec<cli_commands::NativeCommand>,
+}
+
 pub async fn start_server(state: AppState) {
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -141,6 +149,7 @@ pub async fn start_server(state: AppState) {
         .route("/v1/ollama/model", put(handle_ollama_model_put))
         .route("/v1/settings", get(handle_user_settings_get))
         .route("/v1/settings", put(handle_user_settings_put))
+        .route("/v1/cli/commands", get(handle_cli_commands_list))
         .route("/v1/mcp/tools", get(handle_mcp_tools))
         .route("/v1/mcp/config", get(handle_mcp_config_get))
         .route("/v1/mcp/filesystem", put(handle_mcp_filesystem_put))
@@ -396,6 +405,12 @@ async fn handle_ollama_models(State(state): State<AppState>) -> Json<OllamaModel
             models: Vec::new(),
         }),
     }
+}
+
+async fn handle_cli_commands_list(State(_state): State<AppState>) -> Json<CliCommandsResponse> {
+    Json(CliCommandsResponse {
+        commands: cli_commands::COMMANDS.to_vec(),
+    })
 }
 
 async fn handle_user_settings_get(State(state): State<AppState>) -> Json<UserSettingsResponse> {

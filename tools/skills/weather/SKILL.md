@@ -2,8 +2,9 @@
 name: weather
 description: Weather and forecasts (no API key). One wttr.in fetch by default; Open-Meteo if that fails. Chat-style answers — see “How to answer”.
 homepage: https://wttr.in/:help
-metadata: { "clawdbot": { "emoji": "🌤️", "requires": { "bins": ["curl"] } } }
+metadata: { “clawdbot”: { “emoji”: “🌤️”, “requires”: { “bins”: [“curl”] } } }
 tags: [weather, forecast, wttr, open-meteo]
+hint_allow_substrings: [wetter, weather, forecast, vorhersage, temperatur, gewitter, schnee, hagel, wind, niederschlag, wttr, regen, luftdruck, hitze, eisregen]
 ---
 
 # Weather

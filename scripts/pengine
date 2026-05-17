@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Dev launcher: run `pengine` from any directory after `cargo build`.
+# Put this directory on PATH, e.g. in ~/.zshrc:
+#   export PATH="/path/to/pengine/scripts:$PATH"
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+EXE="$ROOT/src-tauri/target/debug/pengine"
+if [[ ! -f "$EXE" ]]; then
+  echo "pengine: binary not found at $EXE" >&2
+  echo "Build it once from the repo root:" >&2
+  echo "  cargo build --manifest-path \"$ROOT/src-tauri/Cargo.toml\"" >&2
+  exit 127
+fi
+exec "$EXE" "$@"

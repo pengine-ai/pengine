@@ -14,10 +14,23 @@ pub const TOOL_MANAGER_ID: &str = "tool_manager";
 /// Server key / native id used in `mcp.json` for the built-in cron manager.
 pub const CRON_MANAGER_ID: &str = "cron_manager";
 
+/// Server key / native id used in `mcp.json` for the built-in task spawner.
+pub const TASK_SPAWNER_ID: &str = "task_spawner";
+
+/// Hard cap on `task_spawn` recursion. A value of 1 means: a top-level turn may
+/// spawn child tasks, but those child tasks cannot spawn further children.
+/// Bumping this allows deeper trees but multiplies cost and latency exponentially.
+pub const TASK_SPAWN_MAX_DEPTH: u8 = 1;
+
 enum NativeKind {
     Dice,
     ToolManager(AppState),
     CronManager(AppState),
+    /// Task spawner: tool definition only. The actual recursive `run_model_turn`
+    /// is invoked by the agent dispatcher, not via [`Provider::call_tool`], so
+    /// that `Provider::call_tool`'s future stays `Send` (parallel tool dispatch
+    /// uses `tokio::spawn`, which requires `Send`).
+    TaskSpawner,
 }
 
 pub struct NativeProvider {
@@ -35,6 +48,11 @@ impl NativeProvider {
             NativeKind::Dice => handle_dice(tool_name, args),
             NativeKind::ToolManager(state) => handle_tool_manager(tool_name, args, state).await,
             NativeKind::CronManager(state) => handle_cron_manager(tool_name, args, state).await,
+            NativeKind::TaskSpawner => Err(
+                "task_spawn is dispatched by the agent loop, not via Provider::call_tool. \
+                 If you see this error, the dispatcher missed an interception point."
+                    .into(),
+            ),
         }
     }
 }
@@ -357,11 +375,13 @@ pub fn cron_manager_named(server_key: &str, state: AppState) -> NativeProvider {
                 server_name: server_key.to_string(),
                 name: "manage_crons".to_string(),
                 description: Some(
-                    "Manage scheduled cron jobs the user defined in the dashboard. \
-                     Use action 'list' to see every job (id, name, schedule, enabled, last_run_at). \
-                     Use action 'enable' or 'disable' with a job_id to turn one job on or off. \
-                     This tool never creates or deletes jobs — the user does that in the dashboard. \
-                     Call it when the user asks to list, pause, resume, stop, or start a scheduled task."
+                    "Manage scheduled cron jobs. \
+                     'list' returns every job (id, name, schedule, enabled, last_run_at). \
+                     'enable' / 'disable' with a job_id toggle a job on/off. \
+                     'create' schedules a new job (provide `name`, `instruction`, and either \
+                     `every_minutes` OR `daily_at_hour` + `daily_at_minute`); the model can use this \
+                     to self-schedule recurring follow-ups. 'delete' removes a job by id. \
+                     Confirm with the user before creating or deleting jobs that affect them."
                         .to_string(),
                 ),
                 input_schema: json!({
@@ -370,18 +390,48 @@ pub fn cron_manager_named(server_key: &str, state: AppState) -> NativeProvider {
                     "properties": {
                         "action": {
                             "type": "string",
-                            "enum": ["list", "enable", "disable"],
-                            "description": "'list' returns every job; 'enable'/'disable' toggle one job"
+                            "enum": ["list", "enable", "disable", "create", "delete"],
+                            "description": "'list' returns every job; 'enable'/'disable'/'delete' need job_id; 'create' needs name + instruction + a schedule"
                         },
                         "job_id": {
                             "type": "string",
-                            "description": "Required for 'enable' and 'disable'. Use the exact id from the 'list' output."
+                            "description": "Required for 'enable', 'disable', 'delete'. Use the exact id from 'list'."
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": "Human-readable name for 'create'."
+                        },
+                        "instruction": {
+                            "type": "string",
+                            "description": "Prompt the agent runs each time the job fires (for 'create')."
+                        },
+                        "condition": {
+                            "type": "string",
+                            "description": "Optional: only deliver a message to the user when this condition is met (for 'create')."
+                        },
+                        "every_minutes": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 10080,
+                            "description": "Recurring schedule in minutes (1..=10080). Mutually exclusive with daily_at_*."
+                        },
+                        "daily_at_hour": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 23,
+                            "description": "Local-time hour for a daily schedule. Pair with daily_at_minute."
+                        },
+                        "daily_at_minute": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 59,
+                            "description": "Local-time minute for a daily schedule."
                         }
                     }
                 }),
                 direct_return: false,
                 category: None,
-                risk: super::types::ToolRisk::Low,
+                risk: super::types::ToolRisk::Medium,
             };
             super::tool_metadata::apply(&mut t);
             t
@@ -416,8 +466,144 @@ async fn handle_cron_manager(
                 .ok_or("missing 'job_id' for disable")?;
             set_cron_enabled(state, job_id, false).await
         }
+        "create" => create_cron(state, args).await,
+        "delete" => {
+            let job_id = args
+                .get("job_id")
+                .and_then(|v| v.as_str())
+                .ok_or("missing 'job_id' for delete")?;
+            delete_cron(state, job_id).await
+        }
         _ => Err(format!("unknown action: {action}")),
     }
+}
+
+fn parse_schedule_from_args(args: &Value) -> Result<crate::modules::cron::types::Schedule, String> {
+    use crate::modules::cron::types::Schedule;
+    let every = args.get("every_minutes").and_then(|v| v.as_u64());
+    let hour = args.get("daily_at_hour").and_then(|v| v.as_u64());
+    let minute = args.get("daily_at_minute").and_then(|v| v.as_u64());
+
+    match (every, hour, minute) {
+        (Some(_), Some(_), _) | (Some(_), _, Some(_)) => {
+            Err("provide either every_minutes OR daily_at_*; not both".into())
+        }
+        (Some(m), None, None) => {
+            let m = u32::try_from(m).map_err(|_| "every_minutes out of range".to_string())?;
+            Ok(Schedule::EveryMinutes { minutes: m })
+        }
+        (None, Some(h), Some(m)) => Ok(Schedule::DailyAt {
+            hour: h as u8,
+            minute: m as u8,
+        }),
+        (None, Some(_), None) | (None, None, Some(_)) => {
+            Err("daily_at requires both daily_at_hour and daily_at_minute".into())
+        }
+        (None, None, None) => Err("missing schedule: provide every_minutes or daily_at_*".into()),
+    }
+}
+
+async fn create_cron(state: &AppState, args: &Value) -> Result<String, String> {
+    use crate::modules::cron::{repository, service as cron_service, types::CronJob};
+
+    let name = args
+        .get("name")
+        .and_then(|v| v.as_str())
+        .ok_or("missing 'name' for create")?
+        .trim()
+        .to_string();
+    let instruction = args
+        .get("instruction")
+        .and_then(|v| v.as_str())
+        .ok_or("missing 'instruction' for create")?
+        .trim()
+        .to_string();
+    let condition = args
+        .get("condition")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    let schedule = parse_schedule_from_args(args)?;
+    cron_service::validate(&name, &instruction, &schedule)?;
+
+    let job = CronJob {
+        id: cron_service::new_job_id(),
+        name,
+        instruction,
+        condition,
+        skill_slugs: Vec::new(),
+        schedule,
+        enabled: true,
+        created_at: chrono::Utc::now(),
+        last_run_at: None,
+    };
+
+    let _save_guard = state.cron_save_mutex.lock().await;
+    let snapshot = {
+        let mut jobs = state.cron_jobs.write().await;
+        jobs.push(job.clone());
+        jobs.clone()
+    };
+    let last_chat_id = *state.last_chat_id.read().await;
+    let file = crate::modules::cron::types::CronFile {
+        jobs: snapshot,
+        last_chat_id,
+    };
+    let path = state.cron_path.clone();
+    let save_result = tokio::task::spawn_blocking(move || repository::save(&path, &file))
+        .await
+        .map_err(|e| format!("cron save task: {e}"))?;
+    if let Err(e) = save_result {
+        // Roll back the in-memory insertion so disk and memory stay in sync.
+        let mut jobs = state.cron_jobs.write().await;
+        if let Some(pos) = jobs.iter().position(|j| j.id == job.id) {
+            jobs.remove(pos);
+        }
+        return Err(e);
+    }
+    state.cron_notify.notify_waiters();
+    let schedule_desc = match &job.schedule {
+        crate::modules::cron::types::Schedule::EveryMinutes { minutes } => {
+            format!("every {minutes} min")
+        }
+        crate::modules::cron::types::Schedule::DailyAt { hour, minute } => {
+            format!("daily at {hour:02}:{minute:02} local")
+        }
+    };
+    Ok(format!(
+        "Created job '{}' (id: {}, {schedule_desc}).",
+        job.name, job.id
+    ))
+}
+
+async fn delete_cron(state: &AppState, job_id: &str) -> Result<String, String> {
+    use crate::modules::cron::repository;
+
+    let _save_guard = state.cron_save_mutex.lock().await;
+    let removed = {
+        let mut jobs = state.cron_jobs.write().await;
+        match jobs.iter().position(|j| j.id == job_id) {
+            Some(pos) => jobs.remove(pos),
+            None => return Err(format!("unknown job_id: {job_id}")),
+        }
+    };
+    let snapshot = state.cron_jobs.read().await.clone();
+    let last_chat_id = *state.last_chat_id.read().await;
+    let file = crate::modules::cron::types::CronFile {
+        jobs: snapshot,
+        last_chat_id,
+    };
+    let path = state.cron_path.clone();
+    let save_result = tokio::task::spawn_blocking(move || repository::save(&path, &file))
+        .await
+        .map_err(|e| format!("cron save task: {e}"))?;
+    if let Err(e) = save_result {
+        // Re-insert so disk and memory stay in sync.
+        state.cron_jobs.write().await.push(removed);
+        return Err(e);
+    }
+    state.cron_notify.notify_waiters();
+    Ok(format!("Deleted job '{}' (id: {job_id}).", removed.name))
 }
 
 async fn format_cron_list(state: &AppState) -> String {
@@ -492,6 +678,49 @@ async fn set_cron_enabled(state: &AppState, job_id: &str, enabled: bool) -> Resu
     Ok(format!("Job '{}' {verb}.", updated.name))
 }
 
+// ── Task Spawner ────────────────────────────────────────────────────
+
+pub fn task_spawner_named(server_key: &str) -> NativeProvider {
+    NativeProvider {
+        server_name: server_key.to_string(),
+        tools: vec![{
+            let mut t = ToolDef {
+                server_name: server_key.to_string(),
+                name: "task_spawn".to_string(),
+                description: Some(
+                    "Run an isolated sub-agent on a focused sub-task and return its single \
+                     final reply as a string. Use for parallelizable research, scoped explorations, \
+                     or work whose intermediate output would bloat the parent context. \
+                     The sub-agent has access to the same tools, but starts with NO history of \
+                     this conversation — restate the relevant context in `prompt`. Recursion is \
+                     capped: sub-agents cannot spawn further sub-tasks."
+                        .to_string(),
+                ),
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["description", "prompt"],
+                    "properties": {
+                        "description": {
+                            "type": "string",
+                            "description": "Short (3–7 word) label describing the sub-task; surfaced in logs."
+                        },
+                        "prompt": {
+                            "type": "string",
+                            "description": "Self-contained prompt for the sub-agent. Include any context the parent already has."
+                        }
+                    }
+                }),
+                direct_return: false,
+                category: None,
+                risk: super::types::ToolRisk::Medium,
+            };
+            super::tool_metadata::apply(&mut t);
+            t
+        }],
+        kind: NativeKind::TaskSpawner,
+    }
+}
+
 // ── Registry ────────────────────────────────────────────────────────
 
 /// Resolve `id` from `mcp.json` (`type: native`) into a provider under `server_key`.
@@ -511,6 +740,7 @@ pub fn native_for(
             let state = app_state.ok_or_else(|| format!("{CRON_MANAGER_ID} requires AppState"))?;
             Ok(cron_manager_named(server_key, state.clone()))
         }
+        TASK_SPAWNER_ID => Ok(task_spawner_named(server_key)),
         _ => Err(format!("unknown native id: {id}")),
     }
 }

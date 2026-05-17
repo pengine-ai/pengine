@@ -46,6 +46,19 @@ pub enum ServerEntry {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         catalog_passthrough_keys: Vec<String>,
     },
+    /// Remote MCP server reached over HTTP. JSON-RPC requests are POSTed to
+    /// `url`; responses can be either `application/json` or an SSE stream
+    /// (`text/event-stream`). Headers (e.g. `Authorization: Bearer …`) are
+    /// stored in plain text — for secrets, use a wrapper script today and a
+    /// keychain-backed mechanism later. Compatible with Claude Code's
+    /// `{ "type": "http", "url": …, "headers": {…} }` shape.
+    Http {
+        url: String,
+        #[serde(default)]
+        headers: HashMap<String, String>,
+        #[serde(default)]
+        direct_return: bool,
+    },
 }
 
 /// A developer-added custom Docker image registered as an MCP tool.

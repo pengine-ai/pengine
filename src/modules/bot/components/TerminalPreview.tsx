@@ -127,7 +127,7 @@ export function TerminalPreview() {
         <span className="h-3 w-3 rounded-full bg-[#ff5f57]" />
         <span className="h-3 w-3 rounded-full bg-[#febc2e]" />
         <span className="h-3 w-3 rounded-full bg-[#28c840]" />
-        <p className="ml-2">pengine runtime</p>
+        <span className="ml-2 text-[11px] text-white/40">Log</span>
         <span className="ml-auto hidden text-[10px] uppercase tracking-[0.14em] text-white/35 sm:inline">
           {marketingSite ? "demo" : "live"}
         </span>

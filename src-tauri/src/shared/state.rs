@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU8};
 use std::sync::Arc;
 use tauri::Emitter;
 use tokio::sync::{Mutex, Notify, RwLock};
@@ -88,7 +88,7 @@ pub struct AppState {
     pub last_local_model: Arc<RwLock<Option<String>>>,
     pub cached_filesystem_paths: Arc<RwLock<Vec<String>>>,
     pub tool_engine_mutex: Arc<Mutex<()>>,
-    /// Active memory-session recording (toggled by keyword commands; see `bot::agent`).
+    /// Active memory-session recording (toggled by keyword commands; see `modules::agent`).
     pub memory_session: Arc<RwLock<Option<MemorySession>>>,
     /// Flat tool names last invoked by the model (FIFO, for routing next turns).
     pub recent_tool_names: Arc<Mutex<Vec<String>>>,
@@ -110,6 +110,16 @@ pub struct AppState {
     pub cron_save_mutex: Arc<Mutex<()>>,
     /// Bounded queue to the background audit NDJSON writer (`audit_log::run_audit_writer`).
     pub audit_tx: tokio::sync::mpsc::Sender<crate::infrastructure::audit_log::AuditLine>,
+    /// Plan mode: when true the agent receives a planning system prompt and
+    /// write-style tools are stripped from the catalog. Toggled via `/plan`.
+    pub plan_mode: Arc<RwLock<bool>>,
+    /// Active CLI/REPL session (turn history, summary, token totals).
+    /// `None` outside the REPL or before the first ask.
+    pub cli_session: Arc<RwLock<Option<crate::modules::cli::session::CliSession>>>,
+    /// Recursion guard for `task_spawn`. Incremented before a child agent turn
+    /// runs, decremented after; child agents see a non-zero value and refuse to
+    /// spawn further sub-tasks. Capped via [`crate::modules::mcp::native::TASK_SPAWN_MAX_DEPTH`].
+    pub task_spawn_depth: Arc<AtomicU8>,
 }
 
 impl AppState {
@@ -154,6 +164,9 @@ impl AppState {
             cron_no_chat_warned: Arc::new(AtomicBool::new(false)),
             cron_save_mutex: Arc::new(Mutex::new(())),
             audit_tx,
+            plan_mode: Arc::new(RwLock::new(false)),
+            cli_session: Arc::new(RwLock::new(None)),
+            task_spawn_depth: Arc::new(AtomicU8::new(0)),
         };
         (this, audit_rx)
     }
