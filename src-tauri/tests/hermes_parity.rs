@@ -436,12 +436,10 @@ fn aaa_multi_agent_dual_spawn() {
     set_model(&model());
 
     eprintln!("=== MULTI-AGENT: dual task_spawn ===");
-    let r = ask(
-        "Use task_spawn twice in this turn: \
+    let r = ask("Use task_spawn twice in this turn: \
          first to answer 'What is the capital city of France?', \
          then to answer 'What is 6 multiplied by 7?'. \
-         Report both results in your reply.",
-    );
+         Report both results in your reply.");
     let body_lc = r.envelope.reply.body.to_lowercase();
 
     let has_paris = body_lc.contains("paris");
@@ -460,7 +458,11 @@ fn aaa_multi_agent_dual_spawn() {
         "expected Paris (capital of France) in reply: {}",
         r.envelope.reply.body
     );
-    assert!(has_42, "expected 42 (6×7) in reply: {}", r.envelope.reply.body);
+    assert!(
+        has_42,
+        "expected 42 (6×7) in reply: {}",
+        r.envelope.reply.body
+    );
     eprintln!("  Paris + 42 ✓  {:.2}s", r.elapsed.as_secs_f64());
 }
 
@@ -534,7 +536,10 @@ fn context_compaction_produces_summary() {
         "model could not recall THETA-3 from compacted summary.\nreply: {}",
         r.envelope.reply.body
     );
-    eprintln!("  ✓ THETA-3 recalled from summary  {:.2}s", r.elapsed.as_secs_f64());
+    eprintln!(
+        "  ✓ THETA-3 recalled from summary  {:.2}s",
+        r.elapsed.as_secs_f64()
+    );
 }
 
 // ── tool use ──────────────────────────────────────────────────────────────────
@@ -602,7 +607,12 @@ fn code_review_skill_injected() {
         (Some(b), Some(w)) => format!("base={b} review={w} diff={:+}", w as i64 - b as i64),
         _ => "tokens_unavailable".into(),
     };
-    record("code_review_skill_inject", &r_review, content_ok, Some(&note));
+    record(
+        "code_review_skill_inject",
+        &r_review,
+        content_ok,
+        Some(&note),
+    );
 
     assert!(
         content_ok,
@@ -655,9 +665,17 @@ fn code_review_structured_output() {
     let body_lc = r.envelope.reply.body.to_lowercase();
 
     // Any recognised section header or direct bug keyword counts.
-    let has_structure = ["summary", "issue", "suggestion", "strength", "bug", "panic", "empty"]
-        .iter()
-        .any(|kw| body_lc.contains(kw));
+    let has_structure = [
+        "summary",
+        "issue",
+        "suggestion",
+        "strength",
+        "bug",
+        "panic",
+        "empty",
+    ]
+    .iter()
+    .any(|kw| body_lc.contains(kw));
     let passed = r.envelope.reply.kind == "text" && has_structure;
 
     record(
@@ -667,7 +685,11 @@ fn code_review_structured_output() {
         Some(&format!("has_structure={has_structure}")),
     );
 
-    assert!(passed, "reply missing section headers or bug keywords.\nreply: {}", r.envelope.reply.body);
+    assert!(
+        passed,
+        "reply missing section headers or bug keywords.\nreply: {}",
+        r.envelope.reply.body
+    );
     eprintln!("  ✓ structured output  {:.2}s", r.elapsed.as_secs_f64());
 }
 
@@ -696,10 +718,18 @@ fn code_review_identifies_bug() {
     let body_lc = r.envelope.reply.body.to_lowercase();
 
     // Division-by-zero on empty slice — model should mention at least one of these.
-    let identifies_bug =
-        ["empty", "zero", "divis", "panic", "len()", "length", "0 element", "no element"]
-            .iter()
-            .any(|kw| body_lc.contains(kw));
+    let identifies_bug = [
+        "empty",
+        "zero",
+        "divis",
+        "panic",
+        "len()",
+        "length",
+        "0 element",
+        "no element",
+    ]
+    .iter()
+    .any(|kw| body_lc.contains(kw));
     let passed = r.envelope.reply.kind == "text" && identifies_bug;
 
     record(

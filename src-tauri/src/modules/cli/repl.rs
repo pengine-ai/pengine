@@ -332,17 +332,13 @@ store:     {}{}",
                         .emit_log("mcp", &format!("background warmup failed: {e}"))
                         .await;
                     if let Some(mut ep) = ext_printer {
-                        let _ = ep.print(format!(
-                            "  \x1b[2m⎿  MCP warmup error: {e}\x1b[0m"
-                        ));
+                        let _ = ep.print(format!("  \x1b[2m⎿  MCP warmup error: {e}\x1b[0m"));
                     }
                     return;
                 }
                 let n = bg_state.mcp.read().await.tool_names().len();
                 if let Some(mut ep) = ext_printer {
-                    let _ = ep.print(format!(
-                        "  \x1b[2m⎿  MCP ready · {n} tools\x1b[0m"
-                    ));
+                    let _ = ep.print(format!("  \x1b[2m⎿  MCP ready · {n} tools\x1b[0m"));
                 }
             });
         }

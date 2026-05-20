@@ -758,15 +758,13 @@ pub async fn rebuild_registry_into_state(
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
 
-        let (tx, mut rx) =
-            tokio::sync::mpsc::unbounded_channel::<(Option<Provider>, String)>();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(Option<Provider>, String)>();
 
         for (server_key, entry) in stdio_entries {
             let tx = tx.clone();
             let state_clone = state.clone();
             tauri::async_runtime::spawn(async move {
-                let result =
-                    connect_one_server(&server_key, &entry, Some(&state_clone)).await;
+                let result = connect_one_server(&server_key, &entry, Some(&state_clone)).await;
                 let _ = tx.send(result);
             });
         }

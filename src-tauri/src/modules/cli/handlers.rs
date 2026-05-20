@@ -932,7 +932,9 @@ async fn session_new(state: &AppState, name: &str) -> CliReply {
     // Persist immediately so `pengine ask --continue` and `pengine compact` can
     // find this session from subsequent one-shot subprocesses.
     if let Err(e) = session::save(&state.store_path, &new_sess) {
-        state.emit_log("cli", &format!("session save (new): {e}")).await;
+        state
+            .emit_log("cli", &format!("session save (new): {e}"))
+            .await;
     }
     CliReply::text(format!("started new session: {label}"))
 }
@@ -1048,9 +1050,7 @@ async fn session_prune(state: &AppState) -> CliReply {
     let to_delete: Vec<_> = manifest
         .entries
         .iter()
-        .filter(|e| {
-            e.name.is_none() && active_id.as_deref() != Some(e.id.as_str())
-        })
+        .filter(|e| e.name.is_none() && active_id.as_deref() != Some(e.id.as_str()))
         .map(|e| e.id.clone())
         .collect();
 
@@ -1124,7 +1124,12 @@ pub async fn compact_session(state: &AppState) -> CliReply {
             .map(|t| t.prompt_tokens.saturating_add(t.eval_tokens))
             .sum();
         // Compact ALL turns so a re-compact also merges the prior summary.
-        (sess.turns.clone(), sess.summary.clone(), total_tok, drop_tok)
+        (
+            sess.turns.clone(),
+            sess.summary.clone(),
+            total_tok,
+            drop_tok,
+        )
     };
 
     let n_turns = to_compact.len();
@@ -1179,11 +1184,7 @@ fn compact_print_header(n_turns: usize, keep_n: usize, total_tok: u64, drop_tok:
         BAR_W / 2
     };
     let filled = filled.min(BAR_W);
-    let bar: String = format!(
-        "{}{}",
-        "█".repeat(filled),
-        "░".repeat(BAR_W - filled)
-    );
+    let bar: String = format!("{}{}", "█".repeat(filled), "░".repeat(BAR_W - filled));
     let pct = if total_tok > 0 {
         format!(
             " ({:.0}% freed)",
@@ -1201,12 +1202,7 @@ fn compact_print_header(n_turns: usize, keep_n: usize, total_tok: u64, drop_tok:
 }
 
 /// Print a compact completion line to stderr (terminal only).
-fn compact_print_result(
-    drop_n: usize,
-    keep_n: usize,
-    drop_tok: u64,
-    elapsed: std::time::Duration,
-) {
+fn compact_print_result(drop_n: usize, keep_n: usize, drop_tok: u64, elapsed: std::time::Duration) {
     if !std::io::stderr().is_terminal() {
         return;
     }

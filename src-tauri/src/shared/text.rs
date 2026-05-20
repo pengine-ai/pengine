@@ -528,7 +528,10 @@ mod tests {
     #[test]
     fn normalize_assistant_lone_opening_tag_yields_empty() {
         // Model emitted only the opening tag with nothing after it.
-        assert_eq!(normalize_assistant_message_content("<pengine_reply>", false), "");
+        assert_eq!(
+            normalize_assistant_message_content("<pengine_reply>", false),
+            ""
+        );
     }
 
     #[test]
