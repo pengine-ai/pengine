@@ -115,6 +115,7 @@ pub const COMMANDS: &[NativeCommand] = &[
                   /session switch <name-or-id>   # resume a saved session\n       \
                   /session rename <name>          # name or rename the active session\n       \
                   /session delete <name-or-id>   # delete a saved session from disk\n       \
+                  /session prune                 # delete all unnamed sessions\n       \
                   /session help                  # show all session subcommands\n\n\
                   Sessions persist across restarts. Each session keeps a turn history and\n\
                   a compacted summary for context. /session switch saves the current session\n\

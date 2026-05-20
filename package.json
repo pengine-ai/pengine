@@ -12,6 +12,8 @@
     "tauri": "tauri",
     "cli": "cargo run --manifest-path src-tauri/Cargo.toml --",
     "cli:test": "cargo test --manifest-path src-tauri/Cargo.toml --test cli_oneshot",
+    "test:ai": "PENGINE_PARITY_TEST=1 cargo test --manifest-path src-tauri/Cargo.toml --test hermes_parity -- --nocapture --test-threads 1",
+    "test:ai:mcp": "PENGINE_PARITY_TEST=1 PENGINE_PARITY_MCP=1 cargo test --manifest-path src-tauri/Cargo.toml --test hermes_parity -- --nocapture --test-threads 1",
     "test:e2e": "playwright test",
     "test:e2e:ui": "playwright test --ui",
     "generate:logos": "bash scripts/generate-logo-assets.sh",

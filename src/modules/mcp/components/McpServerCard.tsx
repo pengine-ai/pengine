@@ -25,6 +25,8 @@ type Props = {
   name: string;
   entry: ServerEntry;
   tools: McpTool[];
+  /** Expected command count from the catalog (used when live count is 0). */
+  catalogCommandCount?: number;
   busy: boolean;
   editingName: string | null;
   onSave: (name: string, entry: ServerEntry) => Promise<void>;
@@ -55,6 +57,7 @@ export function McpServerCard({
   name,
   entry,
   tools,
+  catalogCommandCount = 0,
   busy,
   editingName,
   onSave,
@@ -125,9 +128,19 @@ export function McpServerCard({
           <p className="mt-1 break-all font-mono text-[11px] text-white/50" title={commandPreview}>
             {commandPreview}
           </p>
-          <p className="mt-1 font-mono text-[11px] uppercase tracking-[0.14em] text-(--mid)">
-            {toolCount} command{toolCount === 1 ? "" : "s"}
-          </p>
+          {toolCount > 0 ? (
+            <p className="mt-1 font-mono text-[11px] uppercase tracking-[0.14em] text-(--mid)">
+              {toolCount} command{toolCount === 1 ? "" : "s"}
+            </p>
+          ) : catalogCommandCount > 0 ? (
+            <p className="mt-1 font-mono text-[11px] uppercase tracking-[0.14em] text-white/25">
+              {catalogCommandCount} command{catalogCommandCount === 1 ? "" : "s"} · idle
+            </p>
+          ) : (
+            <p className="mt-1 font-mono text-[11px] uppercase tracking-[0.14em] text-(--mid)">
+              0 commands
+            </p>
+          )}
         </div>
 
         {!isNative && (

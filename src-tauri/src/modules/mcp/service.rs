@@ -743,19 +743,44 @@ pub async fn rebuild_registry_into_state(
         emit_registry_changed_event(state).await;
     }
 
-    // Phase 2 — stdio/http servers (background, incremental publish).
-    // Emit `pengine-registry-changed` after each connect so the dashboard reloads
-    // as soon as a server is ready without waiting for the full set.
-    for (server_key, entry) in &cfg.servers {
-        if matches!(entry, ServerEntry::Native { .. }) {
-            continue;
+    // Phase 2 — stdio/http servers connected in parallel.
+    // Sequential connection caused one slow/failing server (e.g. a container
+    // with a cold image pull) to block every server that comes after it in
+    // iteration order, delaying the full registry by the worst-case timeout
+    // (120 s) multiplied by however many slow servers stacked up.
+    // Now each server gets its own task; `emit_registry_changed` fires as soon
+    // as any server is ready so the dashboard and agent see tools incrementally.
+    {
+        let stdio_entries: Vec<(String, ServerEntry)> = cfg
+            .servers
+            .iter()
+            .filter(|(_, e)| !matches!(e, ServerEntry::Native { .. }))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+
+        let (tx, mut rx) =
+            tokio::sync::mpsc::unbounded_channel::<(Option<Provider>, String)>();
+
+        for (server_key, entry) in stdio_entries {
+            let tx = tx.clone();
+            let state_clone = state.clone();
+            tauri::async_runtime::spawn(async move {
+                let result =
+                    connect_one_server(&server_key, &entry, Some(&state_clone)).await;
+                let _ = tx.send(result);
+            });
         }
-        let (prov, line) = connect_one_server(server_key, entry, Some(state)).await;
-        state.emit_log("mcp", &line).await;
-        let Some(p) = prov else { continue };
-        providers.push(p);
-        *state.mcp.write().await = ToolRegistry::new(providers.clone());
-        emit_registry_changed_event(state).await;
+        // Drop the sender owned by this scope so the channel closes when all
+        // spawned tasks have sent their result.
+        drop(tx);
+
+        while let Some((prov, line)) = rx.recv().await {
+            state.emit_log("mcp", &line).await;
+            let Some(p) = prov else { continue };
+            providers.push(p);
+            *state.mcp.write().await = ToolRegistry::new(providers.clone());
+            emit_registry_changed_event(state).await;
+        }
     }
 
     let n = state.mcp.read().await.tool_names().len();

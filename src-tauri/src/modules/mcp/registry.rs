@@ -623,6 +623,16 @@ fn memory_tools_relevant(
         "merk dir",
         "speicher",
         "transcript",
+        // Knowledge-graph write/read hints: "learn about", "what do you know",
+        // "knowledge base", "store this", "document this", etc.
+        "knowledge",
+        "learn about",
+        "what do you know",
+        "do you know",
+        "wissen",
+        "wissensgraph",
+        "store this",
+        "document this",
     ];
     HINTS.iter().any(|h| lower.contains(h))
 }

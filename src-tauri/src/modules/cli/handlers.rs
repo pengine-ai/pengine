@@ -842,6 +842,7 @@ pub async fn session_cmd(state: &AppState, action: &str, rest: &str) -> CliReply
         "switch" => session_switch(state, rest.trim()).await,
         "rename" => session_rename(state, rest.trim()).await,
         "delete" => session_delete(state, rest.trim()).await,
+        "prune" => session_prune(state).await,
         other => CliReply::error(format!(
             "session: unknown action `{other}` — try /session help"
         )),
@@ -857,6 +858,7 @@ fn session_help() -> CliReply {
 /session switch <name-or-id>     resume a saved session; saves current first
 /session rename <name>           rename the active session
 /session delete <name-or-id>     delete a saved session from disk (not the active one)
+/session prune                   delete all unnamed sessions (keeps named + active)
 /session help                    show this help
 
 Notes:
@@ -926,7 +928,12 @@ async fn session_new(state: &AppState, name: &str) -> CliReply {
         new_sess.name = Some(name.to_string());
     }
     let label = new_sess.name.clone().unwrap_or_else(|| new_sess.id.clone());
-    *state.cli_session.write().await = Some(new_sess);
+    *state.cli_session.write().await = Some(new_sess.clone());
+    // Persist immediately so `pengine ask --continue` and `pengine compact` can
+    // find this session from subsequent one-shot subprocesses.
+    if let Err(e) = session::save(&state.store_path, &new_sess) {
+        state.emit_log("cli", &format!("session save (new): {e}")).await;
+    }
     CliReply::text(format!("started new session: {label}"))
 }
 
@@ -1029,6 +1036,50 @@ async fn session_delete(state: &AppState, query: &str) -> CliReply {
     CliReply::text(format!("deleted session: {label}"))
 }
 
+async fn session_prune(state: &AppState) -> CliReply {
+    let manifest = session::load_manifest(&state.store_path);
+    let active_id = state
+        .cli_session
+        .read()
+        .await
+        .as_ref()
+        .map(|s| s.id.clone());
+
+    let to_delete: Vec<_> = manifest
+        .entries
+        .iter()
+        .filter(|e| {
+            e.name.is_none() && active_id.as_deref() != Some(e.id.as_str())
+        })
+        .map(|e| e.id.clone())
+        .collect();
+
+    if to_delete.is_empty() {
+        return CliReply::text("no unnamed sessions to prune");
+    }
+
+    let n = to_delete.len();
+    let mut errors = Vec::new();
+    for id in &to_delete {
+        if let Err(e) = session::delete(&state.store_path, id) {
+            errors.push(format!("{id}: {e}"));
+        }
+    }
+
+    if errors.is_empty() {
+        CliReply::text(format!(
+            "pruned {n} unnamed session{}",
+            if n == 1 { "" } else { "s" }
+        ))
+    } else {
+        CliReply::error(format!(
+            "pruned {}/{n} sessions; errors: {}",
+            n - errors.len(),
+            errors.join(", ")
+        ))
+    }
+}
+
 async fn session_rename(state: &AppState, name: &str) -> CliReply {
     if name.is_empty() {
         return CliReply::error("session rename: new name required");
@@ -1049,7 +1100,7 @@ async fn session_rename(state: &AppState, name: &str) -> CliReply {
 /// `/compact` — call the AI to summarize old turns, store as `session.summary`,
 /// and keep only the last `HISTORY_TURN_BUDGET` turns verbatim.
 pub async fn compact_session(state: &AppState) -> CliReply {
-    let (to_compact, prior_summary, _drop_upto) = {
+    let (to_compact, prior_summary, total_tok, drop_tok) = {
         let guard = state.cli_session.read().await;
         let Some(sess) = guard.as_ref() else {
             return CliReply::error("no active session — start a conversation first");
@@ -1065,35 +1116,111 @@ pub async fn compact_session(state: &AppState) -> CliReply {
                 sess.turns.len()
             ));
         }
-        // Compact ALL turns (not just the excess) so a re-compact also merges the prior summary.
-        (sess.turns.clone(), sess.summary.clone(), drop_upto)
+        let total_tok = sess
+            .prompt_tokens_total
+            .saturating_add(sess.eval_tokens_total);
+        let drop_tok: u64 = sess.turns[..drop_upto]
+            .iter()
+            .map(|t| t.prompt_tokens.saturating_add(t.eval_tokens))
+            .sum();
+        // Compact ALL turns so a re-compact also merges the prior summary.
+        (sess.turns.clone(), sess.summary.clone(), total_tok, drop_tok)
     };
 
+    let n_turns = to_compact.len();
+    let keep_n = HISTORY_TURN_BUDGET.min(n_turns);
+    let drop_n = n_turns.saturating_sub(keep_n);
+
+    // Print a Claude-Code-style compaction header to the terminal.
+    compact_print_header(n_turns, keep_n, total_tok, drop_tok);
+
     let prompt = session::compact_prompt(prior_summary.as_deref(), &to_compact);
-    let progress = Progress::start("Compacting session…");
+    let progress = Progress::start(format!("Summarizing {n_turns} turn(s)…"));
     let result = agent::run_system_turn(state, &prompt, None).await;
     let elapsed = progress.finish().await;
-    emit_baked_line(elapsed);
 
     match result {
         Ok(turn) => {
-            let compacted_count = to_compact.len();
-            let keep = HISTORY_TURN_BUDGET.min(compacted_count);
             let mut guard = state.cli_session.write().await;
             if let Some(sess) = guard.as_mut() {
-                session::apply_compaction(sess, turn.text, keep);
+                session::apply_compaction(sess, turn.text, keep_n);
                 let snapshot = sess.clone();
                 drop(guard);
                 if let Err(e) = session::save(&state.store_path, &snapshot) {
                     state.emit_log("cli", &format!("compact save: {e}")).await;
                 }
             }
+            compact_print_result(drop_n, keep_n, drop_tok, elapsed);
+            let freed_line = if drop_tok > 0 {
+                format!("\n  freed ≈{} tokens", fmt_num(drop_tok))
+            } else {
+                String::new()
+            };
             CliReply::text(format!(
-                "Compacted {compacted_count} turn(s) → summary + {keep} recent turn(s) kept verbatim."
+                "Compacted {n_turns} turn(s) → summary + {keep_n} recent turn(s) kept verbatim.{freed_line}"
             ))
         }
-        Err(e) => CliReply::error(format!("compact: {e}")),
+        Err(e) => {
+            emit_baked_line(elapsed);
+            CliReply::error(format!("compact: {e}"))
+        }
     }
+}
+
+/// Print a visual compaction header to stderr (terminal only).
+fn compact_print_header(n_turns: usize, keep_n: usize, total_tok: u64, drop_tok: u64) {
+    if !std::io::stderr().is_terminal() {
+        return;
+    }
+    const BAR_W: usize = 32;
+    let filled = if total_tok > 0 {
+        (drop_tok as f64 / total_tok as f64 * BAR_W as f64).round() as usize
+    } else {
+        BAR_W / 2
+    };
+    let filled = filled.min(BAR_W);
+    let bar: String = format!(
+        "{}{}",
+        "█".repeat(filled),
+        "░".repeat(BAR_W - filled)
+    );
+    let pct = if total_tok > 0 {
+        format!(
+            " ({:.0}% freed)",
+            drop_tok as f64 / total_tok as f64 * 100.0
+        )
+    } else {
+        String::new()
+    };
+    let mut err = std::io::stderr().lock();
+    let _ = writeln!(
+        err,
+        "\n  \x1b[1mContext compaction\x1b[0m  {n_turns} turn(s) → {keep_n} verbatim + summary"
+    );
+    let _ = writeln!(err, "  [{bar}]{pct}");
+}
+
+/// Print a compact completion line to stderr (terminal only).
+fn compact_print_result(
+    drop_n: usize,
+    keep_n: usize,
+    drop_tok: u64,
+    elapsed: std::time::Duration,
+) {
+    if !std::io::stderr().is_terminal() {
+        return;
+    }
+    let freed = if drop_tok > 0 {
+        format!("freed ≈{} tokens", fmt_num(drop_tok))
+    } else {
+        format!("{drop_n} turn(s) compacted")
+    };
+    let time_s = format!("{:.1}s", elapsed.as_secs_f64());
+    let mut err = std::io::stderr().lock();
+    let _ = writeln!(
+        err,
+        "  \x1b[32m✓\x1b[0m \x1b[2m{freed} · kept {keep_n} verbatim · {time_s}\x1b[0m"
+    );
 }
 
 /// Trigger background auto-compaction when the session grows beyond the threshold.

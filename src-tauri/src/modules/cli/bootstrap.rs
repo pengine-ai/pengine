@@ -80,15 +80,12 @@ pub fn handle_cli_or_continue(app: &tauri::App) -> bool {
             }
         }
         let reply = tauri::async_runtime::block_on(async {
-            // Rebuild MCP in the background so native tools (dice, task_spawner,
-            // skill_manager, …) are available immediately. Podman/stdio servers
-            // connect incrementally and become available mid-turn as they finish.
-            let state_bg = state.clone();
-            tokio::spawn(async move {
-                if let Err(e) = mcp_service::rebuild_registry_into_state(&state_bg).await {
-                    state_bg.emit_log("mcp", &format!("rebuild: {e}")).await;
-                }
-            });
+            // Rebuild MCP synchronously so native tools (task_spawn, roll_dice, …)
+            // are in the registry before the first agent turn. Stdio/Podman servers
+            // connect in Phase 2 of the same call and simply fail-fast when absent.
+            if let Err(e) = mcp_service::rebuild_registry_into_state(&state).await {
+                state.emit_log("mcp", &format!("rebuild: {e}")).await;
+            }
             handlers::ask_in_session(&state, &prompt, flag_true(&matches.args, "continue")).await
         });
         let is_error = matches!(reply.kind, crate::modules::cli::output::ReplyKind::Error);
@@ -272,13 +269,12 @@ async fn dispatch_stateful(
         }
         "ask" => {
             let text = single_string(args, "text").unwrap_or_default();
-            // Rebuild MCP in background so native tools are available immediately.
-            let state_bg = state.clone();
-            tokio::spawn(async move {
-                if let Err(e) = mcp_service::rebuild_registry_into_state(&state_bg).await {
-                    state_bg.emit_log("mcp", &format!("rebuild: {e}")).await;
-                }
-            });
+            // Rebuild MCP synchronously so native tools (task_spawn, roll_dice, …)
+            // are in the registry before the first agent turn. Stdio/Podman servers
+            // connect in Phase 2 of the same call and fail-fast when absent.
+            if let Err(e) = mcp_service::rebuild_registry_into_state(state).await {
+                state.emit_log("mcp", &format!("rebuild: {e}")).await;
+            }
             let cont = flag_true(args, "continue");
             if cont {
                 if let Some(s) = resume_session(state) {
@@ -288,6 +284,14 @@ async fn dispatch_stateful(
             // One-shot `pengine ask` should still create/persist a CLI session
             // so token accounting and memory-aware routing are consistent.
             handlers::ask_in_session(state, &text, true).await
+        }
+        "compact" => {
+            // Always load the most recent saved session so compact works from
+            // one-shot CLI mode (not only from the interactive REPL).
+            if let Some(s) = resume_session(state) {
+                *state.cli_session.write().await = Some(s);
+            }
+            handlers::compact_session(state).await
         }
         other => CliReply::error(format!("unknown subcommand `{other}`")),
     }
@@ -389,6 +393,7 @@ fn cli_subcommand_audit_summary(
                 let _ = write!(out, " {}", truncate_audit_str(&text, 800));
             }
         }
+        "compact" => {}
         _ => out.push_str(" …"),
     }
     out
