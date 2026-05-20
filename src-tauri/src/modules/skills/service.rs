@@ -255,7 +255,6 @@ pub fn user_message_suggests_weather(user_message: &str) -> bool {
 }
 
 /// Returns skill-level hint-gate needles from the skill's own `hint_allow_substrings` field.
-/// Skills that have no `hint_allow_substrings` set pass the gate unconditionally (always included).
 /// This function exists for callers that want the needles without a full `Skill` struct; it
 /// always returns `None` here — all gating is driven by `Skill::hint_allow_substrings`.
 pub fn default_hint_needles_for_slug(_slug: &str) -> Option<&'static [&'static str]> {
@@ -263,7 +262,14 @@ pub fn default_hint_needles_for_slug(_slug: &str) -> Option<&'static [&'static s
 }
 
 /// Whether `skill` may appear in the skills system-prompt fragment for this turn.
-/// `cron_pins_skills` is true when the caller already restricted to an explicit slug list (cron).
+///
+/// Decision order:
+/// 1. Cron pinned-run → always include.
+/// 2. `hint_allow_substrings` non-empty → include only on keyword match.
+/// 3. `mandatory: true` → always include (cross-domain / persona skills).
+/// 4. Otherwise → **exclude** (avoids injecting unrelated skills every turn).
+///
+/// `cron_pins_skills` is true when the caller already restricted to an explicit slug list.
 fn skill_passes_hint_gate(
     skill: &Skill,
     user_message: Option<&str>,
@@ -289,7 +295,8 @@ fn skill_passes_hint_gate(
             Some(m) => needles.iter().any(|n| user_message_needle_match(m, n)),
         };
     }
-    true
+    // No keywords configured → only include when explicitly marked mandatory.
+    skill.mandatory
 }
 
 /// Build a system-prompt fragment describing the enabled skills so the agent
@@ -511,6 +518,10 @@ pub fn parse_skill(slug: &str, raw: &str, origin: SkillOrigin) -> Result<Skill, 
         requires: fields.get_list("requires"),
         brave_allow_substrings: fields.get_list("brave_allow_substrings"),
         hint_allow_substrings: fields.get_list("hint_allow_substrings"),
+        mandatory: fields
+            .get("mandatory")
+            .and_then(|v| v.parse::<bool>().ok())
+            .unwrap_or(false),
         origin,
         mandatory_markdown: None,
         enabled: true,
@@ -588,9 +599,9 @@ fn skill_triggers_brave_web_search(skill: &Skill, user_message: &str) -> bool {
     {
         return false;
     }
-    if !skill_passes_hint_gate(skill, Some(user_message), false) {
-        return false;
-    }
+    // brave_allow_substrings / tags act as the keyword gate here;
+    // skill_passes_hint_gate is not used so that keyword-less brave skills
+    // are not wrongly blocked after the hint-gate default-deny change.
     let u = user_message.to_lowercase();
     let u_fold = german_ascii_fold(&u);
     for sub in &skill.brave_allow_substrings {
@@ -1227,7 +1238,9 @@ mod tests {
     fn weather_skill_appends_mandatory_from_mandatory_md() {
         let tmp = tempdir().unwrap();
         let fake_store = tmp.path().join("connection.json");
-        let weather_md = "---\nname: weather\ndescription: test\ntags: []\n---\n\n# x\n";
+        // mandatory:true so the skill passes the hint gate without needing a matching user message.
+        let weather_md =
+            "---\nname: weather\ndescription: test\ntags: []\nmandatory: true\n---\n\n# x\n";
         let mandatory = "**MANDATORY for skill:weather:** use wttr.in; Open-Meteo retry with countryCode; see How to answer.\n";
         write_custom_skill(&fake_store, "weather", weather_md, Some(mandatory)).unwrap();
         let hint = skills_prompt_hint(&fake_store);
@@ -1287,8 +1300,8 @@ mod tests {
     fn skills_hint_orders_weather_before_alphabetically_earlier_slugs() {
         let tmp = tempdir().unwrap();
         let fake_store = tmp.path().join("connection.json");
-        let other = "---\nname: AAA\ndescription: o\ntags: []\n---\n\naaa\n";
-        let weather_md = "---\nname: weather\ndescription: w\ntags: []\n---\n\nww\n";
+        let other = "---\nname: AAA\ndescription: o\ntags: []\nhint_allow_substrings: [wetter, weather]\n---\n\naaa\n";
+        let weather_md = "---\nname: weather\ndescription: w\ntags: []\nhint_allow_substrings: [wetter, weather]\n---\n\nww\n";
         write_custom_skill(&fake_store, "arch-other", other, None).unwrap();
         write_custom_skill(&fake_store, "weather", weather_md, None).unwrap();
         let hint = skills_prompt_hint_for_turn(&fake_store, Some("Wetter in Wien"), None);
@@ -1396,11 +1409,27 @@ mod tests {
         let b = "---\nname: B\ndescription: d\ntags: []\n---\n\nb\n";
         write_custom_skill(&fake_store, "skill-a", a, None).unwrap();
         write_custom_skill(&fake_store, "skill-b", b, None).unwrap();
+        // Use position lookup rather than [0] — bundled skills may sort before the custom ones.
         let alpha = list_skills(&fake_store);
-        assert_eq!(alpha[0].slug, "skill-a");
+        let pa = alpha
+            .iter()
+            .position(|s| s.slug == "skill-a")
+            .expect("skill-a");
+        let pb = alpha
+            .iter()
+            .position(|s| s.slug == "skill-b")
+            .expect("skill-b");
+        assert!(pa < pb, "skill-a should precede skill-b in default order");
         set_skill_slug_order(&fake_store, &["skill-b".into(), "skill-a".into()]).unwrap();
         let re = list_skills(&fake_store);
-        assert_eq!(re[0].slug, "skill-b");
-        assert_eq!(re[1].slug, "skill-a");
+        let rb = re
+            .iter()
+            .position(|s| s.slug == "skill-b")
+            .expect("skill-b");
+        let ra = re
+            .iter()
+            .position(|s| s.slug == "skill-a")
+            .expect("skill-a");
+        assert!(rb < ra, "skill-b should precede skill-a after order change");
     }
 }

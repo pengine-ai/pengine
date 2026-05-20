@@ -41,6 +41,9 @@ pub fn classify_line(line: &str) -> RouterOutcome<'_> {
             name: cmd.name,
             rest: tail,
         },
+        // /nothink and /think are model directives stripped by run_turn — pass
+        // the full original line through as an agent message, not an error.
+        None if name == "nothink" || name == "think" => RouterOutcome::Agent(trimmed),
         None => RouterOutcome::Unknown(name),
     }
 }
@@ -86,5 +89,19 @@ mod tests {
             classify_line("/deploy --dry-run"),
             RouterOutcome::Unknown("deploy")
         );
+    }
+
+    #[test]
+    fn nothink_and_think_pass_through_as_agent() {
+        // Model directives handled by run_turn — must not surface as errors.
+        assert_eq!(
+            classify_line("/nothink say hi"),
+            RouterOutcome::Agent("/nothink say hi")
+        );
+        assert_eq!(
+            classify_line("/think solve this"),
+            RouterOutcome::Agent("/think solve this")
+        );
+        assert_eq!(classify_line("/nothink"), RouterOutcome::Agent("/nothink"));
     }
 }

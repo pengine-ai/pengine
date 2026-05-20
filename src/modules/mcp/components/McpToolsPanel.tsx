@@ -8,6 +8,7 @@ import {
   type McpTool,
   type ServerEntry,
 } from "..";
+import { fetchToolCatalog } from "../../toolengine";
 import { useRegistryChanged } from "../../../shared/useRegistryChanged";
 import { AddServerForm } from "./AddServerForm";
 import { McpServerCard } from "./McpServerCard";
@@ -38,6 +39,8 @@ export function McpToolsPanel() {
   const [serversError, setServersError] = useState<string | null>(null);
   const [toolsLoading, setToolsLoading] = useState(true);
   const [serversLoading, setServersLoading] = useState(true);
+  // server-key → catalog command count (e.g. "te_pengine-shell" → 19)
+  const [catalogCounts, setCatalogCounts] = useState<Map<string, number>>(new Map());
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [editingName, setEditingName] = useState<string | null>(null);
@@ -110,7 +113,7 @@ export function McpToolsPanel() {
     const loadServersOnce = async () => {
       const sId = ++serversSeqRef.current;
       setServersLoading(true);
-      const s = await fetchMcpServers();
+      const [s, cat] = await Promise.all([fetchMcpServers(), fetchToolCatalog(5000)]);
       if (cancelledRef.current) return;
       if (sId !== serversSeqRef.current) return;
       setServersLoading(false);
@@ -119,6 +122,14 @@ export function McpToolsPanel() {
         setServersError(null);
       } else {
         setServersError("Could not load MCP tools");
+      }
+      if (cat) {
+        const m = new Map<string, number>();
+        for (const t of cat) {
+          const key = `te_${t.id.replace(/\//g, "-")}`;
+          m.set(key, t.commands.length);
+        }
+        setCatalogCounts(m);
       }
     };
 
@@ -243,6 +254,7 @@ export function McpToolsPanel() {
                   name={name}
                   entry={entry}
                   tools={tools ?? []}
+                  catalogCommandCount={catalogCounts.get(name) ?? 0}
                   busy={busy}
                   editingName={editingName}
                   onSave={async (serverName, serverEntry) => {

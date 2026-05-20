@@ -154,6 +154,9 @@
             { "name": "text", "description": "The prompt", "takesValue": true, "index": 1 },
             { "name": "continue", "description": "Resume the most recent saved REPL session" }
           ]
+        },
+        "compact": {
+          "description": "Summarize old turns into compact memory; loads the most recent saved session"
         }
       }
     }

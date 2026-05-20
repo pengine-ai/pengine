@@ -126,6 +126,10 @@ pub struct ToolEntry {
     /// for required secrets like `BRAVE_API_KEY` that must reach the MCP server at runtime.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub passthrough_env: Vec<String>,
+    /// Static key=value env vars injected into the container unconditionally. Use for
+    /// MCP-server configuration that cannot come from the keychain (e.g. timeout tuning).
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub static_env: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

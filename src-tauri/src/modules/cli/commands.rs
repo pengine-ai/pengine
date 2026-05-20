@@ -83,6 +83,21 @@ pub const COMMANDS: &[NativeCommand] = &[
             "Usage: pengine ask \"<prompt>\"\n\nRuns one agent turn. In REPL, free text without a leading `/` is the same\npath. Prefix with /think or /nothink to override reasoning mode.\n\nFile mentions: tokens like @path/to/file are inlined (capped at 64 KB)\nbefore the prompt is sent.",
     },
     NativeCommand {
+        name: "new",
+        summary: "Start a new session (optional name). Saves the current session first.",
+        details: "Usage: /new [name]\n\nShortcut for `/session new [name]`. Creates a fresh conversation\ncontext and optionally names it for later `/session switch`.",
+    },
+    NativeCommand {
+        name: "retry",
+        summary: "Re-run the last user message with a fresh agent turn.",
+        details: "Usage: /retry\n\nRepeats the most recent user message. Useful when the model\ngave an unsatisfying answer and you want a second attempt.",
+    },
+    NativeCommand {
+        name: "search",
+        summary: "Case-insensitive search through the current session's turn history.",
+        details: "Usage: /search <query>\n\nSearches user messages and assistant replies in the active\nsession. Returns matching snippets with turn numbers.",
+    },
+    NativeCommand {
         name: "compact",
         summary: "Summarize old session turns into a compact memory (REPL-only).",
         details: "Usage: /compact\n\n\
@@ -100,6 +115,7 @@ pub const COMMANDS: &[NativeCommand] = &[
                   /session switch <name-or-id>   # resume a saved session\n       \
                   /session rename <name>          # name or rename the active session\n       \
                   /session delete <name-or-id>   # delete a saved session from disk\n       \
+                  /session prune                 # delete all unnamed sessions\n       \
                   /session help                  # show all session subcommands\n\n\
                   Sessions persist across restarts. Each session keeps a turn history and\n\
                   a compacted summary for context. /session switch saves the current session\n\

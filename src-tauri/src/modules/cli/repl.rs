@@ -19,7 +19,7 @@ use rustyline::highlight::Highlighter;
 use rustyline::hint::{Hint, Hinter};
 use rustyline::history::FileHistory;
 use rustyline::validate::Validator;
-use rustyline::{CompletionType, Config, Context, Editor, Helper};
+use rustyline::{CompletionType, Config, Context, Editor, ExternalPrinter, Helper};
 use std::borrow::Cow;
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -264,38 +264,9 @@ store:     {}{}",
         }
     }
 
-    // Best-effort MCP warmup so /tools and free-text /ask land with tools
-    // available. Failure is reported but non-fatal — some REPL commands don't
-    // need MCP (e.g. /config, /status).
-    //
-    // Important UX guard: some MCP servers can take minutes to initialize
-    // (e.g. cold container/image startup). Don't block the REPL prompt on that;
-    // continue warmup in background when startup takes too long.
-    match tokio::time::timeout(
-        Duration::from_secs(8),
-        mcp_service::rebuild_registry_into_state(state),
-    )
-    .await
-    {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => {
-            sink.render(&CliReply::error(format!("mcp warmup skipped: {e}")));
-        }
-        Err(_) => {
-            sink.render(&CliReply::text(
-                "mcp warmup is still running in background; the prompt is ready now.",
-            ));
-            let bg_state = state.clone();
-            tauri::async_runtime::spawn(async move {
-                if let Err(e) = mcp_service::rebuild_registry_into_state(&bg_state).await {
-                    bg_state
-                        .emit_log("mcp", &format!("background warmup failed: {e}"))
-                        .await;
-                }
-            });
-        }
-    }
-
+    // Build the editor before MCP warmup so we can extract an ExternalPrinter.
+    // ExternalPrinter lets a background task print above the readline prompt
+    // without corrupting the user's current input line.
     let history_path = history_path(&state.store_path);
     let mut rl = match build_editor() {
         Ok(r) => r,
@@ -309,6 +280,69 @@ store:     {}{}",
     } else {
         (PROMPT_PLAIN, PROMPT_CONT_PLAIN)
     };
+
+    // ExternalPrinter lets the background warmup task notify the user safely.
+    let ext_printer = rl.create_external_printer().ok();
+
+    // Best-effort MCP warmup so /tools and agent turns land with tools available.
+    // Failure is non-fatal — some REPL commands don't need MCP (/config, /status).
+    //
+    // UX guard: cold Podman/container startup can take 30+ seconds. Don't block
+    // the prompt on that; continue in background when the timeout fires.
+    match tokio::time::timeout(
+        Duration::from_secs(8),
+        mcp_service::rebuild_registry_into_state(state),
+    )
+    .await
+    {
+        Ok(Ok(())) => {
+            let n = state.mcp.read().await.tool_names().len();
+            if tty {
+                eprintln!("  \x1b[2m⎿  MCP ready · {n} tools\x1b[0m");
+            }
+        }
+        Ok(Err(e)) => {
+            sink.render(&CliReply::error(format!("mcp warmup: {e}")));
+        }
+        Err(_) => {
+            // Timeout — show what connected so far and continue in background.
+            let n_now = state.mcp.read().await.tool_names().len();
+            if tty {
+                let connected = mcp_connected_stdio_labels(state).await;
+                let server_line = if connected.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        "\n     \x1b[2mConnected: {}\x1b[0m",
+                        connected.join("  ·  ")
+                    )
+                };
+                eprintln!(
+                    "  \x1b[2m⎿  MCP: {n_now} tools ready · background servers still connecting…{server_line}\x1b[0m"
+                );
+            } else {
+                sink.render(&CliReply::text(
+                    "mcp warmup is still running in background; the prompt is ready now.",
+                ));
+            }
+            let bg_state = state.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = mcp_service::rebuild_registry_into_state(&bg_state).await {
+                    bg_state
+                        .emit_log("mcp", &format!("background warmup failed: {e}"))
+                        .await;
+                    if let Some(mut ep) = ext_printer {
+                        let _ = ep.print(format!("  \x1b[2m⎿  MCP warmup error: {e}\x1b[0m"));
+                    }
+                    return;
+                }
+                let n = bg_state.mcp.read().await.tool_names().len();
+                if let Some(mut ep) = ext_printer {
+                    let _ = ep.print(format!("  \x1b[2m⎿  MCP ready · {n} tools\x1b[0m"));
+                }
+            });
+        }
+    }
 
     let mut last_interrupt: Option<Instant> = None;
 
@@ -464,6 +498,26 @@ fn format_project_banner_lines(project: Option<&session::ProjectContext>) -> Str
         out.push_str(&format!("\nbranch:    {branch}"));
     }
     out
+}
+
+/// Returns display labels for non-native MCP providers that are currently
+/// registered. Strips the "te_pengine-" prefix so labels stay short.
+async fn mcp_connected_stdio_labels(state: &AppState) -> Vec<String> {
+    use crate::modules::mcp::registry::Provider;
+    state
+        .mcp
+        .read()
+        .await
+        .providers()
+        .iter()
+        .filter(|p| matches!(p, Provider::Mcp(_)))
+        .map(|p| {
+            p.server_name()
+                .strip_prefix("te_pengine-")
+                .unwrap_or(p.server_name())
+                .to_string()
+        })
+        .collect()
 }
 
 fn abbreviate_home(p: &std::path::Path) -> String {

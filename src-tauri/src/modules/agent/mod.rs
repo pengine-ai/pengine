@@ -16,6 +16,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::{atomic::AtomicU64, Arc};
 use std::time::{Duration, Instant};
+use tokio::sync::mpsc::UnboundedSender;
 
 /// Tool rounds + at least one completion-only step. Research flows (sitemap + several
 /// `fetch` calls) otherwise exhaust the loop and fall through to summarize, which
@@ -268,6 +269,7 @@ async fn run_task_spawn_inline(
     let started = std::time::Instant::now();
     // `Box::pin` breaks the cycle [run_model_turn → run_task_spawn_inline → run_system_turn → run_model_turn]
     // that would otherwise produce an infinitely-sized future.
+    // Subagents never stream to the terminal — they run in the background.
     let result = Box::pin(run_system_turn(state, &prompt, None)).await;
     state.task_spawn_depth.fetch_sub(1, Ordering::AcqRel);
 
@@ -465,7 +467,14 @@ fn memory_hint(session_active: Option<&str>, diary_active: bool) -> String {
         }
         None => String::new(),
     };
-    format!("\nMemory server ready. Use read tools for prior context.{status}")
+    format!(
+        "\nKnowledge graph ready.{status} \
+         Use `read_graph` / `search_nodes` / `open_nodes` to recall stored facts. \
+         **When asked to learn, remember, document, or build knowledge about a project or topic:** \
+         read the relevant files/docs first, then call `create_entities` to store named entities \
+         and `add_observations` to record key details — do this in the **same turn** you read \
+         the source material, not after."
+    )
 }
 
 fn tool_call_arguments(call: &serde_json::Value) -> serde_json::Value {
@@ -827,7 +836,7 @@ pub async fn run_system_turn(
     skills_slug_filter: Option<&[String]>,
 ) -> Result<TurnResult, String> {
     let think = decide_think(None, prompt).enabled();
-    let result = run_model_turn(state, prompt, think, skills_slug_filter, None).await?;
+    let result = run_model_turn(state, prompt, think, skills_slug_filter, None, None).await?;
     let body = result.text.trim();
     if !body.is_empty() {
         let tag = match result.source {
@@ -847,6 +856,7 @@ pub async fn run_turn(
     state: &AppState,
     user_message: &str,
     live_out_tokens: Option<Arc<AtomicU64>>,
+    text_chunk_tx: Option<UnboundedSender<String>>,
 ) -> Result<TurnResult, String> {
     let (think_override, user_message) = parse_think_override(user_message);
 
@@ -870,8 +880,15 @@ pub async fn run_turn(
         .emit_log("run", &format!("think:{}", think.label()))
         .await;
 
-    let mut result =
-        run_model_turn(state, user_message, think.enabled(), None, live_out_tokens).await?;
+    let mut result = run_model_turn(
+        state,
+        user_message,
+        think.enabled(),
+        None,
+        live_out_tokens,
+        text_chunk_tx,
+    )
+    .await?;
     result.think_enabled = think.enabled();
     spawn_memory_save(state, user_message, &result.text).await;
     Ok(result)
@@ -1091,6 +1108,23 @@ async fn build_system_prompt(
         return format!("{PENGINE_OUTPUT_CONTRACT_LEAD}Answer concisely.");
     }
 
+    // Compact prompt when only native tools are connected (no fetch/filesystem/git tools).
+    // Skips the verbose fetch/search/repository instructions that add ~600 tokens of dead weight.
+    let native_only = state.mcp.read().await.has_only_native_providers();
+    if native_only {
+        let skills_raw = skills::skills_prompt_hint_for_turn(
+            &state.store_path,
+            Some(user_message),
+            skills_slug_filter,
+        );
+        let skills_cap = *state.skills_hint_max_bytes.read().await as usize;
+        let (skills_hint, _) = skills::limit_skills_hint_bytes(skills_raw, skills_cap);
+        return format!(
+            "{PENGINE_OUTPUT_CONTRACT_LEAD}Answer from training knowledge. \
+             Use tools when they directly serve the request. Be concise.{skills_hint}"
+        );
+    }
+
     let fs_hint = {
         // Gate on whether the filesystem MCP server is actually connected — checking
         // `workspace_roots` alone wrongly advertises `directory_tree`/`list_directory`
@@ -1250,6 +1284,27 @@ async fn build_system_prompt(
         }
     };
 
+    // Warn the model when shell execution is not available (container still starting / not
+    // installed). Without this note the model loops with task_spawn trying to delegate a
+    // shell task to subagents that also have no shell access.
+    let shell_unavailable_hint = {
+        let has_shell = {
+            let reg = state.mcp.read().await;
+            reg.tool_names().iter().any(|n| {
+                let short = n.rsplit_once('.').map(|(_, t)| t).unwrap_or(n.as_str());
+                short.eq_ignore_ascii_case("shell_execute")
+            })
+        };
+        if has_shell {
+            String::new()
+        } else {
+            "\n**Shell unavailable:** `shell_execute` is not in your tool list right now (the shell MCP server is still starting or not installed). \
+             If the user asks you to run a shell command, respond directly: tell them the shell server is not ready yet and ask them to try again in a minute. \
+             Do NOT use `task_spawn` as a workaround — subagents have the same tool limitations."
+                .to_string()
+        }
+    };
+
     format!(
         "{PENGINE_OUTPUT_CONTRACT_LEAD}Assistant with tools. Use tools to act on the user's repository (read, edit, diff, commit) or to fetch **live/current data the user cannot know from training** (weather, prices, current events, real-time status); otherwise answer directly from training knowledge. \
          **Do NOT call `fetch` for:** programming language syntax, code examples, algorithms, library APIs, design patterns, software concepts, math, science, or any topic covered by training data — answer those immediately without tools. \
@@ -1257,7 +1312,7 @@ async fn build_system_prompt(
          `brave_web_search` is only in the tool list when the user asked to search the open web (e.g. \"search the internet\", \"suche im Internet\", \"suche nach ...\") or a skill's `requires` matches this turn — otherwise prefer **`fetch`** on any `http(s)` URL you have (including from the user). \
          At most one `brave_web_search` per user message when it is available. \
          After an allowed search, the host may auto-`fetch` several top result URLs — use those excerpts and end with a sources block (after `---`) using the word for \"References\" in the user's language (e.g. \"Quellen\" in German, \"References\" in English, \"Sources\" in French) with a numbered URL list. Only add this block when the reply actually used web fetches or search results — never for code reviews, filesystem reads, or answers from training knowledge. \
-         **Skill discipline:** each skill in the list below defines fetch URLs for a specific domain. Only call those URLs when the user message is actually about that skill's topic.{fs_hint}{code_edit_hint}{scaffold_hint}{mem_hint}{weather_directive}{skills_hint}"
+         **Skill discipline:** each skill in the list below defines fetch URLs for a specific domain. Only call those URLs when the user message is actually about that skill's topic.{fs_hint}{code_edit_hint}{scaffold_hint}{shell_unavailable_hint}{mem_hint}{weather_directive}{skills_hint}"
     )
 }
 
@@ -1267,6 +1322,7 @@ async fn run_model_turn(
     think: bool,
     skills_slug_filter: Option<&[String]>,
     live_out_tokens: Option<Arc<AtomicU64>>,
+    text_chunk_tx: Option<UnboundedSender<String>>,
 ) -> Result<TurnResult, String> {
     let plan_mode = *state.plan_mode.read().await;
     let repo_write_followthrough =
@@ -1405,6 +1461,11 @@ async fn run_model_turn(
             repo_write_followthrough,
         );
         chat_opts.live_out_tokens = live_out_tokens.clone();
+        // Only stream text on first step (step 0) or post-tool synthesis.
+        // Tool-call steps produce empty content so sending is a no-op, but we
+        // only wire the sender when not injecting a post-tool reminder (tool rounds
+        // inject ephemeral system messages that distort the stream position).
+        chat_opts.text_chunk_tx = text_chunk_tx.clone();
 
         let inject_post_tool = post_tool;
         if inject_post_tool {

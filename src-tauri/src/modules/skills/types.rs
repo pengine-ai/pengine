@@ -43,6 +43,11 @@ pub struct Skill {
     /// skills get a built-in default keyword list when this is empty.
     #[serde(default)]
     pub hint_allow_substrings: Vec<String>,
+    /// Always inject this skill regardless of `hint_allow_substrings`. Use for cross-domain
+    /// skills that should appear on every turn (e.g. a custom persona or language instruction).
+    /// Skills without `hint_allow_substrings` and `mandatory: false` are excluded by default.
+    #[serde(default)]
+    pub mandatory: bool,
     #[serde(default)]
     pub origin: SkillOrigin,
     /// Optional extra rules from `mandatory.md` next to `SKILL.md` (also returned for custom skills in the API).

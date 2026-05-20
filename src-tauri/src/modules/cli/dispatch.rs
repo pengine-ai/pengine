@@ -134,6 +134,24 @@ async fn dispatch_native(
             handlers::logs(state, tail, follow).await
         }
         "ask" => handlers::ask_in_session(state, rest, !ctx.telegram_surface).await,
+        "new" => {
+            if ctx.telegram_surface {
+                return CliReply::error("new: not supported over Telegram.");
+            }
+            handlers::session_cmd(state, "new", rest).await
+        }
+        "retry" => {
+            if ctx.telegram_surface {
+                return CliReply::error("retry: not supported over Telegram.");
+            }
+            handlers::retry(state).await
+        }
+        "search" => {
+            if ctx.telegram_surface {
+                return CliReply::error("search: not supported over Telegram.");
+            }
+            handlers::search(state, rest).await
+        }
         "compact" => {
             if ctx.telegram_surface {
                 return CliReply::error("compact: not supported over Telegram.");

@@ -293,6 +293,15 @@ pub fn normalize_assistant_message_content(raw: &str, json_object_reply: bool) -
         return inner.trim().to_string();
     }
 
+    // Salvage content when the model emitted an unclosed <pengine_reply> (e.g. the
+    // generation was cut short before the closing tag). Extract whatever follows the
+    // opening tag; return empty string if nothing follows (lone opening tag).
+    if let Some(pos) = s.find("<pengine_reply>") {
+        let after = s[pos + "<pengine_reply>".len()..].trim();
+        let without_plan = strip_all_named_blocks(after, "pengine_plan");
+        return block_if_still_meta_scratchpad(without_plan.trim().to_string());
+    }
+
     // Some reasoning models wrap only the final reply in `<answer>…</answer>`.
     if let Some(inner) = last_tag_inner(&s, "answer") {
         return block_if_still_meta_scratchpad(inner);
@@ -504,6 +513,25 @@ mod tests {
     fn normalize_assistant_prefers_pengine_reply() {
         let s = "<pengine_plan>notes</pengine_plan><pengine_reply>Hello</pengine_reply>";
         assert_eq!(normalize_assistant_message_content(s, false), "Hello");
+    }
+
+    #[test]
+    fn normalize_assistant_salvages_unclosed_pengine_reply() {
+        // Model cut off before emitting the closing tag.
+        let s = "<pengine_reply>Roll 1: 3\nRoll 2: 5\nSum: 8";
+        assert_eq!(
+            normalize_assistant_message_content(s, false),
+            "Roll 1: 3\nRoll 2: 5\nSum: 8"
+        );
+    }
+
+    #[test]
+    fn normalize_assistant_lone_opening_tag_yields_empty() {
+        // Model emitted only the opening tag with nothing after it.
+        assert_eq!(
+            normalize_assistant_message_content("<pengine_reply>", false),
+            ""
+        );
     }
 
     #[test]
